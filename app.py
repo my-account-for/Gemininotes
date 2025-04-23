@@ -1,6 +1,4 @@
--pro-exp-03-25",
-}
-DEFAULT_MODEL_NAME = "Gemini # --- Required Imports ---
+# --- Required Imports ---
 import streamlit as st
 import google.generativeai as genai
 import os
