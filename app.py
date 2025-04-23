@@ -19,12 +19,68 @@ st.set_page_config(
 # --- Custom CSS Injection ---
 st.markdown("""
 <style>
-    /* ... Keep previous CSS ... */
-    footer { text-align: center; color: #9CA3AF; font-size: 0.8rem; padding: 2rem 0 1rem 0; }
+    /* Overall App Background */
+    .stApp { background: linear-gradient(to bottom right, #F0F2F6, #FFFFFF); }
+    /* Main content area */
+    .main .block-container { padding: 2rem; max-width: 1000px; margin: auto; }
+    /* General Container Styling */
+    div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"][style*="border"] {
+         background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 0.75rem;
+         padding: 1.5rem; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); margin-bottom: 1.5rem; }
+    /* Headers */
+    h1 { color: #111827; font-weight: 700; text-align: center; margin-bottom: 0.5rem; }
+    h2, h3 { color: #1F2937; font-weight: 600; border-bottom: 1px solid #E5E7EB; padding-bottom: 0.4rem; margin-bottom: 1rem; }
+    /* App Subtitle - Adjust selector index if layout changes */
+    .main .block-container > div:nth-child(3) > div > div > div > p { text-align: center; color: #4B5563; font-size: 1.1rem; margin-bottom: 2rem; }
+    /* Input Widgets */
+    .stTextInput textarea, .stFileUploader div[data-testid="stFileUploaderDropzone"], .stTextArea textarea {
+        border-radius: 0.5rem; border: 1px solid #D1D5DB; background-color: #F9FAFB;
+        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05); transition: all 0.2s ease; }
+    .stTextInput textarea:focus, .stFileUploader div[data-testid="stFileUploaderDropzone"]:focus-within, .stTextArea textarea:focus {
+        border-color: #007AFF; box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05), 0 0 0 3px rgba(0, 122, 255, 0.2);
+        background-color: #FFFFFF; }
+    .stFileUploader p { font-size: 0.95rem; color: #4B5563; }
+    /* Radio Buttons */
+    div[role="radiogroup"] > label { background-color: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 0.5rem;
+        padding: 0.6rem 1rem; margin-right: 0.5rem; transition: all 0.2s ease; box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+        display: inline-block; margin-bottom: 0.5rem; }
+    div[role="radiogroup"] label:hover { border-color: #9CA3AF; }
+    div[role="radiogroup"] input[type="radio"]:checked + div { background-color: #EFF6FF; border-color: #007AFF; color: #005ECB;
+        font-weight: 500; box-shadow: 0 1px 3px rgba(0, 122, 255, 0.1); }
+    /* Checkbox styling */
+    .stCheckbox { margin-top: 1rem; padding: 0.5rem; background-color: #F9FAFB; border-radius: 0.5rem; }
+    .stCheckbox label span { font-weight: 500; color: #374151; }
+    /* Selectbox Styling */
+    .stSelectbox > div { border-radius: 0.5rem; border: 1px solid #D1D5DB; background-color: #F9FAFB; }
+    .stSelectbox > div:focus-within { border-color: #007AFF; box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.2); }
+    /* Button Styling */
+    .stButton > button { border-radius: 0.5rem; padding: 0.75rem 1.5rem; font-weight: 600; transition: all 0.2s ease-in-out; border: none; width: 100%; }
+    .stButton > button[kind="primary"] { background-color: #007AFF; color: white; box-shadow: 0 4px 6px rgba(0, 122, 255, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08); }
+    .stButton > button[kind="primary"]:hover { background-color: #005ECB; box-shadow: 0 7px 14px rgba(0, 122, 255, 0.1), 0 3px 6px rgba(0, 0, 0, 0.08); transform: translateY(-1px); }
+    .stButton > button[kind="primary"]:focus { box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.4); outline: none; }
+    .stButton > button:disabled, .stButton > button[kind="primary"]:disabled { background-color: #D1D5DB; color: #6B7280; box-shadow: none; transform: none; cursor: not-allowed; }
+     /* Secondary Button styling for Clear */
+    .stButton>button[type="secondary"], .stButton>button.secondary-button { background-color: #F3F4F6; color: #1F2937; border: 1px solid #D1D5DB;
+        width: auto; padding: 0.5rem 1rem; margin-right: 0.5rem; font-weight: 500; }
+    .stButton>button[type="secondary"]:hover, .stButton>button.secondary-button:hover { background-color: #E5E7EB; border-color: #9CA3AF; }
+     /* Download Buttons */
+    .stDownloadButton > button { border-radius: 0.5rem; padding: 0.6rem 1.2rem; font-weight: 500; background-color: #F3F4F6; color: #1F2937; border: 1px solid #D1D5DB; transition: background-color 0.2s ease-in-out; width: auto; margin-top: 0; margin-right: 0.5rem;} /* Add margin-right */
+    .stDownloadButton > button:hover { background-color: #E5E7EB; border-color: #9CA3AF; }
+    /* Output Area Styling */
+    .output-container { background-color: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 0.75rem; padding: 1.5rem; margin-top: 1.5rem; min-height: 150px; }
+    .output-container .stMarkdown { background-color: transparent; border: none; padding: 0; color: #374151; font-size: 1rem; line-height: 1.6; }
+    .output-container .stMarkdown h3, .output-container .stMarkdown h4, .output-container .stMarkdown strong { color: #111827; font-weight: 600; }
+    .output-container .stAlert { margin-top: 1rem; border-radius: 0.5rem; }
+    .output-container .initial-prompt { color: #6B7280; font-style: italic; text-align: center; padding-top: 2rem; }
+    /* Prompt Edit Area */
+    #prompt-edit-area textarea { font-family: monospace; font-size: 0.9rem; line-height: 1.4; background-color: #FDFDFD; }
+    /* Footer */
+    footer { text-align: center; color: #9CA3AF; font-size: 0.8rem; padding-top: 2rem; padding-bottom: 1rem; }
     footer a { color: #6B7280; text-decoration: none; }
     footer a:hover { color: #007AFF; text-decoration: underline; }
 </style>
 """, unsafe_allow_html=True)
+
 
 # --- Define Available Models & Meeting Types (Keep as is) ---
 AVAILABLE_MODELS = {
@@ -74,9 +130,14 @@ def create_expert_meeting_prompt(transcript, context=None):
         "You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.",
         "Generate detailed, factual notes from the provided meeting transcript.",
         "Follow this specific structure EXACTLY:", "\n**Structure:**",
-        "- **Opening overview or Expert background (Optional):** ...", "- **Q&A format:** ...",
-        "\n**Additional Instructions:** ...", "\n---",
-        (f"\n**MEETING TRANSCRIPT:**\n{transcript}\n---" if transcript else ""),
+        "- **Opening overview or Expert background (Optional):** If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple language. DO NOT summarize.",
+        "- **Q&A format:** Structure the main body STRICTLY in Question/Answer format.",
+        "  - **Questions:** Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).",
+        "  - **Answers:** Use bullet points directly below the question. Each bullet MUST be a complete sentence with one distinct fact. Capture ALL specifics (data, names, examples, $, %, etc.). DO NOT use sub-bullets or section headers within answers. DO NOT add interpretations, summaries, conclusions, or action items.",
+        "\n**Additional Instructions:**",
+        "- Accuracy is paramount. Capture ALL facts precisely.", "- Be clear and concise.",
+        "- Include ONLY information present in the transcript.", "- If a section (like Opening Overview) isn't present, OMIT it.",
+        "\n---", (f"\n**MEETING TRANSCRIPT:**\n{transcript}\n---" if transcript else ""),
     ]
     if context: prompt_parts.extend(["\n**ADDITIONAL CONTEXT:**\n", context, "\n---"])
     prompt_parts.append("\n**GENERATED NOTES:**\n"); return "\n".join(filter(None, prompt_parts))
@@ -84,8 +145,48 @@ def create_expert_meeting_prompt(transcript, context=None):
 def create_earnings_call_prompt(transcript, context=None):
     prompt_parts = [
         "You are a financial analyst tasked with summarizing an earnings call transcript. Your output MUST be structured notes.",
-        # ... (rest of detailed structure) ...
-        "\n**CRITICAL Instructions:** ...", "\n---",
+        "Analyze the entire transcript and extract key information, numerical data, guidance, strategic comments, and management sentiment.",
+        "Present the information using the EXACT headings and subheadings provided below. You MUST categorize all relevant comments under the correct heading.",
+        "\n**Mandatory Structure:**",
+        "- **Call Participants:** (List names and titles mentioned. If none mentioned, state 'Not specified')",
+        "- **Opening Remarks/CEO Statement:** (Summarize key themes, vision, achievements/challenges mentioned.)",
+        "- **Financial Highlights:** (List specific Revenue, Profitability, EPS, Margins, etc. Include numbers and comparisons (YoY/QoQ) EXACTLY as stated.)",
+        "- **Segment Performance:** (If discussed, detail performance by business unit, geography, or product line.)",
+        "- **Key Business Updates/Strategy:** (Summarize new initiatives, partnerships, market position, M&A activity discussed.)",
+        "\n**Industry-Specific Categorization (Apply ONLY ONE section based on company type identified from the transcript):**",
+        "\n  **>>> If IT Services Topics Discussed <<<**",
+        "    *(Scan the transcript for these specific topics and categorize comments STRICTLY under these subheadings)*",
+        "    - **Future Investments / Capital Allocation:** (List all mentions of R&D, technology spend, acquisitions, buybacks, dividends.)",
+        "    - **Talent Supply Chain:** (List all comments on hiring, attrition, utilization, training, location strategy.)",
+        "    - **Org Structure Changes:** (List any mentions of leadership changes, reorganizations.)",
+        "    - **Short-term Outlook & Demand:**",
+        "      - **Guidance:** (List specific quarterly/annual targets for revenue, margin, EPS, etc.)",
+        "      - **Order Booking / Pipeline:** (List comments on deal wins, TCV, book-to-bill, pipeline health.)",
+        "      - **Macro Impact:** (Summarize comments on economic slowdown effects, client spending changes.)",
+        "    - **Other Key IT Comments:** (List comments on Cloud, AI, digital transformation, major client verticals, etc.)",
+        "\n  **>>> If QSR (Quick Service Restaurant) Topics Discussed <<<**",
+         "    *(Scan the transcript for these specific topics and categorize comments STRICTLY under these subheadings)*",
+        "    - **Customer Proposition / Menu Strategy:** (List comments on new products, value offers, marketing, loyalty programs.)",
+        "    - **Business Update (Operations):** (List SSSG/Comps, Traffic, Average Check/Ticket, Price increases mentioned.)",
+        "    - **Unit Economics / Store Performance:** (List comments on restaurant margins, cost pressures like food/labor.)",
+        "    - **Store Network:** (List comments on store openings, closures, remodels, domestic/international strategy.)",
+        "    - **Other Key QSR Comments:** (List comments on digital sales, delivery, technology, drive-thru.)",
+        "  *(If neither IT nor QSR specific topics are dominant, OMIT this entire Industry-Specific section)*",
+        "\n- **Q&A Session Summary:**",
+        "  - Summarize key analyst questions and management's core responses.",
+        "  - Use this format STRICTLY: Q: [Concise Analyst Question Topic] / A: [Bulleted list of key points from management response]",
+        "  - Focus on new information or clarifications.",
+        "- **Guidance Summary (Reiterate/Confirm):** (Provide a final consolidated view of all forward-looking guidance mentioned.)",
+        "- **Closing Remarks:** (Summarize final key message, if any.)",
+        "\n**CRITICAL Instructions:**",
+        "- Adhere STRICTLY to the headings and subheadings defined above.",
+        "- Categorize every relevant point from the transcript under the appropriate heading.",
+        "- Extract direct quotes for impactful statements using quotation marks.",
+        "- Be factual and objective. DO NOT interpret or add external info.",
+        "- If a standard section (like Segment Performance) was not discussed, state 'Not discussed'.",
+        "- If neither IT nor QSR specific sections apply, OMIT that entire block.",
+        "- Ensure all numerical data is captured accurately.",
+        "\n---",
         (f"\n**EARNINGS CALL TRANSCRIPT:**\n{transcript}\n---" if transcript else ""),
     ]
     if context: prompt_parts.extend(["\n**ADDITIONAL CONTEXT:**\n", context, "\n---"])
@@ -121,44 +222,65 @@ def update_prompt_display_text():
     elif not st.session_state.view_edit_prompt_enabled and meeting_type != "Custom": st.session_state.current_prompt_text = ""
 
 def clear_all_state():
-    st.session_state.text_input = ""; st.session_state.pdf_uploader = None
-    st.session_state.audio_uploader = None; st.session_state.context_input = ""
-    st.session_state.add_context_enabled = False; st.session_state.current_prompt_text = ""
-    st.session_state.view_edit_prompt_enabled = False; st.session_state.generated_notes = None
-    st.session_state.edited_notes_text = ""; st.session_state.edit_notes_enabled = False
-    st.session_state.error_message = None; st.session_state.processing = False
+    # Reset selections and inputs
+    st.session_state.selected_meeting_type = DEFAULT_MEETING_TYPE
+    st.session_state.selected_model_display_name = DEFAULT_MODEL_NAME
+    st.session_state.input_method_radio = 'Paste Text'
+    st.session_state.text_input = ""
+    st.session_state.pdf_uploader = None
+    st.session_state.audio_uploader = None
+    st.session_state.context_input = ""
+    st.session_state.add_context_enabled = False
+    st.session_state.current_prompt_text = ""
+    st.session_state.view_edit_prompt_enabled = False
+    # Reset outputs
+    st.session_state.generated_notes = None
+    st.session_state.edited_notes_text = ""
+    st.session_state.edit_notes_enabled = False
+    st.session_state.error_message = None
+    st.session_state.processing = False
     st.session_state.suggested_filename = None
-    update_prompt_display_text(); st.toast("Inputs and outputs cleared!", icon="🧹")
+    st.session_state.uploaded_audio_info = None # Clear cloud ref
+    st.toast("Inputs and outputs cleared!", icon="🧹")
+    # Update prompt display based on cleared state
+    update_prompt_display_text()
+    # Note: File uploader widgets might visually retain the last file name
+    # until a new file is chosen or the page is fully refreshed.
+
 
 def generate_suggested_filename(notes_content, meeting_type):
     if not notes_content: return None
     try:
         st.session_state.generating_filename = True; st.toast("💡 Generating filename...", icon="⏳")
-        filename_model = genai.GenerativeModel("gemini-1.5-flash") # Use Flash for speed
+        filename_model = genai.GenerativeModel("gemini-1.5-flash")
         today_date = datetime.now().strftime("%Y%m%d")
         mt_cleaned = meeting_type.replace(" ", "")
-        filename_prompt = (f"Analyze meeting notes. Suggest filename: YYYYMMDD_ClientOrTopic_MeetingType. Use {today_date}. "
-                           f"Extract main client/topic. Use CamelCase/underscores. Type: '{mt_cleaned}'. "
-                           f"Examples: {today_date}_AcmeCorp_{mt_cleaned}, {today_date}_Pricing_{mt_cleaned}. "
-                           f"Output ONLY filename.\n\nNOTES:\n{notes_content[:1500]}")
-        response = filename_model.generate_content(filename_prompt, generation_config=filename_gen_config)
+        filename_prompt = (f"Analyze notes. Suggest filename: YYYYMMDD_ClientOrTopic_MeetingType. Use {today_date}. "
+                           f"Extract main client/topic. Use CamelCase/underscores. Type: '{mt_cleaned}'. Max 3 words for topic. "
+                           f"Examples: {today_date}_AcmeCorp_{mt_cleaned}, {today_date}_PricingStrategy_{mt_cleaned}. "
+                           f"Output ONLY filename string.\n\nNOTES:\n{notes_content[:1500]}")
+        response = filename_model.generate_content(filename_prompt, generation_config=filename_gen_config, safety_settings=safety_settings) # Apply safety
         if response and hasattr(response, 'text') and response.text:
             suggested_name = re.sub(r'[^\w\-.]', '_', response.text.strip())[:100]
-            if re.match(r"\d{8}_\w+_\w+", suggested_name):
-                st.toast(f"💡 Filename suggestion: {suggested_name}.txt/.md", icon="✅"); return suggested_name
-            else: st.warning("AI filename suggestion bad format.", icon="⚠️"); return None
+            if re.match(r"\d{8}_[\w\-\.]+_\w+", suggested_name): # Looser check for topic part
+                st.toast(f"💡 Filename suggestion ready!", icon="✅"); return suggested_name
+            else: st.warning(f"Filename suggestion '{suggested_name}' bad format.", icon="⚠️"); return None
+        elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+            st.warning(f"Filename gen blocked: {response.prompt_feedback.block_reason}", icon="⚠️") ; return None
         else: st.warning("Could not generate filename suggestion.", icon="⚠️"); return None
     except Exception as e: st.warning(f"Filename gen error: {e}", icon="⚠️"); return None
     finally: st.session_state.generating_filename = False
 
+
 # --- Streamlit App UI ---
-st.title("✨ SynthNotes AI"); st.markdown("...") # Keep UI structure
+st.title("✨ SynthNotes AI"); st.markdown("Instantly transform meeting recordings into structured, factual notes.")
 with st.container(border=True): # Input Section
     col_main_1, col_main_2 = st.columns([3, 1])
-    with col_main_1: col1a, col1b = st.columns(2) # Meeting Type & Model
-    with col1a: st.subheader("Meeting Details"); st.radio(label="Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type", horizontal=True, on_change=update_prompt_display_text)
-    with col1b: st.subheader("AI Model"); st.selectbox(label="Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_model_display_name", label_visibility="collapsed")
-    with col_main_2: st.subheader(""); st.button("🧹 Clear All", on_click=clear_all_state, use_container_width=True, type="secondary")
+    with col_main_1:
+        col1a, col1b = st.columns(2)
+        with col1a: st.subheader("Meeting Details"); st.radio(label="Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type", horizontal=True, on_change=update_prompt_display_text)
+        with col1b: st.subheader("AI Model"); st.selectbox(label="Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_model_display_name", label_visibility="collapsed")
+    with col_main_2: st.subheader(""); st.button("🧹 Clear All", on_click=clear_all_state, use_container_width=True, type="secondary") # Use secondary style
     st.divider(); st.subheader("Source Input")
     st.radio(label="Input type:", options=("Paste Text", "Upload PDF", "Upload Audio"), key="input_method_radio", horizontal=True, label_visibility="collapsed", on_change=update_prompt_display_text)
     input_type_ui = st.session_state.input_method_radio
@@ -166,10 +288,11 @@ with st.container(border=True): # Input Section
     elif input_type_ui == "Upload PDF": st.file_uploader("Upload PDF:", type="pdf", key="pdf_uploader")
     else: st.file_uploader("Upload Audio:", type=['wav','mp3','m4a','ogg','flac','aac'], key="audio_uploader")
     st.divider(); col3a, col3b = st.columns(2) # Optional Elements
-    with col3a: st.checkbox("Add Context", key="add_context_enabled", on_change=update_prompt_display_text); \
-                  if st.session_state.add_context_enabled: st.text_area("Context Details:", height=100, key="context_input", on_change=update_prompt_display_text, placeholder="Attendees...")
-    with col3b: \
-                  if st.session_state.selected_meeting_type != "Custom": st.checkbox("View/Edit Prompt", key="view_edit_prompt_enabled", on_change=update_prompt_display_text)
+    with col3a: # Context
+        st.checkbox("Add Context", key="add_context_enabled", on_change=update_prompt_display_text)
+        if st.session_state.add_context_enabled: st.text_area("Context Details:", height=100, key="context_input", on_change=update_prompt_display_text, placeholder="Attendees...")
+    with col3b: # View/Edit Prompt Checkbox
+        if st.session_state.selected_meeting_type != "Custom": st.checkbox("View/Edit Prompt", key="view_edit_prompt_enabled", on_change=update_prompt_display_text)
 
 # Prompt Area (Conditional)
 show_prompt_area = (st.session_state.view_edit_prompt_enabled and st.session_state.selected_meeting_type != "Custom") or \
@@ -213,7 +336,7 @@ if generate_button:
 
 if st.session_state.processing and not st.session_state.generating_filename:
     try: # Outer try
-        # Retrieve state
+        # Retrieve state & inputs
         meeting_type = st.session_state.selected_meeting_type
         selected_model_id = AVAILABLE_MODELS[st.session_state.selected_model_display_name]
         view_edit_enabled = st.session_state.view_edit_prompt_enabled
@@ -222,9 +345,9 @@ if st.session_state.processing and not st.session_state.generating_filename:
         actual_input_type, transcript_data, audio_file_obj = get_current_input_data()
 
         # Validation
-        if actual_input_type == "Paste Text" and not transcript_data: st.session_state.error_message = "⚠️ Text area is empty."
-        elif actual_input_type == "Upload PDF" and not transcript_data and not st.session_state.error_message: st.session_state.error_message = "⚠️ No PDF or failed extraction."
-        elif actual_input_type == "Upload Audio" and not audio_file_obj: st.session_state.error_message = "⚠️ No audio file uploaded."
+        if actual_input_type == "Paste Text" and not transcript_data: st.session_state.error_message = "⚠️ Text area empty."
+        elif actual_input_type == "Upload PDF" and not transcript_data and not st.session_state.error_message: st.session_state.error_message = "⚠️ PDF error."
+        elif actual_input_type == "Upload Audio" and not audio_file_obj: st.session_state.error_message = "⚠️ No audio uploaded."
         if meeting_type == "Custom" and not user_prompt_text.strip(): st.session_state.error_message = "⚠️ Custom Prompt empty."
 
         # Determine Final Prompt
@@ -241,47 +364,48 @@ if st.session_state.processing and not st.session_state.generating_filename:
                 else: # Audio: Apply refined wrapper
                     base_prompt_structure = prompt_function(transcript=None, context=final_context)
                     lines = base_prompt_structure.strip().split('\n')
-                    base_prompt_instructions_only = "\n".join(lines[:-1]).strip() if lines[-1].startswith("**GENERATED") else base_prompt_structure # Clean ending
+                    base_prompt_instructions = "\n".join(lines[:-1]).strip() if lines[-1].startswith("**GENERATED") else base_prompt_structure
                     final_prompt_for_api = (
-                        f"You are provided with an audio file.\nFollow these two steps precisely:\n"
-                        f"1.  **Transcribe Audio:** First, accurately transcribe the *entire* audio file.\n"
-                        f"2.  **Generate Notes from Transcript:** After transcription, use the *full transcript text* to create notes based *only* on that transcript, following the specific structure/instructions below:\n"
-                        f"    ---\n[BEGIN NOTE STRUCTURE & INSTRUCTIONS]\n\n{base_prompt_instructions_only}\n\n[END NOTE STRUCTURE & INSTRUCTIONS]\n    ---\n"
+                        f"Follow these two steps precisely:\n"
+                        f"1. **Transcribe Audio:** First, accurately transcribe the *entire* provided audio file.\n"
+                        f"2. **Generate Notes from Transcript:** Then, use the *full transcript text* you just generated to create notes, adhering *strictly* to the following structure/instructions:\n"
+                        f"    ---\n[BEGIN NOTE STRUCTURE & INSTRUCTIONS]\n\n{base_prompt_instructions}\n\n[END NOTE STRUCTURE & INSTRUCTIONS]\n    ---\n"
                         f"CRITICAL: Final output MUST contain ONLY the structured notes from Step 2." )
 
         # API Call Section
         if not st.session_state.error_message and final_prompt_for_api and (transcript_data or audio_file_obj):
             try: # Inner try for API/processing
-                st.toast(f"🧠 Generating with {st.session_state.selected_model_display_name}...", icon="✨")
+                st.toast(f"🧠 Generating with {selected_model_id}...", icon="✨")
                 model = genai.GenerativeModel(model_name=selected_model_id, safety_settings=safety_settings, generation_config=main_gen_config)
                 response = None; api_payload = None; processed_audio_file_ref = None; temp_file_path = None
 
                 if actual_input_type == "Upload Audio":
+                    # (Tempfile logic remains the same)
                     if not audio_file_obj: raise ValueError("Audio missing.")
                     st.toast(f"☁️ Uploading '{audio_file_obj.name}'...", icon="⬆️")
                     audio_bytes = audio_file_obj.getvalue()
-                    try: # Tempfile handling
+                    try:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file_obj.name)[1]) as temp_file:
                             temp_file.write(audio_bytes); temp_file_path = temp_file.name
                         if temp_file_path: processed_audio_file_ref = genai.upload_file(path=temp_file_path, display_name=f"audio_{int(time.time())}_{audio_file_obj.name}")
                         else: raise Exception("Temp file creation failed.")
                     finally:
-                        if temp_file_path and os.path.exists(temp_file_path): os.remove(temp_file_path) # Disk cleanup
+                        if temp_file_path and os.path.exists(temp_file_path): os.remove(temp_file_path)
 
                     st.session_state.uploaded_audio_info = processed_audio_file_ref
                     # Polling...
                     polling_start = time.time()
                     while processed_audio_file_ref.state.name == "PROCESSING":
-                        if time.time() - polling_start > 300: raise TimeoutError("Audio processing timeout.")
+                        if time.time() - polling_start > 300: raise TimeoutError("Audio timeout.")
                         st.toast(f"🎧 Processing '{audio_file_obj.name}'...", icon="⏳"); time.sleep(5)
                         processed_audio_file_ref = genai.get_file(processed_audio_file_ref.name)
-                    if processed_audio_file_ref.state.name != "ACTIVE": raise Exception(f"Audio processing state: {processed_audio_file_ref.state.name}")
+                    if processed_audio_file_ref.state.name != "ACTIVE": raise Exception(f"Audio state: {processed_audio_file_ref.state.name}")
                     st.toast(f"🎧 Audio ready!", icon="✅"); api_payload = [final_prompt_for_api, processed_audio_file_ref]
                 else: # Text/PDF
                     if not transcript_data: raise ValueError("Transcript missing.")
                     api_payload = final_prompt_for_api
 
-                # Generate Content Call
+                # Generate Content
                 if api_payload: response = model.generate_content(api_payload)
                 else: raise ValueError("API Payload empty.")
 
@@ -290,17 +414,17 @@ if st.session_state.processing and not st.session_state.generating_filename:
                     st.session_state.generated_notes = response.text.strip()
                     st.session_state.edited_notes_text = st.session_state.generated_notes
                     st.toast("🎉 Notes generated!", icon="✅")
-                    # Trigger filename generation (happens before final rerun)
+                    # Trigger filename generation after notes are ready
                     st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type)
                 elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
                      st.session_state.error_message = f"⚠️ Response blocked: {response.prompt_feedback.block_reason}."
                 elif response: st.session_state.error_message = "🤔 AI returned empty response."
-                else: st.session_state.error_message = "😥 AI generation failed (No response)."
+                else: st.session_state.error_message = "😥 Generation failed (No response)."
 
                 # Cleanup Cloud Audio only AFTER successful call
                 if actual_input_type == "Upload Audio" and st.session_state.uploaded_audio_info:
-                    try: genai.delete_file(st.session_state.uploaded_audio_info.name); st.session_state.uploaded_audio_info = None; st.toast("☁️ Temp cloud audio cleaned.", icon="🗑️")
-                    except Exception as e: st.warning(f"Cloud audio cleanup failed: {e}", icon="⚠️")
+                    try: genai.delete_file(st.session_state.uploaded_audio_info.name); st.session_state.uploaded_audio_info = None; st.toast("☁️ Cloud audio cleaned.", icon="🗑️")
+                    except Exception as e: st.warning(f"Cloud cleanup failed: {e}", icon="⚠️")
 
             except Exception as e: # Catch inner API/processing errors
                 st.session_state.error_message = f"❌ Processing Error: {e}"
@@ -312,9 +436,10 @@ if st.session_state.processing and not st.session_state.generating_filename:
     # --- FINALLY block: Always runs ---
     finally:
         st.session_state.processing = False
-        # Rerun to display results/errors/filename update
-        # No need to check error/notes here, the rerun handles showing state
-        st.rerun()
+        # Rerun ONLY if error needs displaying OR if notes were generated successfully
+        # Ensures UI updates correctly after processing finishes or fails.
+        if st.session_state.error_message or st.session_state.generated_notes:
+             st.rerun()
 
 # --- Footer ---
 st.divider()
