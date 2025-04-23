@@ -183,13 +183,24 @@ if 'uploaded_audio_info' not in st.session_state: st.session_state.uploaded_audi
 if 'add_context_enabled' not in st.session_state: st.session_state.add_context_enabled = False
 
 # --- Configure Gemini Model ---
-# (Keep this section as is)
 try:
     genai.configure(api_key=API_KEY)
-    # ... (rest of model config) ...
+    generation_config = {
+        "temperature": 0.7, "top_p": 1.0, "top_k": 32,
+        "max_output_tokens": 8192, "response_mime_type": "text/plain",
+    }
+    # --- ADD THIS LIST BACK ---
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+    ]
+    # --- END OF ADDITION ---
     model = genai.GenerativeModel(
         model_name="gemini-1.5-flash",
-        safety_settings=safety_settings, generation_config=generation_config,
+        safety_settings=safety_settings, # Now 'safety_settings' is defined
+        generation_config=generation_config,
     )
 except Exception as e:
     st.error(f"### 🔌 Error Initializing AI Model", icon="🚨")
