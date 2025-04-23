@@ -215,9 +215,15 @@ with st.container(border=True):
     col1a, col1b = st.columns(2)
     with col1a:
         st.subheader("Meeting Details")
-        st.radio(options=MEETING_TYPES, key="selected_meeting_type",
-                 index=MEETING_TYPES.index(st.session_state.selected_meeting_type), horizontal=True,
-                 help="Choose meeting type. 'Custom' requires your own prompt.", on_change=update_prompt_display_text)
+        st.radio(
+            label="Select Meeting Type:", # Explicitly use the 'label' keyword
+            options=MEETING_TYPES,
+            key="selected_meeting_type",
+            index=MEETING_TYPES.index(st.session_state.selected_meeting_type),
+            horizontal=True,
+            help="Choose meeting type for tailored note structure. 'Custom' requires your own prompt.",
+            on_change=update_prompt_display_text # Regenerate prompt text if type changes
+        )
     with col1b:
         st.subheader("AI Model")
         st.selectbox(options=list(AVAILABLE_MODELS.keys()), key="selected_model_display_name",
