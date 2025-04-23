@@ -3,4 +3,3 @@ streamlit
 python-dotenv
 pypdf2
 python-docx
-streamlit-copy-to-clipboard
