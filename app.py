@@ -14,7 +14,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- Custom CSS Injection (Keep as is) ---
+# --- Custom CSS Injection ---
 st.markdown("""
 <style>
     /* Overall App Background */
@@ -73,8 +73,8 @@ st.markdown("""
         background-color: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 0.5rem;
         padding: 0.6rem 1rem; margin-right: 0.5rem; transition: all 0.2s ease;
         box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-        display: inline-block; /* Prevent stretching */
-        margin-bottom: 0.5rem; /* Add space below radio */
+        display: inline-block;
+        margin-bottom: 0.5rem;
     }
     div[role="radiogroup"] label:hover { border-color: #9CA3AF; }
     div[role="radiogroup"] input[type="radio"]:checked + div {
@@ -163,16 +163,23 @@ AVAILABLE_MODELS = {
     "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
     "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
     "Gemini 1.5 Flash-8B (High Volume, Lower Intelligence Tasks)": "gemini-1.5-flash-8b",
-    # Newer/Preview Models
+
+    # Newer/Preview Models (May require specific API access or have different behaviour)
     "Gemini 2.0 Flash (Next Gen Speed/Multimodal)": "gemini-2.0-flash",
     "Gemini 2.0 Flash-Lite (Cost Efficiency & Low Latency)": "gemini-2.0-flash-lite",
     "Gemini 2.5 Flash Preview (Adaptive & Cost Efficient)": "gemini-2.5-flash-preview-04-17",
-    "Gemini 2.5 Pro Preview (Enhanced Reasoning & Multimodal)": "gemini-2.5-pro-preview-03-25", # New Default
+    # --- Use the SUGGESTED EXPERIMENTAL ID for 2.5 Pro Preview ---
+    # Updated based on 429 error suggesting this ID might work with free tier
+    "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "models/gemini-2.5-pro-exp-03-25",
 }
-# --- Set New Default Model ---
-DEFAULT_MODEL_NAME = "Gemini 2.5 Pro Preview (Enhanced Reasoning & Multimodal)"
+# --- Set Default to the Experimental Preview based on the error message ---
+DEFAULT_MODEL_NAME = "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)" # Use the new key
+# Ensure the default exists in the list, fallback if necessary
 if DEFAULT_MODEL_NAME not in AVAILABLE_MODELS:
-     DEFAULT_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0] # Fallback
+     # Fallback to a generally available free model if the default isn't found
+     DEFAULT_MODEL_NAME = "Gemini 1.5 Flash (Fast & Versatile)"
+     if DEFAULT_MODEL_NAME not in AVAILABLE_MODELS: # Absolute fallback
+        DEFAULT_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
 
 
 # --- Define Meeting Types ---
@@ -215,7 +222,6 @@ if 'uploaded_audio_info' not in st.session_state: st.session_state.uploaded_audi
 if 'add_context_enabled' not in st.session_state: st.session_state.add_context_enabled = False
 if 'selected_model_display_name' not in st.session_state:
     st.session_state.selected_model_display_name = DEFAULT_MODEL_NAME
-# Add state for meeting type
 if 'selected_meeting_type' not in st.session_state:
     st.session_state.selected_meeting_type = DEFAULT_MEETING_TYPE
 
@@ -226,7 +232,6 @@ def extract_text_from_pdf(pdf_file_stream):
     try:
         pdf_file_stream.seek(0)
         pdf_reader = PyPDF2.PdfReader(pdf_file_stream)
-        # Ensure text is extracted correctly, handle potential None returns per page
         text_parts = [page.extract_text() for page in pdf_reader.pages if page.extract_text()]
         text = "\n".join(text_parts)
         return text.strip() if text else None
@@ -239,7 +244,6 @@ def extract_text_from_pdf(pdf_file_stream):
 
 def create_expert_meeting_prompt(transcript, context=None):
     """Creates the prompt for the 'Expert Meeting' type."""
-    # This is the original prompt structure
     prompt_parts = [
         "You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.",
         "Generate detailed, factual notes from the provided meeting transcript.",
@@ -270,9 +274,8 @@ def create_expert_meeting_prompt(transcript, context=None):
         "- Avoid adding any personal insights, opinions, or information not present in the transcript.",
         "- If a section is not present in the transcript, omit it.",
         "\n---",
-        "\n**MEETING TRANSCRIPT:**\n",
-        transcript,
-        "\n---"
+        # Add transcript placeholder only if transcript is provided
+        (f"\n**MEETING TRANSCRIPT:**\n{transcript}\n---" if transcript else ""),
     ]
     if context:
         prompt_parts.extend([
@@ -281,7 +284,9 @@ def create_expert_meeting_prompt(transcript, context=None):
             "\n---"
         ])
     prompt_parts.append("\n**GENERATED NOTES:**\n")
-    return "\n".join(prompt_parts)
+    # Filter out empty strings that might result from the conditional transcript
+    return "\n".join(filter(None, prompt_parts))
+
 
 def create_earnings_call_prompt(transcript, context=None):
     """Creates the prompt for the 'Earnings Call' type."""
@@ -327,9 +332,8 @@ def create_earnings_call_prompt(transcript, context=None):
         "- Be factual and objective. Avoid interpretation or adding external information.",
         "- If a section is not discussed, omit it.",
         "\n---",
-        "\n**EARNINGS CALL TRANSCRIPT:**\n",
-        transcript,
-        "\n---"
+        # Add transcript placeholder only if transcript is provided
+        (f"\n**EARNINGS CALL TRANSCRIPT:**\n{transcript}\n---" if transcript else ""),
     ]
     if context:
         prompt_parts.extend([
@@ -338,7 +342,8 @@ def create_earnings_call_prompt(transcript, context=None):
             "\n---"
         ])
     prompt_parts.append("\n**GENERATED EARNINGS CALL SUMMARY:**\n")
-    return "\n".join(prompt_parts)
+    # Filter out empty strings
+    return "\n".join(filter(None, prompt_parts))
 
 
 # --- Streamlit App UI ---
@@ -351,12 +356,11 @@ with st.container(border=True):
     col1a, col1b = st.columns(2)
     with col1a:
         st.subheader("Meeting Details")
-        # Update session state when radio changes
         st.session_state.selected_meeting_type = st.radio(
             "Select Meeting Type:",
             options=MEETING_TYPES,
             key="meeting_type_radio",
-            index=MEETING_TYPES.index(st.session_state.selected_meeting_type), # Set default from state
+            index=MEETING_TYPES.index(st.session_state.selected_meeting_type),
             horizontal=True,
             help="Choose the type of meeting to tailor the note structure."
         )
@@ -367,7 +371,7 @@ with st.container(border=True):
             options=list(AVAILABLE_MODELS.keys()),
             key="model_select",
             index=list(AVAILABLE_MODELS.keys()).index(st.session_state.selected_model_display_name),
-            help="Select the Gemini model. Preview models may offer newer features."
+            help="Select the Gemini model. Preview/Experimental models may have different quotas or stability." # Updated help text
         )
 
     st.divider()
@@ -379,19 +383,16 @@ with st.container(border=True):
         ("Paste Text", "Upload PDF", "Upload Audio"),
         key="input_method_radio",
         horizontal=True,
-        label_visibility="collapsed" # Hide label as subheader exists
+        label_visibility="collapsed"
     )
 
-    text_input_area = None
-    pdf_file_uploader = None
-    audio_file_uploader = None
-
+    # Define widgets (values accessed via keys later)
     if input_method == "Paste Text":
-        text_input_area = st.text_area("Paste transcript:", height=150, key="text_input", placeholder="Paste the full meeting transcript here...")
+        st.text_area("Paste transcript:", height=150, key="text_input", placeholder="Paste the full meeting transcript here...")
     elif input_method == "Upload PDF":
-        pdf_file_uploader = st.file_uploader("Upload PDF:", type="pdf", key="pdf_uploader", help="Upload a PDF file containing the meeting transcript.")
+        st.file_uploader("Upload PDF:", type="pdf", key="pdf_uploader", help="Upload a PDF file containing the meeting transcript.")
     else: # Upload Audio
-        audio_file_uploader = st.file_uploader(
+        st.file_uploader(
             "Upload Audio:",
             type=['wav', 'mp3', 'm4a', 'ogg', 'flac', 'aac'],
             key="audio_uploader",
@@ -413,7 +414,6 @@ with st.container(border=True):
 if st.session_state.add_context_enabled:
     with st.container(border=True):
         st.subheader("Context Details")
-        # Use context_input_area = ... if needed, but key access is primary
         st.text_area(
             "Provide background:",
             height=150,
@@ -448,7 +448,7 @@ with output_container:
         st.download_button(
              label="⬇️ Download Notes (.txt)",
              data=st.session_state.generated_notes,
-             file_name="meeting_notes.txt",
+             file_name=f"{st.session_state.selected_meeting_type.lower().replace(' ', '_')}_notes.txt", # Dynamic filename
              mime="text/plain",
              key='download-txt'
          )
@@ -466,30 +466,30 @@ if generate_button:
 if st.session_state.processing:
     transcript = None
     audio_file_input = None
-    # Retrieve selections from session state
+    # Retrieve selections
     input_type = st.session_state.get("input_method_radio", "Paste Text")
     meeting_type = st.session_state.get("selected_meeting_type", DEFAULT_MEETING_TYPE)
     selected_model_display_name = st.session_state.get("selected_model_display_name", DEFAULT_MODEL_NAME)
     selected_model_id = AVAILABLE_MODELS.get(selected_model_display_name, AVAILABLE_MODELS[DEFAULT_MODEL_NAME])
 
-    # Retrieve input widget values from session state
+    # Retrieve inputs
     text_content = st.session_state.get("text_input", "")
     pdf_file = st.session_state.get("pdf_uploader")
     audio_file = st.session_state.get("audio_uploader")
 
-    # Basic input validation
+    # Validation
     if input_type == "Paste Text" and not text_content: st.session_state.error_message = "⚠️ Text area is empty."
     elif input_type == "Upload PDF" and not pdf_file: st.session_state.error_message = "⚠️ No PDF file uploaded."
     elif input_type == "Upload Audio" and not audio_file: st.session_state.error_message = "⚠️ No audio file uploaded."
 
-    # Get Context (if enabled)
+    # Context
     final_context = None
     if st.session_state.get("add_context_enabled", False):
         final_context = st.session_state.get("context_input", "").strip()
 
     if not st.session_state.error_message:
         try:
-            # --- Prepare Input Data (Transcript or Audio File Object) ---
+            # --- Prepare Input Data ---
             if input_type == "Paste Text":
                 transcript = text_content.strip()
             elif input_type == "Upload PDF":
@@ -499,6 +499,7 @@ if st.session_state.processing:
                 if transcript and not st.session_state.error_message: st.toast("📄 PDF processed!", icon="✅")
                 elif not transcript and not st.session_state.error_message: st.session_state.error_message = "⚠️ PDF contains no extractable text."
             elif input_type == "Upload Audio":
+                # (Audio processing remains the same, assigns audio_file_input)
                 st.toast(f"☁️ Uploading '{audio_file.name}'...", icon="⬆️")
                 audio_bytes = audio_file.getvalue()
                 audio_file_for_api = genai.upload_file(content=audio_bytes, display_name=f"audio_{int(time.time())}", mime_type=audio_file.type)
@@ -513,49 +514,55 @@ if st.session_state.processing:
                     st.session_state.error_message = f"😥 Audio processing failed: {audio_file_for_api.name}"
                     try: genai.delete_file(audio_file_for_api.name)
                     except Exception: pass
+                    st.session_state.uploaded_audio_info = None # Clear info on failure
                 elif audio_file_for_api.state.name == "ACTIVE":
                     st.toast(f"🎧 Audio ready!", icon="✅")
-                    audio_file_input = audio_file_for_api # Assign the file object
-                else: st.session_state.error_message = f"Unexpected audio state: {audio_file_for_api.state.name}"
+                    audio_file_input = audio_file_for_api
+                else:
+                    st.session_state.error_message = f"Unexpected audio state: {audio_file_for_api.state.name}"
+                    st.session_state.uploaded_audio_info = None # Clear info on unexpected state
 
-            # --- Select Prompt Function based on Meeting Type ---
+            # --- Select Prompt Function ---
             if not st.session_state.error_message:
                 prompt_function = None
                 if meeting_type == "Expert Meeting":
                     prompt_function = create_expert_meeting_prompt
                 elif meeting_type == "Earnings Call":
                     prompt_function = create_earnings_call_prompt
-                else: # Fallback or error
-                    st.session_state.error_message = f"Unknown meeting type selected: {meeting_type}"
-                    prompt_function = create_expert_meeting_prompt # Default to expert?
+                else:
+                    st.session_state.error_message = f"Internal error: Unknown meeting type '{meeting_type}'"
 
-                # --- Construct Final Prompt and Call API ---
+                # --- Construct Prompt and Call API ---
                 if prompt_function and (transcript or audio_file_input):
                     st.toast(f"🧠 Generating notes with {selected_model_display_name}...", icon="✨")
-                    model = genai.GenerativeModel(model_name=selected_model_id, safety_settings=safety_settings, generation_config=generation_config)
+                    # Initialize model just before the call
+                    try:
+                        model = genai.GenerativeModel(model_name=selected_model_id, safety_settings=safety_settings, generation_config=generation_config)
+                    except Exception as model_init_error:
+                         raise Exception(f"Failed to initialize model '{selected_model_id}': {model_init_error}") # Raise to outer catch
+
                     response = None
+                    final_prompt_arg = None # For clarity
 
-                    if input_type == "Paste Text" or input_type == "Upload PDF":
-                        # Generate prompt using the transcript directly
-                        final_prompt = prompt_function(transcript, final_context)
-                        response = model.generate_content(final_prompt)
+                    if input_type in ["Paste Text", "Upload PDF"]:
+                        if not transcript: # Should not happen if validation ok, but safety check
+                             raise ValueError("Transcript is missing for Text/PDF input.")
+                        final_prompt_arg = prompt_function(transcript, final_context)
+                        response = model.generate_content(final_prompt_arg)
                     elif input_type == "Upload Audio":
-                        # Generate the base prompt structure (without transcript)
-                        # Pass a placeholder or modify functions if needed, but simpler to pass None
-                        base_prompt_text = prompt_function(transcript=None, context=final_context) # Pass None for transcript
-                        # Remove the placeholder line if it exists
-                        base_prompt_text = base_prompt_text.replace("\n**MEETING TRANSCRIPT:**\n\n---","\n---")
-                        base_prompt_text = base_prompt_text.replace("\n**EARNINGS CALL TRANSCRIPT:**\n\n---","\n---")
-
-                        # Wrap with audio instructions
-                        audio_wrapper_prompt = (
+                        if not audio_file_input: # Safety check
+                            raise ValueError("Audio file object is missing for Audio input.")
+                        # Get base structure, transcript is None
+                        base_prompt_text = prompt_function(transcript=None, context=final_context)
+                        # Audio wrapper prompt
+                        final_prompt_arg = [
                             "1. First, accurately transcribe the provided audio file.\n"
                             "2. Then, using the transcription you just generated, create detailed notes based on the following structure and instructions:\n"
                             "---\n"
-                            f"{base_prompt_text}" # Insert the specific meeting type instructions
-                            # No need for the final **GENERATED NOTES:** part here, the model handles it.
-                        )
-                        response = model.generate_content([audio_wrapper_prompt, audio_file_input])
+                            f"{base_prompt_text}",
+                            audio_file_input # Pass the audio file object
+                        ]
+                        response = model.generate_content(final_prompt_arg)
                         # Clean up audio file
                         try:
                             if st.session_state.uploaded_audio_info:
@@ -569,7 +576,8 @@ if st.session_state.processing:
                         st.session_state.generated_notes = response.text
                         st.toast("🎉 Notes generated successfully!", icon="✅")
                     elif response: st.session_state.error_message = "🤔 AI returned an empty response."
-                    else: st.session_state.error_message = "😥 AI generation failed."
+                    else: st.session_state.error_message = "😥 AI generation failed (No response)."
+
 
         except Exception as e:
             st.session_state.error_message = f"❌ An error occurred: {e}"
