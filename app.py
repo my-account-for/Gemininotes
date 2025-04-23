@@ -14,7 +14,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- Custom CSS Injection (Keep the previous CSS) ---
+# --- Custom CSS Injection ---
 st.markdown("""
 <style>
     /* Overall App Background */
@@ -33,23 +33,14 @@ st.markdown("""
     }
 
     /* General Container Styling (using st.container(border=True)) */
-    div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="stVerticalBlock"],
-    div[data-testid="stVerticalBlock"] > [data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] {
-         background-color: #FFFFFF;
-         border: 1px solid #E5E7EB;
-         border-radius: 0.75rem;
-         padding: 1.5rem;
-         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-         margin-bottom: 1.5rem;
-    }
-    /* Ensure top-level containers also get border styling if border=True */
+    /* Targets containers used for input/output sections */
     div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"][style*="border"] {
          background-color: #FFFFFF;
-         border: 1px solid #E5E7EB;
-         border-radius: 0.75rem;
-         padding: 1.5rem;
-         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-         margin-bottom: 1.5rem;
+         border: 1px solid #E5E7EB; /* Softer border */
+         border-radius: 0.75rem; /* More rounded */
+         padding: 1.5rem; /* Inner padding */
+         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); /* Softer shadow */
+         margin-bottom: 1.5rem; /* Space between containers */
     }
 
 
@@ -62,7 +53,8 @@ st.markdown("""
         padding-bottom: 0.4rem; margin-bottom: 1rem;
     }
     /* App Subtitle */
-    .main .block-container > div:nth-child(3) > div > div > div > p { /* Adjusted selector for subtitle markdown */
+    /* Find the specific markdown element for subtitle - adjust index if layout changes */
+    .main .block-container > div:nth-child(3) > div > div > div > p {
        text-align: center; color: #4B5563; font-size: 1.1rem; margin-bottom: 2rem;
     }
 
@@ -102,6 +94,16 @@ st.markdown("""
         color: #374151;
     }
 
+    /* Selectbox Styling */
+    .stSelectbox > div {
+        border-radius: 0.5rem;
+        border: 1px solid #D1D5DB;
+        background-color: #F9FAFB;
+    }
+    .stSelectbox > div:focus-within {
+         border-color: #007AFF;
+         box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.2);
+    }
 
     /* Button Styling */
     .stButton > button {
@@ -134,7 +136,7 @@ st.markdown("""
     .stDownloadButton > button:hover { background-color: #E5E7EB; border-color: #9CA3AF; }
 
     /* Output Area Styling */
-    .output-container { /* Target the container directly now */
+    .output-container { /* Target the container used for output */
         background-color: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 0.75rem;
         padding: 1.5rem; margin-top: 1.5rem; min-height: 150px;
     }
@@ -145,7 +147,7 @@ st.markdown("""
     .output-container .stMarkdown h3, .output-container .stMarkdown h4, .output-container .stMarkdown strong {
        color: #111827; font-weight: 600;
     }
-    .output-container .stAlert { margin-top: 1rem; }
+    .output-container .stAlert { margin-top: 1rem; border-radius: 0.5rem;} /* Style alerts inside output */
     .output-container .initial-prompt {
         color: #6B7280; font-style: italic; text-align: center; padding-top: 2rem;
     }
@@ -163,8 +165,28 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# --- Define Available Models ---
+# Using user-friendly names as keys and API IDs as values
+AVAILABLE_MODELS = {
+    # Stable Models
+    "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
+    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
+    "Gemini 1.5 Flash-8B (High Volume, Lower Intelligence Tasks)": "gemini-1.5-flash-8b",
+
+    # Newer/Preview Models (May require specific API access or have different behaviour)
+    "Gemini 2.0 Flash (Next Gen Speed/Multimodal)": "gemini-2.0-flash",
+    "Gemini 2.0 Flash-Lite (Cost Efficiency & Low Latency)": "gemini-2.0-flash-lite",
+    "Gemini 2.5 Flash Preview (Adaptive & Cost Efficient)": "gemini-2.5-flash-preview-04-17",
+    "Gemini 2.5 Pro Preview (Enhanced Reasoning & Multimodal)": "gemini-2.5-pro-preview-03-25",
+}
+# Keep 1.5 Flash as a stable default
+DEFAULT_MODEL_NAME = "Gemini 1.5 Flash (Fast & Versatile)"
+# Ensure the default exists in the list, fallback if necessary
+if DEFAULT_MODEL_NAME not in AVAILABLE_MODELS:
+     DEFAULT_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
+
+
 # --- Load API Key and Configure Gemini ---
-# (Keep this section as is)
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -173,44 +195,40 @@ if not API_KEY:
     st.markdown("Please ensure your `GEMINI_API_KEY` is set in your environment variables or in a `.env` file.")
     st.stop()
 
-# --- Initialize Session State ---
-# (Keep this section as is)
-if 'processing' not in st.session_state: st.session_state.processing = False
-if 'generated_notes' not in st.session_state: st.session_state.generated_notes = None
-if 'error_message' not in st.session_state: st.session_state.error_message = None
-if 'uploaded_audio_info' not in st.session_state: st.session_state.uploaded_audio_info = None
-# Add state for the context checkbox
-if 'add_context_enabled' not in st.session_state: st.session_state.add_context_enabled = False
-
-# --- Configure Gemini Model ---
+# Configure the client library (but not the specific model yet)
 try:
     genai.configure(api_key=API_KEY)
+    # Define standard generation config and safety settings globally
     generation_config = {
         "temperature": 0.7, "top_p": 1.0, "top_k": 32,
         "max_output_tokens": 8192, "response_mime_type": "text/plain",
     }
-    # --- ADD THIS LIST BACK ---
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
         {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     ]
-    # --- END OF ADDITION ---
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        safety_settings=safety_settings, # Now 'safety_settings' is defined
-        generation_config=generation_config,
-    )
 except Exception as e:
-    st.error(f"### 🔌 Error Initializing AI Model", icon="🚨")
-    st.error(f"Details: {e}")
-    st.stop()
+     st.error(f"### 💥 Error Configuring Google AI Client", icon="🚨")
+     st.error(f"Details: {e}")
+     st.stop()
 
 
-# --- Helper Functions (No changes needed) ---
+# --- Initialize Session State ---
+if 'processing' not in st.session_state: st.session_state.processing = False
+if 'generated_notes' not in st.session_state: st.session_state.generated_notes = None
+if 'error_message' not in st.session_state: st.session_state.error_message = None
+if 'uploaded_audio_info' not in st.session_state: st.session_state.uploaded_audio_info = None
+if 'add_context_enabled' not in st.session_state: st.session_state.add_context_enabled = False
+# Add state for selected model display name (the key from AVAILABLE_MODELS)
+if 'selected_model_display_name' not in st.session_state:
+    st.session_state.selected_model_display_name = DEFAULT_MODEL_NAME
+
+
+# --- Helper Functions ---
 def extract_text_from_pdf(pdf_file_stream):
-    # ... (function remains the same) ...
+    """Extracts text from a PDF file stream, updates session state on error."""
     try:
         pdf_file_stream.seek(0)
         pdf_reader = PyPDF2.PdfReader(pdf_file_stream)
@@ -224,9 +242,8 @@ def extract_text_from_pdf(pdf_file_stream):
         return None
 
 def create_text_prompt(transcript, context=None):
-    # ... (function remains the same) ...
+    """Creates the prompt for text/PDF input."""
     prompt_parts = [
-        # ... (prompt definition) ...
         "You are an expert meeting note-taker. Your task is to generate detailed, factual notes from the provided meeting transcript.",
         "Follow this specific structure EXACTLY:",
         "\n**Structure:**",
@@ -268,11 +285,9 @@ def create_text_prompt(transcript, context=None):
     prompt_parts.append("\n**GENERATED NOTES:**\n")
     return "\n".join(prompt_parts)
 
-
 def create_audio_prompt(context=None):
-    # ... (function remains the same) ...
+    """Creates the prompt for audio input."""
     prompt_parts = [
-        # ... (prompt definition) ...
         "You are an expert meeting note-taker.",
         "1. First, accurately transcribe the provided audio file.",
         "2. Then, using the transcription you just generated, create detailed, factual meeting notes.",
@@ -321,53 +336,65 @@ st.title("✨ SynthNotes AI")
 st.markdown("Instantly transform meeting recordings into structured, factual notes.")
 
 # --- Input Section ---
-# Use a single container for all inputs now
 with st.container(border=True):
-    st.subheader("Source Input")
-    input_method = st.radio(
-        "Input type:",
-        ("Paste Text", "Upload PDF", "Upload Audio"),
-        key="input_method_radio",
-        horizontal=True,
-    )
+    col1, col2 = st.columns([2, 1]) # Allocate space for input type vs model selection
 
-    text_input = None
-    uploaded_pdf_file = None
-    uploaded_audio_file = None
+    with col1:
+        st.subheader("Source Input")
+        input_method = st.radio(
+            "Input type:",
+            ("Paste Text", "Upload PDF", "Upload Audio"),
+            key="input_method_radio",
+            horizontal=True,
+        )
 
-    if input_method == "Paste Text":
-        text_input = st.text_area("Paste transcript:", height=200, key="text_input", placeholder="Paste the full meeting transcript here...")
-    elif input_method == "Upload PDF":
-        uploaded_pdf_file = st.file_uploader("Upload PDF:", type="pdf", key="pdf_uploader", help="Upload a PDF file containing the meeting transcript.")
-    else: # Upload Audio
-        uploaded_audio_file = st.file_uploader(
-            "Upload Audio:",
-            type=['wav', 'mp3', 'm4a', 'ogg', 'flac', 'aac'],
-            key="audio_uploader",
-            help="Upload an audio recording (WAV, MP3, M4A, etc.). Processing time depends on length."
+        text_input_area = None # Use different names for widget definition vs value access later
+        pdf_file_uploader = None
+        audio_file_uploader = None
+
+        if input_method == "Paste Text":
+            text_input_area = st.text_area("Paste transcript:", height=150, key="text_input", placeholder="Paste the full meeting transcript here...")
+        elif input_method == "Upload PDF":
+            pdf_file_uploader = st.file_uploader("Upload PDF:", type="pdf", key="pdf_uploader", help="Upload a PDF file containing the meeting transcript.")
+        else: # Upload Audio
+            audio_file_uploader = st.file_uploader(
+                "Upload Audio:",
+                type=['wav', 'mp3', 'm4a', 'ogg', 'flac', 'aac'],
+                key="audio_uploader",
+                help="Upload an audio recording (WAV, MP3, M4A, etc.). Processing time depends on length."
+            )
+
+    with col2:
+        st.subheader("AI Model")
+        # Store the *selected display name* in session state when it changes
+        st.session_state.selected_model_display_name = st.selectbox(
+            "Choose model:",
+            options=list(AVAILABLE_MODELS.keys()),
+            key="model_select", # Key for the selectbox widget itself
+            index=list(AVAILABLE_MODELS.keys()).index(st.session_state.selected_model_display_name), # Set initial value from state
+            help="Select the Gemini model. 'Pro' may offer higher quality but might be slower or have different usage limits."
         )
 
     # --- Context Checkbox ---
     st.divider() # Visual separator
     add_context_enabled = st.checkbox(
         "Add Context (Optional)",
-        key="add_context_cb", # Use key to access state later
-        value=st.session_state.add_context_enabled, # Persist checkbox state
-        help="Check this box to provide additional background information like attendees, goals, etc."
+        key="add_context_cb",
+        value=st.session_state.add_context_enabled,
+        help="Check this box to provide additional background information."
     )
     # Update session state when checkbox changes
     st.session_state.add_context_enabled = add_context_enabled
 
 
 # --- Conditional Context Input Section ---
-# Display this container ONLY if the checkbox is checked
 if st.session_state.add_context_enabled:
     with st.container(border=True):
         st.subheader("Context Details")
-        context_input = st.text_area(
+        context_input_area = st.text_area( # Use different name for widget definition
             "Provide background:",
-            height=150, # Can be slightly smaller
-            key="context_input", # Key to access value
+            height=150,
+            key="context_input", # Key to access value from session state
             placeholder="Add context like attendees, goals, project name...",
             help="Adding context helps the AI understand the conversation better."
         )
@@ -383,12 +410,11 @@ generate_button = st.button(
 )
 
 # --- Output Section ---
-# (Keep this section as is)
 output_container = st.container(border=True)
-# Add CSS class marker (optional, CSS targets structure mainly)
-output_container.markdown('<div class="output-container"></div>', unsafe_allow_html=True) # Use class for direct targeting
-
 with output_container:
+    # Add CSS class marker - this helps target the container if CSS needs specificity
+    st.markdown('<div class="output-container"></div>', unsafe_allow_html=True)
+
     if st.session_state.processing:
         st.info("⏳ Processing your request... Please wait.", icon="🧠")
     elif st.session_state.error_message:
@@ -405,28 +431,33 @@ with output_container:
              key='download-txt'
          )
     else:
+        # Initial state or after clearing
         st.markdown("<p class='initial-prompt'>Generated notes will appear here once processed.</p>", unsafe_allow_html=True)
 
 
-# --- Processing Logic (Triggered by Button Click) ---
+# --- Processing Logic ---
 if generate_button:
+    # 1. Set processing state and clear previous output/errors
     st.session_state.processing = True
     st.session_state.generated_notes = None
     st.session_state.error_message = None
-    st.rerun()
+    st.rerun() # Rerun immediately to show spinner and disable button
 
-# --- Separate block for actual processing after rerun ---
+# --- Actual processing happens after the rerun ---
 if st.session_state.processing:
-    # (Input Validation and Preparation logic remains largely the same)
     transcript = None
     audio_file_input = None
+    # Retrieve selected options from session state
     input_type = st.session_state.get("input_method_radio", "Paste Text")
+    selected_model_display_name = st.session_state.get("selected_model_display_name", DEFAULT_MODEL_NAME)
+    selected_model_id = AVAILABLE_MODELS.get(selected_model_display_name, AVAILABLE_MODELS[DEFAULT_MODEL_NAME]) # Get API ID
 
+    # Retrieve input widget values from session state
     text_content = st.session_state.get("text_input", "")
     pdf_file = st.session_state.get("pdf_uploader")
     audio_file = st.session_state.get("audio_uploader")
 
-    # Basic input validation based on selected method
+    # 2. Input Validation
     if input_type == "Paste Text" and not text_content:
         st.session_state.error_message = "⚠️ Text area is empty."
     elif input_type == "Upload PDF" and not pdf_file:
@@ -434,21 +465,19 @@ if st.session_state.processing:
     elif input_type == "Upload Audio" and not audio_file:
          st.session_state.error_message = "⚠️ No audio file uploaded."
 
-    # --- Get Context ONLY if checkbox is enabled ---
+    # 3. Get Context (if enabled)
     final_context = None
-    if st.session_state.get("add_context_enabled", False): # Check the state of the checkbox
-        final_context = st.session_state.get("context_input", "").strip() # Get value from context text area
+    if st.session_state.get("add_context_enabled", False):
+        final_context = st.session_state.get("context_input", "").strip()
 
-    # Proceed only if basic validation passed
+    # 4. Proceed if validation passed
     if not st.session_state.error_message:
         try:
             # --- Process Input (PDF/Audio Upload, Text Strip) ---
-            # (This part remains the same as before)
             if input_type == "Paste Text":
                 transcript = text_content.strip()
                 st.toast("📝 Using pasted text.", icon="✅")
             elif input_type == "Upload PDF":
-                # ... (PDF processing logic) ...
                 st.toast("📄 Processing PDF...", icon="⏳")
                 pdf_stream = io.BytesIO(pdf_file.getvalue())
                 transcript = extract_text_from_pdf(pdf_stream) # Sets error_message on failure
@@ -456,22 +485,20 @@ if st.session_state.processing:
                     st.toast("📄 PDF processed!", icon="✅")
                 elif not transcript and not st.session_state.error_message:
                      st.session_state.error_message = "⚠️ PDF contains no extractable text."
-
             elif input_type == "Upload Audio":
-                # ... (Audio processing logic) ...
                 st.toast(f"☁️ Uploading '{audio_file.name}'...", icon="⬆️")
                 audio_bytes = audio_file.getvalue()
-                # ...(upload, poll, check state, assign audio_file_input)...
                 audio_file_for_api = genai.upload_file(
                     content=audio_bytes, display_name=f"audio_{int(time.time())}", mime_type=audio_file.type
                 )
-                st.session_state.uploaded_audio_info = audio_file_for_api
+                st.session_state.uploaded_audio_info = audio_file_for_api # Store info
+                # Poll for readiness
                 polling_start_time = time.time()
                 while audio_file_for_api.state.name == "PROCESSING":
                     if time.time() - polling_start_time > 300: # 5 min timeout
                         raise TimeoutError("Audio processing timed out after 5 minutes.")
-                    st.toast(f"🎧 Processing '{audio_file.name}'...", icon="⏳")
-                    time.sleep(5)
+                    st.toast(f"🎧 Processing '{audio_file.name}' on server...", icon="⏳")
+                    time.sleep(5) # Poll less frequently
                     audio_file_for_api = genai.get_file(audio_file_for_api.name)
 
                 if audio_file_for_api.state.name == "FAILED":
@@ -488,54 +515,64 @@ if st.session_state.processing:
                     except Exception: pass
                     st.session_state.uploaded_audio_info = None
 
-
-            # --- Call Gemini ---
-            # (Pass the potentially None final_context)
+            # 5. Call Gemini if input prepared successfully
             if not st.session_state.error_message and (transcript or audio_file_input):
-                st.toast("🧠 Generating notes with AI...", icon="✨")
+                st.toast(f"🧠 Generating notes with {selected_model_display_name}...", icon="✨")
+
+                # --- Initialize the specific model HERE ---
+                try:
+                    model = genai.GenerativeModel(
+                        model_name=selected_model_id, # Use the selected model ID
+                        safety_settings=safety_settings,
+                        generation_config=generation_config,
+                    )
+                except Exception as model_init_error:
+                    st.session_state.error_message = f"Failed to initialize model '{selected_model_id}': {model_init_error}"
+                    st.session_state.processing = False
+                    st.rerun() # Exit processing early
+
+                # --- Generate Content ---
                 response = None
                 if input_type in ["Paste Text", "Upload PDF"]:
-                    full_prompt = create_text_prompt(transcript, final_context) # Pass context here
+                    full_prompt = create_text_prompt(transcript, final_context)
                     response = model.generate_content(full_prompt)
                 elif input_type == "Upload Audio":
-                    full_prompt = create_audio_prompt(final_context) # Pass context here
+                    full_prompt = create_audio_prompt(final_context)
                     response = model.generate_content([full_prompt, audio_file_input])
-                    # ... (Audio cleanup logic) ...
+                    # Clean up audio file from Google Cloud *after successful use*
                     try:
                         if st.session_state.uploaded_audio_info:
                             genai.delete_file(st.session_state.uploaded_audio_info.name)
                             st.session_state.uploaded_audio_info = None
                             st.toast("☁️ Temporary audio file cleaned up.", icon="🗑️")
                     except Exception as delete_err:
-                        st.warning(f"Could not delete temp audio file: {delete_err}", icon="⚠️")
+                        st.warning(f"Could not delete temp audio file: {delete_err}", icon="⚠️") # Non-fatal
 
                 # --- Handle Response ---
-                # (This part remains the same)
                 if response and response.text:
                     st.session_state.generated_notes = response.text
                     st.toast("🎉 Notes generated successfully!", icon="✅")
-                elif response:
-                     st.session_state.error_message = "🤔 AI returned an empty response."
-                else:
-                    st.session_state.error_message = "😥 AI generation failed."
+                elif response: # Check if response exists but text is empty
+                     st.session_state.error_message = "🤔 AI returned an empty response. Try adjusting context or input."
+                else: # Handle cases where the API call itself might fail implicitly
+                    st.session_state.error_message = "😥 AI generation failed. Please check API key and input."
 
         except Exception as e:
-            # (Error handling remains the same)
-            st.session_state.error_message = f"❌ An error occurred: {e}"
-            # ...(attempt audio cleanup on error)...
+            st.session_state.error_message = f"❌ An error occurred during processing: {e}"
+            # Attempt audio cleanup even on general error if info exists
             try:
                 if input_type == "Upload Audio" and st.session_state.uploaded_audio_info:
                     genai.delete_file(st.session_state.uploaded_audio_info.name)
                     st.session_state.uploaded_audio_info = None
-            except Exception: pass
+            except Exception: pass # Ignore cleanup error during main error
 
-
-    # --- Finish processing ---
+    # 6. Finish processing
     st.session_state.processing = False
-    st.rerun() # Update UI
+    st.rerun() # Rerun again to update UI (remove spinner, show results/error)
 
 
 # --- Footer ---
-# (Keep this section as is)
 st.divider()
-st.caption("Powered by [Google Gemini 1.5](https://deepmind.google/technologies/gemini/) | App by SynthNotes AI")
+st.caption(
+    "Powered by [Google Gemini](https://deepmind.google/technologies/gemini/) | App by SynthNotes AI"
+)
