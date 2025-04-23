@@ -198,11 +198,17 @@ with st.container(border=True): # Input Section
     else: st.file_uploader("Upload Audio:", type=['wav','mp3','m4a','ogg','flac','aac'], key="audio_uploader")
     st.divider()
     col3a, col3b = st.columns(2) # Optional Elements
-    with col3a: st.checkbox("Add Context", key="add_context_enabled", on_change=update_prompt_display_text); \
-                  if st.session_state.add_context_enabled: st.text_area("Context Details:", height=100, key="context_input", on_change=update_prompt_display_text, placeholder="Attendees...")
-    with col3b: \
-                  if st.session_state.selected_meeting_type != "Custom": st.checkbox("View/Edit Prompt", key="view_edit_prompt_enabled", on_change=update_prompt_display_text)
-
+   # Row 3: Optional Elements
+    col3a, col3b = st.columns(2)
+    with col3a: # Context
+        st.checkbox("Add Context (Optional)", key="add_context_enabled", help="Provide background info.", on_change=update_prompt_display_text)
+        # Correct indentation for the st.text_area within the if block
+        if st.session_state.add_context_enabled:
+            st.text_area("Context Details:", height=100, key="context_input", on_change=update_prompt_display_text, placeholder="E.g., Attendees: Alice, Bob\nProject: Q3 Launch")
+    with col3b: # View/Edit Prompt Checkbox
+        # Correct indentation for the st.checkbox within the if block
+        if st.session_state.selected_meeting_type != "Custom":
+            st.checkbox("View/Edit Prompt", key="view_edit_prompt_enabled", help="View/modify the AI prompt.", on_change=update_prompt_display_text)
 # Prompt Area (Conditional)
 show_prompt_area = (st.session_state.view_edit_prompt_enabled and st.session_state.selected_meeting_type != "Custom") or \
                    (st.session_state.selected_meeting_type == "Custom")
