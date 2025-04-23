@@ -1,16 +1,7 @@
+# .streamlit/config.toml
 [theme]
-# Primary accent color for interactive elements.
-primaryColor = "#007AFF"  # A nice Apple-like blue
-
-# Background color for the main content area.
-backgroundColor = "#FFFFFF" # White background
-
-# Background color used for the sidebar and potentially code blocks or elements.
-secondaryBackgroundColor = "#F0F2F6" # Light grey for contrast/containers
-
-# Color used for almost all text.
-textColor = "#0F172A" # Dark grey/near-black for text
-
-# Font family for all text in the app, except code blocks.
-# Using system-ui or -apple-system is often a safe bet for a modern look.
-font = "system-ui"
+primaryColor = "#007AFF"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6" # Or try "#F8F9FA" for a slightly whiter feel
+textColor = "#0F172A"
+font = "system-ui" # or "-apple-system", "Inter", "Source Sans Pro"
