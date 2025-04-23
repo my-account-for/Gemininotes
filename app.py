@@ -6,134 +6,209 @@ import time
 from dotenv import load_dotenv
 import PyPDF2
 
-# --- Page Configuration (Apply theme defaults) ---
+# --- Page Configuration ---
 st.set_page_config(
-    page_title="SynthNotes AI", # More startup-y name?
-    page_icon="✨",         # Changed Icon
-    layout="wide"
+    page_title="SynthNotes AI ✨",
+    page_icon="✨",
+    layout="wide",
+    initial_sidebar_state="collapsed", # Collapse sidebar if not used
 )
 
 # --- Custom CSS Injection ---
-# Inject custom CSS for polishing
 st.markdown("""
 <style>
-    /* General App Styling */
+    /* Overall App Background */
     .stApp {
-        background-color: #F0F2F6; /* Match secondaryBackgroundColor for overall app background */
+        /* background-color: #F0F2F6; */ /* Removed to let containers define background */
+        background: linear-gradient(to bottom right, #F0F2F6, #FFFFFF); /* Subtle gradient */
     }
 
     /* Main content area */
     .main .block-container {
         padding-top: 2rem;
-        padding-bottom: 2rem;
-        padding-left: 3rem;
-        padding-right: 3rem;
-        background-color: #FFFFFF; /* White card for main content */
-        border-radius: 0.5rem;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        padding-bottom: 3rem; /* More space at bottom */
+        padding-left: 2rem;  /* Slightly less horizontal padding */
+        padding-right: 2rem;
+        max-width: 1000px; /* Limit max width for better readability */
+        margin: auto;      /* Center the container */
     }
 
-    /* Style Headers */
+    /* General Container Styling (using st.container(border=True)) */
+    div[data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] > div[data-testid="stVerticalBlock"],
+    div[data-testid="stVerticalBlock"] > [data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] { /* Target nested containers */
+        /* Styles for containers with border=True */
+         background-color: #FFFFFF;
+         border: 1px solid #E5E7EB; /* Softer border */
+         border-radius: 0.75rem; /* More rounded */
+         padding: 1.5rem; /* Inner padding */
+         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05); /* Softer shadow */
+         margin-bottom: 1.5rem; /* Space between containers */
+    }
+
+    /* Headers */
     h1 {
-        color: #0F172A; /* Darker text */
-        font-weight: 600; /* Semi-bold */
+        color: #111827; /* Darker */
+        font-weight: 700; /* Bolder */
+        text-align: center; /* Center title */
+        margin-bottom: 0.5rem;
     }
-     h2, h3 {
-        color: #334155; /* Slightly lighter for subheaders */
-        font-weight: 500;
+    h2, h3 {
+        color: #1F2937;
+        font-weight: 600;
+        border-bottom: 1px solid #E5E7EB; /* Underline subheaders */
+        padding-bottom: 0.4rem;
+        margin-bottom: 1rem;
     }
+    /* App Subtitle */
+    .main .block-container > div:nth-child(2) > div > div > p { /* Target the subtitle markdown */
+       text-align: center;
+       color: #4B5563; /* Grey text */
+       font-size: 1.1rem;
+       margin-bottom: 2rem;
+    }
+
 
     /* Input Widgets */
-    .stTextInput textarea, .stFileUploader div[data-testid="stFileUploaderDropzone"] {
-        border-radius: 0.375rem; /* Slightly rounded corners */
-        border: 1px solid #CBD5E1; /* Subtle border */
-        background-color: #FFFFFF;
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    }
-    .stTextInput textarea:focus, .stFileUploader div[data-testid="stFileUploaderDropzone"]:focus-within {
-        border-color: #007AFF; /* Use primary color for focus */
-        box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.2); /* Focus ring */
-    }
-
-    /* Button Styling */
-    .stButton > button {
-        border-radius: 0.375rem;
-        padding: 0.6rem 1.2rem;
-        font-weight: 500;
-        transition: background-color 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
-        border: none; /* Remove default border */
-    }
-    /* Primary Button specific */
-     .stButton > button[kind="primary"] {
-        background-color: #007AFF; /* Primary blue */
-        color: white;
-        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-    }
-    .stButton > button[kind="primary"]:hover {
-        background-color: #005ECB; /* Darker blue on hover */
-        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
-    }
-     .stButton > button[kind="primary"]:focus {
-        box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.4); /* Focus ring */
-        outline: none;
-    }
-    /* Download Button Specific (often secondary style) */
-    .stDownloadButton > button {
-        border-radius: 0.375rem;
-        padding: 0.5rem 1rem;
-        font-weight: 500;
-        background-color: #E5E7EB; /* Light grey */
-        color: #1F2937; /* Dark text */
+    .stTextInput textarea,
+    .stFileUploader div[data-testid="stFileUploaderDropzone"],
+    .stTextArea textarea {
+        border-radius: 0.5rem;
         border: 1px solid #D1D5DB;
-        transition: background-color 0.2s ease-in-out;
+        background-color: #F9FAFB; /* Slightly off-white input background */
+        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05);
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
     }
-    .stDownloadButton > button:hover {
-        background-color: #D1D5DB; /* Darker grey */
-        border-color: #9CA3AF;
+    .stTextInput textarea:focus,
+    .stFileUploader div[data-testid="stFileUploaderDropzone"]:focus-within,
+    .stTextArea textarea:focus {
+        border-color: #007AFF;
+        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05), 0 0 0 3px rgba(0, 122, 255, 0.2);
+        background-color: #FFFFFF;
+    }
+    .stFileUploader p { /* Style file uploader text */
+        font-size: 0.95rem;
+        color: #4B5563;
     }
 
     /* Radio Buttons */
     div[role="radiogroup"] > label {
-        padding: 0.5rem 0.75rem;
-        border: 1px solid #E5E7EB;
-        border-radius: 0.375rem;
+        background-color: #FFFFFF;
+        border: 1px solid #D1D5DB;
+        border-radius: 0.5rem;
+        padding: 0.6rem 1rem;
         margin-right: 0.5rem;
-        transition: background-color 0.2s ease, border-color 0.2s ease;
+        transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    }
+    div[role="radiogroup"] label:hover {
+        border-color: #9CA3AF;
     }
     div[role="radiogroup"] input[type="radio"]:checked + div {
-       /* Style the selected radio button label background if needed */
-       /* background-color: #DBEAFE; */ /* Example: Light blue background */
-       /* border-color: #007AFF; */
+       background-color: #EFF6FF; /* Light blue background for selected */
+       border-color: #007AFF;
+       color: #005ECB;
+       font-weight: 500;
+       box-shadow: 0 1px 3px rgba(0, 122, 255, 0.1);
     }
 
-    /* Placeholders / Output Area */
-    .stAlert { /* Style st.info, st.error etc. */
-        border-radius: 0.375rem;
-        border-left: 4px solid; /* Keep the left border for type indication */
-        padding: 1rem;
+    /* Button Styling */
+    .stButton > button {
+        border-radius: 0.5rem;
+        padding: 0.75rem 1.5rem; /* Larger padding */
+        font-weight: 600; /* Bolder text */
+        transition: all 0.2s ease-in-out;
+        border: none;
+        width: 100%; /* Make buttons take full width */
     }
-    /* Specific alert styles */
-    .stAlert[data-baseweb="notification"][kind="info"] { border-left-color: #007AFF; background-color: #EFF6FF; }
-    .stAlert[data-baseweb="notification"][kind="error"] { border-left-color: #EF4444; background-color: #FEF2F2; }
-    .stAlert[data-baseweb="notification"][kind="warning"] { border-left-color: #F59E0B; background-color: #FFFBEB; }
-    .stAlert[data-baseweb="notification"][kind="success"] { border-left-color: #10B981; background-color: #ECFDF5; }
+    .stButton > button[kind="primary"] {
+        background-color: #007AFF;
+        color: white;
+        box-shadow: 0 4px 6px rgba(0, 122, 255, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+    .stButton > button[kind="primary"]:hover {
+        background-color: #005ECB;
+        box-shadow: 0 7px 14px rgba(0, 122, 255, 0.1), 0 3px 6px rgba(0, 0, 0, 0.08);
+        transform: translateY(-1px);
+    }
+     .stButton > button[kind="primary"]:focus {
+        box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.4);
+        outline: none;
+    }
+     .stButton > button:disabled,
+     .stButton > button[kind="primary"]:disabled {
+         background-color: #D1D5DB; /* Grey background when disabled */
+         color: #6B7280;
+         box-shadow: none;
+         transform: none;
+         cursor: not-allowed;
+     }
 
+    /* Download Button */
+    .stDownloadButton > button {
+        border-radius: 0.5rem;
+        padding: 0.6rem 1.2rem;
+        font-weight: 500;
+        background-color: #F3F4F6;
+        color: #1F2937;
+        border: 1px solid #D1D5DB;
+        transition: background-color 0.2s ease-in-out;
+        width: auto; /* Don't force full width */
+        margin-top: 1rem; /* Add space above download button */
+    }
+    .stDownloadButton > button:hover {
+        background-color: #E5E7EB;
+        border-color: #9CA3AF;
+    }
 
-    /* Style the markdown output area */
-    .stMarkdown {
-        padding: 1rem;
-        background-color: #FAFAFA; /* Slightly off-white background */
-        border-radius: 0.375rem;
+    /* Output Area Styling */
+    div[data-testid="stVerticalBlock"].output-container { /* Add a class later */
+        background-color: #F9FAFB; /* Slightly different bg for output */
         border: 1px solid #E5E7EB;
-        margin-top: 1rem; /* Add space above the output */
+        border-radius: 0.75rem;
+        padding: 1.5rem;
+        margin-top: 1.5rem;
+        min-height: 150px; /* Ensure it has some height */
     }
+    .output-container .stMarkdown {
+        background-color: transparent; /* Make markdown bg transparent inside */
+        border: none;
+        padding: 0;
+        color: #374151; /* Standard text color for notes */
+        font-size: 1rem;
+        line-height: 1.6;
+    }
+    .output-container .stMarkdown h3,
+    .output-container .stMarkdown h4,
+    .output-container .stMarkdown strong { /* Style Q/A formatting */
+       color: #111827;
+       font-weight: 600;
+    }
+    .output-container .stAlert {
+        margin-top: 1rem;
+    }
+    .output-container .initial-prompt { /* Style for placeholder text */
+        color: #6B7280;
+        font-style: italic;
+        text-align: center;
+        padding-top: 2rem;
+    }
+
 
     /* Footer */
     footer {
-        margin-top: 2rem;
         text-align: center;
-        color: #6B7280; /* Grey text */
-        font-size: 0.875rem;
+        color: #9CA3AF; /* Lighter grey */
+        font-size: 0.8rem; /* Smaller */
+        padding-top: 2rem;
+        padding-bottom: 1rem;
+    }
+    footer a {
+        color: #6B7280;
+        text-decoration: none;
+    }
+     footer a:hover {
+        color: #007AFF;
+        text-decoration: underline;
     }
 
 </style>
@@ -143,30 +218,31 @@ st.markdown("""
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Add a check and instruction if the API key is missing
 if not API_KEY:
-    # Use a more styled error message
-    st.error("### 🛑 API Key Not Found!", icon="🔑")
+    st.error("### 🔑 API Key Not Found!", icon="🚨")
     st.markdown("""
-        Please add your `GEMINI_API_KEY` to a `.env` file in the same directory as the script.
-        You can get an API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
+        Please ensure your `GEMINI_API_KEY` is set in your environment variables
+        or in a `.env` file in the project root.
+        You can get a key from [Google AI Studio](https://aistudio.google.com/app/apikey).
     """)
-    st.stop() # Stop execution if no API key
+    st.stop()
 
-# --- Global variable for uploaded file response ---
+# --- Initialize Session State ---
+if 'processing' not in st.session_state:
+    st.session_state.processing = False
+if 'generated_notes' not in st.session_state:
+    st.session_state.generated_notes = None
+if 'error_message' not in st.session_state:
+    st.session_state.error_message = None
 if 'uploaded_audio_info' not in st.session_state:
     st.session_state.uploaded_audio_info = None
-if 'generated_notes' not in st.session_state: # Store notes in session state
-    st.session_state.generated_notes = None
 
+# --- Configure Gemini Model ---
 try:
     genai.configure(api_key=API_KEY)
     generation_config = {
-        "temperature": 0.7,
-        "top_p": 1.0,
-        "top_k": 32,
-        "max_output_tokens": 8192,
-        "response_mime_type": "text/plain",
+        "temperature": 0.7, "top_p": 1.0, "top_k": 32,
+        "max_output_tokens": 8192, "response_mime_type": "text/plain",
     }
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
@@ -175,31 +251,26 @@ try:
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     ]
     model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash", # Or "gemini-pro"
-        safety_settings=safety_settings,
-        generation_config=generation_config,
+        model_name="gemini-1.5-flash",
+        safety_settings=safety_settings, generation_config=generation_config,
     )
 except Exception as e:
-    st.error(f"### 😥 Error Initializing AI Model", icon="🔌")
+    st.error(f"### 🔌 Error Initializing AI Model", icon="🚨")
     st.error(f"Details: {e}")
     st.stop()
 
-# --- Helper Functions (No changes needed in logic) ---
+# --- Helper Functions (No changes needed in logic, added icons to errors) ---
 def extract_text_from_pdf(pdf_file_stream):
     try:
         pdf_file_stream.seek(0)
         pdf_reader = PyPDF2.PdfReader(pdf_file_stream)
-        text = ""
-        for page in pdf_reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
+        text = "".join(page.extract_text() + "\n" for page in pdf_reader.pages if page.extract_text())
         return text.strip() if text else None
     except PyPDF2.errors.PdfReadError as e:
-        st.error(f"Error reading PDF: {e}. Is it password-protected or corrupted?", icon="📄")
+        st.session_state.error_message = f"📄 Error reading PDF: {e}. Is it password-protected or corrupted?"
         return None
     except Exception as e:
-        st.error(f"An unexpected error occurred during PDF extraction: {e}", icon="⚙️")
+        st.session_state.error_message = f"⚙️ An unexpected error occurred during PDF extraction: {e}"
         return None
 
 def create_text_prompt(transcript, context=None):
@@ -291,23 +362,23 @@ def create_audio_prompt(context=None):
     prompt_parts.append("\n**GENERATED NOTES:**\n")
     return "\n".join(prompt_parts)
 
+
 # --- Streamlit App UI ---
 
 st.title("✨ SynthNotes AI")
-st.markdown("Transform your meeting recordings (Text, PDF, Audio) into structured, factual notes instantly.")
-st.divider()
+st.markdown("Instantly transform meeting recordings into structured, factual notes.")
 
 # --- Input Section ---
-with st.container(): # Group input elements
+with st.container(border=True):
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("1. Provide Meeting Source")
+        st.subheader("Source Input")
         input_method = st.radio(
-            "Select input type:",
+            "Input type:",
             ("Paste Text", "Upload PDF", "Upload Audio"),
+            key="input_method_radio",
             horizontal=True,
-            # label_visibility="collapsed" # Keep label for clarity
         )
 
         text_input = None
@@ -315,35 +386,54 @@ with st.container(): # Group input elements
         uploaded_audio_file = None
 
         if input_method == "Paste Text":
-            text_input = st.text_area("Paste full transcript here:", height=250, key="text_input", placeholder="Enter meeting transcript...")
+            text_input = st.text_area("Paste transcript:", height=200, key="text_input", placeholder="Paste the full meeting transcript here...")
         elif input_method == "Upload PDF":
-            uploaded_pdf_file = st.file_uploader("Upload PDF transcript:", type="pdf", key="pdf_uploader")
+            uploaded_pdf_file = st.file_uploader("Upload PDF:", type="pdf", key="pdf_uploader", help="Upload a PDF file containing the meeting transcript.")
         else: # Upload Audio
             uploaded_audio_file = st.file_uploader(
-                "Upload meeting audio:",
+                "Upload Audio:",
                 type=['wav', 'mp3', 'm4a', 'ogg', 'flac', 'aac'],
-                key="audio_uploader"
+                key="audio_uploader",
+                help="Upload an audio recording (WAV, MP3, M4A, etc.). Processing time depends on length."
             )
-            st.caption("Supports WAV, MP3, M4A, OGG, FLAC, AAC. Max size depends on API limits.")
 
     with col2:
-        st.subheader("2. Add Optional Context")
+        st.subheader("Context (Optional)")
         context_input = st.text_area(
-            "Context (e.g., attendees, goals, project name):",
-            height=250, # Match height
+            "Provide background:",
+            height=200, # Match height
             key="context_input",
-            placeholder="Provide any background info..."
+            placeholder="Add context like attendees, goals, project name...",
+            help="Adding context helps the AI understand the conversation better."
         )
 
-st.write("") # Add a bit of vertical space
+# --- Generate Button ---
+st.write("") # Spacer
+generate_button = st.button(
+    "🚀 Generate Notes",
+    type="primary",
+    use_container_width=True,
+    disabled=st.session_state.processing # Disable button when processing
+)
 
-# --- Processing Logic & Output Section ---
-submit_button = st.button("🚀 Generate Notes", type="primary", use_container_width=True)
-output_placeholder = st.container() # Use a container for output area
+# --- Output Section ---
+# Use st.container with a border for the output area
+output_container = st.container(border=True)
 
-# Display existing notes if they are in session state (e.g., after a refresh)
-if st.session_state.generated_notes:
-     with output_placeholder:
+# Add CSS class to the output container for specific styling
+output_container.markdown('<div class="output-container-marker"></div>', unsafe_allow_html=True) # Dummy element to help target with CSS sibling selector if needed, or just style based on structure
+
+with output_container:
+    if st.session_state.processing:
+        st.info("⏳ Processing your request... Please wait.", icon="🧠")
+        # Maybe add a progress bar if you have discrete steps?
+        # st.progress(50, text="Working...")
+
+    elif st.session_state.error_message:
+        st.error(st.session_state.error_message, icon="🚨")
+        st.session_state.error_message = None # Clear error after displaying
+
+    elif st.session_state.generated_notes:
         st.subheader("✅ Generated Notes")
         st.markdown(st.session_state.generated_notes)
         st.download_button(
@@ -351,131 +441,136 @@ if st.session_state.generated_notes:
              data=st.session_state.generated_notes,
              file_name="meeting_notes.txt",
              mime="text/plain",
-             key='download-txt-persist'
+             key='download-txt'
          )
+    else:
+        # Initial state or after clearing
+        st.markdown("<p class='initial-prompt'>Generated notes will appear here once processed.</p>", unsafe_allow_html=True)
 
-if submit_button:
-    # Clear previous state before generating new notes
+
+# --- Processing Logic (Triggered by Button Click) ---
+if generate_button:
+    # 1. Set processing state and clear previous output/errors
+    st.session_state.processing = True
     st.session_state.generated_notes = None
-    output_placeholder.empty() # Clear the output area
+    st.session_state.error_message = None
+    st.rerun() # Rerun immediately to show the spinner and disable button
 
+# --- Separate block for actual processing after rerun ---
+if st.session_state.processing:
+    # This block runs *after* the rerun triggered by the button click
     transcript = None
     audio_file_input = None
-    error_message = None
-    input_type = None
+    input_type = st.session_state.get("input_method_radio", "Paste Text") # Get selected method
 
-    # --- Input Validation and Preparation ---
-    num_inputs = sum([bool(text_input), bool(uploaded_pdf_file), bool(uploaded_audio_file)])
+    # 2. Input Validation and Preparation
+    # Need to access widget values via their keys after rerun
+    text_content = st.session_state.get("text_input", "")
+    pdf_file = st.session_state.get("pdf_uploader")
+    audio_file = st.session_state.get("audio_uploader")
 
-    if num_inputs > 1:
-        error_message = "⚠️ Please provide input using only ONE method (Text, PDF, or Audio)."
-    elif num_inputs == 0:
-        error_message = "⚠️ Please provide input via text, PDF, or audio upload."
-    else:
-        processing_message = "" # Message for spinner
-        if text_input:
-            transcript = text_input.strip()
-            if not transcript: error_message = "⚠️ Text area is empty. Please paste the transcript."
-            else: input_type = "text"; processing_message = "Analyzing transcript..."
-        elif uploaded_pdf_file:
-            input_type = "pdf"; processing_message = "Extracting text from PDF..."
-            with st.spinner(processing_message):
-                pdf_stream = io.BytesIO(uploaded_pdf_file.getvalue())
-                transcript = extract_text_from_pdf(pdf_stream) # Errors handled inside
-                if transcript is None: error_message = " " # Space to prevent further processing, error already shown
-                elif not transcript: error_message = "⚠️ The uploaded PDF appears to contain no extractable text."
-                # Add success toast for PDF extraction
-                if transcript and not error_message: st.toast("📄 PDF processed!", icon="✅")
-        elif uploaded_audio_file:
-             input_type = "audio"; processing_message = "Processing audio file..."
-             with st.spinner(processing_message):
-                try:
-                    audio_bytes = uploaded_audio_file.getvalue()
-                    st.toast(f"⬆️ Uploading '{uploaded_audio_file.name}'...", icon="☁️")
-                    audio_file_for_api = genai.upload_file(
-                        content=audio_bytes,
-                        display_name=f"audio_{int(time.time())}",
-                        mime_type=uploaded_audio_file.type
-                    )
-                    st.session_state.uploaded_audio_info = audio_file_for_api
+    num_inputs = sum([bool(text_content), bool(pdf_file), bool(audio_file)])
 
-                    while audio_file_for_api.state.name == "PROCESSING":
-                         time.sleep(2)
-                         audio_file_for_api = genai.get_file(audio_file_for_api.name)
-                    if audio_file_for_api.state.name == "FAILED":
-                        error_message = f"😥 Audio file processing failed for '{uploaded_audio_file.name}'."
-                        try: genai.delete_file(audio_file_for_api.name)
-                        except Exception: pass
-                        st.session_state.uploaded_audio_info = None
-                    elif audio_file_for_api.state.name == "ACTIVE":
-                        st.toast(f"🎧 Audio '{uploaded_audio_file.name}' ready!", icon="✅")
-                        audio_file_input = audio_file_for_api
-                    else:
-                        error_message = f"Audio file '{uploaded_audio_file.name}' is in an unexpected state: {audio_file_for_api.state.name}"
-                        try: genai.delete_file(audio_file_for_api.name)
-                        except Exception: pass
-                        st.session_state.uploaded_audio_info = None
-                except Exception as e:
-                    error_message = f"😥 Error handling audio file: {e}"
+    # Check based on selected input_method
+    if input_type == "Paste Text" and not text_content:
+        st.session_state.error_message = "⚠️ Text area is empty. Please paste the transcript."
+    elif input_type == "Upload PDF" and not pdf_file:
+        st.session_state.error_message = "⚠️ No PDF file uploaded. Please upload a PDF."
+    elif input_type == "Upload Audio" and not audio_file:
+         st.session_state.error_message = "⚠️ No audio file uploaded. Please upload audio."
+    # Note: No check for multiple inputs needed if radio button forces selection
+
+    # 3. Process Valid Input
+    if not st.session_state.error_message:
+        try:
+            if input_type == "Paste Text":
+                transcript = text_content.strip()
+                st.toast("📝 Using pasted text.", icon="✅")
+            elif input_type == "Upload PDF":
+                st.toast("📄 Processing PDF...", icon="⏳")
+                pdf_stream = io.BytesIO(pdf_file.getvalue())
+                transcript = extract_text_from_pdf(pdf_stream) # Sets error_message on failure
+                if transcript and not st.session_state.error_message:
+                    st.toast("📄 PDF processed!", icon="✅")
+                elif not transcript and not st.session_state.error_message:
+                     st.session_state.error_message = "⚠️ PDF contains no extractable text."
+            elif input_type == "Upload Audio":
+                st.toast(f"☁️ Uploading '{audio_file.name}'...", icon="⬆️")
+                audio_bytes = audio_file.getvalue()
+                audio_file_for_api = genai.upload_file(
+                    content=audio_bytes, display_name=f"audio_{int(time.time())}", mime_type=audio_file.type
+                )
+                st.session_state.uploaded_audio_info = audio_file_for_api # Store info
+                # Poll for readiness
+                polling_start_time = time.time()
+                while audio_file_for_api.state.name == "PROCESSING":
+                    if time.time() - polling_start_time > 300: # 5 min timeout for processing
+                        raise TimeoutError("Audio processing timed out after 5 minutes.")
+                    st.toast(f"🎧 Processing '{audio_file.name}' on server...", icon="⏳")
+                    time.sleep(5) # Poll less frequently
+                    audio_file_for_api = genai.get_file(audio_file_for_api.name)
+
+                if audio_file_for_api.state.name == "FAILED":
+                    st.session_state.error_message = f"😥 Audio processing failed for '{audio_file.name}'."
+                    try: genai.delete_file(audio_file_for_api.name)
+                    except Exception: pass
+                    st.session_state.uploaded_audio_info = None
+                elif audio_file_for_api.state.name == "ACTIVE":
+                    st.toast(f"🎧 Audio '{audio_file.name}' ready!", icon="✅")
+                    audio_file_input = audio_file_for_api
+                else:
+                    st.session_state.error_message = f"Unexpected audio state: {audio_file_for_api.state.name}"
+                    try: genai.delete_file(audio_file_for_api.name)
+                    except Exception: pass
                     st.session_state.uploaded_audio_info = None
 
-    # --- Call Gemini if Input is Valid ---
-    if not error_message and (transcript or audio_file_input):
-        generation_spinner_message = "🧠 Generating notes with AI..."
-        with st.spinner(generation_spinner_message):
-            try:
-                final_context = context_input.strip() if context_input else None
+            # 4. Call Gemini if input prepared successfully
+            if not st.session_state.error_message and (transcript or audio_file_input):
+                st.toast("🧠 Generating notes with AI...", icon="✨")
+                final_context = st.session_state.get("context_input", "").strip()
                 response = None
 
-                if input_type in ["text", "pdf"]:
+                if input_type in ["Paste Text", "Upload PDF"]:
                     full_prompt = create_text_prompt(transcript, final_context)
                     response = model.generate_content(full_prompt)
-                elif input_type == "audio":
+                elif input_type == "Upload Audio":
                     full_prompt = create_audio_prompt(final_context)
                     response = model.generate_content([full_prompt, audio_file_input])
-                    # Clean up audio after use
+                    # Clean up audio file from Google Cloud *after successful use*
                     try:
                         if st.session_state.uploaded_audio_info:
                             genai.delete_file(st.session_state.uploaded_audio_info.name)
                             st.session_state.uploaded_audio_info = None
-                            # st.toast("☁️ Audio file cleaned up.", icon="🗑️") # Optional feedback
+                            st.toast("☁️ Temporary audio file cleaned up.", icon="🗑️")
                     except Exception as delete_err:
-                         st.warning(f"Could not delete temp audio file: {delete_err}", icon="⚠️")
-                else:
-                    raise ValueError("Invalid input_type.")
+                        st.warning(f"Could not delete temp audio file: {delete_err}", icon="⚠️") # Non-fatal
 
                 if response and response.text:
-                    st.session_state.generated_notes = response.text # Store in session state
+                    st.session_state.generated_notes = response.text
                     st.toast("🎉 Notes generated successfully!", icon="✅")
-                    # Display immediately after generation (will also be shown on reload)
-                    with output_placeholder:
-                        st.subheader("✅ Generated Notes")
-                        st.markdown(st.session_state.generated_notes) # Display from session state
-                        st.download_button(
-                            label="⬇️ Download Notes (.txt)",
-                            data=st.session_state.generated_notes,
-                            file_name="meeting_notes.txt",
-                            mime="text/plain",
-                            key='download-txt-generate' # Different key from persistent one
-                        )
-                else:
-                    error_message = " Gemini returned an empty response." # Treat empty response as error
+                elif response: # Check if response exists but text is empty
+                     st.session_state.error_message = "🤔 AI returned an empty response. Try adjusting context or input."
+                else: # Handle cases where the API call itself might fail implicitly
+                    st.session_state.error_message = "😥 AI generation failed. Please check API key and input."
 
-            except Exception as e:
-                 error_message = f"😥 AI generation failed: {e}"
-                 # Attempt audio cleanup on error
-                 try:
-                     if input_type == "audio" and st.session_state.uploaded_audio_info:
-                         genai.delete_file(st.session_state.uploaded_audio_info.name)
-                         st.session_state.uploaded_audio_info = None
-                 except Exception: pass
 
-    # --- Display Errors ---
-    if error_message:
-        with output_placeholder: # Show errors in the output area
-             st.error(error_message, icon="🚨")
+        except Exception as e:
+            st.session_state.error_message = f"❌ An error occurred: {e}"
+            # Attempt audio cleanup even on general error if info exists
+            try:
+                if input_type == "Upload Audio" and st.session_state.uploaded_audio_info:
+                    genai.delete_file(st.session_state.uploaded_audio_info.name)
+                    st.session_state.uploaded_audio_info = None
+            except Exception: pass # Ignore cleanup error during main error
+
+
+    # 5. Finish processing
+    st.session_state.processing = False
+    st.rerun() # Rerun again to update UI (remove spinner, show results/error)
 
 
 # --- Footer ---
 st.divider()
-st.caption("Powered by Google Gemini 1.5 | Designed by SynthNotes AI")
+st.caption(
+    "Powered by [Google Gemini 1.5](https://deepmind.google/technologies/gemini/) | App by SynthNotes AI"
+)
