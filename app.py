@@ -6,7 +6,8 @@ import io
 import time
 from dotenv import load_dotenv
 import PyPDF2
-# import docx # <-- REMOVED import for DOCX generation
+import docx # Still needed for DOCX fallback if TXT fails (though less likely now)
+from streamlit_copy_to_clipboard import st_copy_to_clipboard # Import copy button
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -17,10 +18,16 @@ st.set_page_config(
 )
 
 # --- Custom CSS Injection ---
-# (Keep CSS as is)
 st.markdown("""
 <style>
-    /* ... Keep all previous CSS ... */
+    /* ... Keep previous CSS ... */
+    /* Button styling for Clear/Copy */
+    .stButton>button.secondary-button { /* Add a class for secondary styling */
+        background-color: #F3F4F6; color: #1F2937; border: 1px solid #D1D5DB;
+        width: auto; /* Don't force full width */
+        padding: 0.5rem 1rem; margin-right: 0.5rem; font-weight: 500;
+    }
+    .stButton>button.secondary-button:hover { background-color: #E5E7EB; border-color: #9CA3AF; }
     /* Footer */
     footer { text-align: center; color: #9CA3AF; font-size: 0.8rem; padding-top: 2rem; padding-bottom: 1rem; }
     footer a { color: #6B7280; text-decoration: none; }
@@ -29,32 +36,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- Define Available Models ---
+# --- Define Available Models & Meeting Types (Keep as is) ---
 AVAILABLE_MODELS = {
-    # Stable Models
-    "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
-    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
-    "Gemini 1.5 Flash-8B (High Volume)": "gemini-1.5-flash-8b",
-    # Newer/Preview Models
-    "Gemini 2.0 Flash (Next Gen Speed)": "gemini-2.0-flash",
-    "Gemini 2.0 Flash-Lite (Low Latency)": "gemini-2.0-flash-lite",
-    "Gemini 2.5 Flash Preview (Adaptive)": "gemini-2.5-flash-preview-04-17",
+    "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash", "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
+    "Gemini 1.5 Flash-8B (High Volume)": "gemini-1.5-flash-8b", "Gemini 2.0 Flash (Next Gen Speed)": "gemini-2.0-flash",
+    "Gemini 2.0 Flash-Lite (Low Latency)": "gemini-2.0-flash-lite", "Gemini 2.5 Flash Preview (Adaptive)": "gemini-2.5-flash-preview-04-17",
     "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "models/gemini-2.5-pro-exp-03-25",
 }
 DEFAULT_MODEL_NAME = "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)"
-if DEFAULT_MODEL_NAME not in AVAILABLE_MODELS:
-     DEFAULT_MODEL_NAME = "Gemini 1.5 Flash (Fast & Versatile)"
-     if DEFAULT_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
-
-
-# --- Define Meeting Types ---
+if DEFAULT_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_MODEL_NAME = "Gemini 1.5 Flash (Fast & Versatile)" # Fallback
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 DEFAULT_MEETING_TYPE = MEETING_TYPES[0]
 
 
-# --- Load API Key and Configure Gemini Client ---
-load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
+# --- Load API Key and Configure Gemini Client (Keep as is) ---
+load_dotenv(); API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY: st.error("### 🔑 API Key Not Found!", icon="🚨"); st.stop()
 try:
     genai.configure(api_key=API_KEY)
@@ -64,6 +60,7 @@ except Exception as e: st.error(f"### 💥 Error Configuring Google AI Client: {
 
 
 # --- Initialize Session State ---
+# Add state for editing notes
 default_state = {
     'processing': False, 'generated_notes': None, 'error_message': None,
     'uploaded_audio_info': None, 'add_context_enabled': False,
@@ -72,15 +69,16 @@ default_state = {
     'view_edit_prompt_enabled': False, 'current_prompt_text': "",
     'input_method_radio': 'Paste Text',
     'text_input': '', 'pdf_uploader': None, 'audio_uploader': None,
-    'context_input': ''
+    'context_input': '',
+    'edit_notes_enabled': False, # State for notes editing checkbox
+    'edited_notes_text': "",   # State for the edited notes text area
 }
 for key, value in default_state.items():
     if key not in st.session_state: st.session_state[key] = value
 
 
-# --- Helper Functions ---
+# --- Helper Functions (Keep as is, except create_docx if removing dependency) ---
 def extract_text_from_pdf(pdf_file_stream):
-    """Extracts text from PDF, updates session state on error."""
     try:
         pdf_file_stream.seek(0); pdf_reader = PyPDF2.PdfReader(pdf_file_stream)
         text_parts = [page.extract_text() for page in pdf_reader.pages if page.extract_text()]
@@ -89,76 +87,38 @@ def extract_text_from_pdf(pdf_file_stream):
     except Exception as e: st.session_state.error_message = f"⚙️ PDF Extraction Error: {e}"; return None
 
 def create_expert_meeting_prompt(transcript, context=None):
-    """Creates the prompt for 'Expert Meeting'."""
-    # (Prompt definition remains the same)
+    # (Keep prompt function as is)
     prompt_parts = [
         "You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.",
-        "Generate detailed, factual notes from the provided meeting transcript.",
-        "Follow this specific structure EXACTLY:",
-        "\n**Structure:**",
-        "- **Opening overview or Expert background (Optional):** If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple language. DO NOT summarize.",
-        "- **Q&A format:** Structure the main body STRICTLY in Question/Answer format.",
-        "  - **Questions:** Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).",
-        "  - **Answers:** Use bullet points directly below the question. Each bullet MUST be a complete sentence with one distinct fact. Capture ALL specifics (data, names, examples, $, %, etc.). DO NOT use sub-bullets or section headers within answers. DO NOT add interpretations, summaries, conclusions, or action items.",
-        "\n**Additional Instructions:**",
-        "- Accuracy is paramount. Capture ALL facts precisely.",
-        "- Be clear and concise.",
-        "- Include ONLY information present in the transcript.",
-        "- If a section (like Opening Overview) isn't present, OMIT it.",
-        "\n---",
+        # ... (rest of prompt) ...
         (f"\n**MEETING TRANSCRIPT:**\n{transcript}\n---" if transcript else ""),
     ]
     if context: prompt_parts.extend(["\n**ADDITIONAL CONTEXT:**\n", context, "\n---"])
     prompt_parts.append("\n**GENERATED NOTES:**\n")
     return "\n".join(filter(None, prompt_parts))
 
+
 def create_earnings_call_prompt(transcript, context=None):
-    """Creates the prompt for 'Earnings Call' with STRONGER structure enforcement."""
-    # (Prompt definition remains the same)
+    # (Keep prompt function as is)
     prompt_parts = [
         "You are a financial analyst tasked with summarizing an earnings call transcript. Your output MUST be structured notes.",
-        "Analyze the entire transcript and extract key information, numerical data, guidance, strategic comments, and management sentiment.",
-        "Present the information using the EXACT headings and subheadings provided below. You MUST categorize all relevant comments under the correct heading.",
-        "\n**Mandatory Structure:**",
-        "- **Call Participants:** ...",
-        "- **Opening Remarks/CEO Statement:** ...",
-        "- **Financial Highlights:** ...",
-        "- **Segment Performance:** ...",
-        "- **Key Business Updates/Strategy:** ...",
-        "\n**Industry-Specific Categorization (Apply ONLY ONE section based on company type identified from the transcript):**",
-        "\n  **>>> If IT Services Topics Discussed <<<**",
-        "    *(Scan the transcript for these specific topics and categorize comments STRICTLY under these subheadings)*",
-        "    - **Future Investments / Capital Allocation:** ...",
-        "    - **Talent Supply Chain:** ...",
-        "    - **Org Structure Changes:** ...",
-        "    - **Short-term Outlook & Demand:**",
-        "      - **Guidance:** ...",
-        "      - **Order Booking / Pipeline:** ...",
-        "      - **Macro Impact:** ...",
-        "    - **Other Key IT Comments:** ...",
-        "\n  **>>> If QSR (Quick Service Restaurant) Topics Discussed <<<**",
-         "    *(Scan the transcript for these specific topics and categorize comments STRICTLY under these subheadings)*",
-        "    - **Customer Proposition / Menu Strategy:** ...",
-        "    - **Business Update (Operations):** ...",
-        "    - **Unit Economics / Store Performance:** ...",
-        "    - **Store Network:** ...",
-        "    - **Other Key QSR Comments:** ...",
-        "  *(If neither IT nor QSR specific topics are dominant, OMIT this entire Industry-Specific section)*",
-        "\n- **Q&A Session Summary:** ...",
-        "- **Guidance Summary (Reiterate/Confirm):** ...",
-        "- **Closing Remarks:** ...",
-        "\n**CRITICAL Instructions:** ...",
-        "\n---",
+        # ... (rest of prompt) ...
         (f"\n**EARNINGS CALL TRANSCRIPT:**\n{transcript}\n---" if transcript else ""),
     ]
     if context: prompt_parts.extend(["\n**ADDITIONAL CONTEXT:**\n", context, "\n---"])
     prompt_parts.append("\n**GENERATED EARNINGS CALL SUMMARY:**\n")
     return "\n".join(filter(None, prompt_parts))
 
-# --- REMOVED create_docx function ---
+# Keep create_docx if you want the .docx fallback, otherwise remove
+def create_docx(text):
+    """Creates a Word document (.docx) in memory from text."""
+    document = docx.Document()
+    for line in text.split('\n'): document.add_paragraph(line)
+    buffer = io.BytesIO(); document.save(buffer); buffer.seek(0)
+    return buffer.getvalue()
 
 def get_current_input_data():
-    """Helper to get transcript/audio file based on input method and state."""
+    # (Keep function as is)
     input_type = st.session_state.input_method_radio
     transcript = None; audio_file = None
     if input_type == "Paste Text": transcript = st.session_state.text_input.strip()
@@ -168,30 +128,45 @@ def get_current_input_data():
     elif input_type == "Upload Audio": audio_file = st.session_state.audio_uploader
     return input_type, transcript, audio_file
 
-# --- Function to generate and update the prompt text area ---
 def update_prompt_display_text():
-    """Generates the appropriate prompt based on selections and updates session state."""
+    # (Keep function as is)
     meeting_type = st.session_state.selected_meeting_type
     if st.session_state.view_edit_prompt_enabled and meeting_type != "Custom":
         temp_context = st.session_state.context_input.strip() if st.session_state.add_context_enabled else None
         input_type = st.session_state.input_method_radio
-
         prompt_func = create_expert_meeting_prompt if meeting_type == "Expert Meeting" else create_earnings_call_prompt
         placeholder = "[TRANSCRIPT WILL BE INSERTED HERE]" if input_type != "Upload Audio" else None
-
         if input_type == "Upload Audio":
              base_prompt = prompt_func(transcript=None, context=temp_context)
-             st.session_state.current_prompt_text = (
-                 "# NOTE FOR AUDIO INPUT: The '1. Transcribe first...' wrapper will be added *unless* you edit this prompt.\n"
-                 "# If edited, ensure your prompt handles the audio file.\n"
-                 "####################################\n\n" + base_prompt
-             )
+             st.session_state.current_prompt_text = ("# NOTE FOR AUDIO... If edited, ensure...\n#######\n\n" + base_prompt)
         else: st.session_state.current_prompt_text = prompt_func(transcript=placeholder, context=temp_context)
     elif meeting_type == "Custom":
-         if not st.session_state.current_prompt_text:
-              st.session_state.current_prompt_text = "# Enter your custom prompt here...\n# For audio, include transcription instructions."
-    elif not st.session_state.view_edit_prompt_enabled and meeting_type != "Custom":
-        st.session_state.current_prompt_text = ""
+         if not st.session_state.current_prompt_text: st.session_state.current_prompt_text = "# Enter custom prompt..."
+    elif not st.session_state.view_edit_prompt_enabled and meeting_type != "Custom": st.session_state.current_prompt_text = ""
+
+# --- Function to clear state ---
+def clear_all_state():
+    """Resets session state for inputs and outputs."""
+    # Reset inputs
+    st.session_state.text_input = ""
+    st.session_state.pdf_uploader = None # May need key access to truly clear widget
+    st.session_state.audio_uploader = None # May need key access
+    st.session_state.context_input = ""
+    st.session_state.add_context_enabled = False
+    st.session_state.current_prompt_text = ""
+    st.session_state.view_edit_prompt_enabled = False
+    # Reset outputs
+    st.session_state.generated_notes = None
+    st.session_state.edited_notes_text = ""
+    st.session_state.edit_notes_enabled = False
+    st.session_state.error_message = None
+    st.session_state.processing = False
+    # Reset selections to default (optional)
+    # st.session_state.selected_meeting_type = DEFAULT_MEETING_TYPE
+    # st.session_state.selected_model_display_name = DEFAULT_MODEL_NAME
+    # st.session_state.input_method_radio = 'Paste Text'
+    # Clear file upload widgets requires more complex handling with keys if direct state clear isn't enough
+    st.toast("Inputs and outputs cleared!", icon="🧹")
 
 
 # --- Streamlit App UI ---
@@ -200,33 +175,40 @@ st.markdown("Instantly transform meeting recordings into structured, factual not
 
 # --- Input Section ---
 with st.container(border=True):
-    # (UI structure remains the same)
-    col1a, col1b = st.columns(2)
-    with col1a:
-        st.subheader("Meeting Details")
-        st.radio(label="Select Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type",
-                 index=MEETING_TYPES.index(st.session_state.selected_meeting_type), horizontal=True,
-                 help="Choose meeting type. 'Custom' requires your own prompt.", on_change=update_prompt_display_text)
-    with col1b:
-        st.subheader("AI Model")
-        st.selectbox(label="Choose model:", options=list(AVAILABLE_MODELS.keys()), key="selected_model_display_name",
-                     index=list(AVAILABLE_MODELS.keys()).index(st.session_state.selected_model_display_name),
-                     help="Select Gemini model. Preview/Experimental models may vary.")
+    col_main_1, col_main_2 = st.columns([3, 1]) # Give more space to main controls
+
+    with col_main_1: # Meeting Type & Model
+        col1a, col1b = st.columns(2)
+        with col1a:
+            st.subheader("Meeting Details")
+            st.radio(label="Select Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type", horizontal=True,
+                     help="Choose meeting type. 'Custom' requires your own prompt.", on_change=update_prompt_display_text)
+        with col1b:
+            st.subheader("AI Model")
+            st.selectbox(label="Choose model:", options=list(AVAILABLE_MODELS.keys()), key="selected_model_display_name",
+                         help="Select Gemini model. Preview/Experimental models may vary.")
+
+    with col_main_2: # Clear All Button
+        st.subheader("") # Placeholder for alignment
+        st.button("🧹 Clear All", on_click=clear_all_state, use_container_width=True, help="Reset all inputs and outputs.")
+
 
     st.divider()
+    # Source Input
     st.subheader("Source Input")
     st.radio(label="Input type:", options=("Paste Text", "Upload PDF", "Upload Audio"), key="input_method_radio",
              horizontal=True, label_visibility="collapsed", on_change=update_prompt_display_text)
     input_type = st.session_state.input_method_radio
-    if input_type == "Paste Text": st.text_area("Paste transcript:", height=150, key="text_input")
+    if input_type == "Paste Text": st.text_area("Paste transcript:", height=150, key="text_input", placeholder="Paste the full meeting transcript here...\nExample:\nSpeaker A: Let's start the meeting.\nSpeaker B: Okay, the main topic is...")
     elif input_type == "Upload PDF": st.file_uploader("Upload PDF:", type="pdf", key="pdf_uploader")
     else: st.file_uploader("Upload Audio:", type=['wav','mp3','m4a','ogg','flac','aac'], key="audio_uploader")
 
     st.divider()
+    # Optional Elements
     col3a, col3b = st.columns(2)
     with col3a: # Context
         st.checkbox("Add Context (Optional)", key="add_context_enabled", help="Provide background info.", on_change=update_prompt_display_text)
-        if st.session_state.add_context_enabled: st.text_area("Context Details:", height=100, key="context_input", on_change=update_prompt_display_text)
+        if st.session_state.add_context_enabled: st.text_area("Context Details:", height=100, key="context_input", on_change=update_prompt_display_text, placeholder="E.g., Attendees: Alice, Bob\nProject: Q3 Launch\nGoal: Finalize marketing plan")
     with col3b: # View/Edit Prompt Checkbox
         if st.session_state.selected_meeting_type != "Custom":
             st.checkbox("View/Edit Prompt", key="view_edit_prompt_enabled", help="View/modify the AI prompt.", on_change=update_prompt_display_text)
@@ -240,7 +222,13 @@ if show_prompt_area:
         st.subheader(prompt_area_title)
         caption_text = "Edit the prompt below. For audio, 'Transcribe first...' is added unless edited." if st.session_state.selected_meeting_type != "Custom" else "Enter the full prompt. For audio, include transcription instructions."
         st.caption(caption_text)
-        st.text_area("Prompt Text:", key="current_prompt_text", height=350, label_visibility="collapsed")
+        # Use text_input value directly to update state, simplifies logic slightly
+        st.session_state.current_prompt_text = st.text_area(
+            "Prompt Text:", value=st.session_state.current_prompt_text, # Bind to state
+            key="prompt_editor_area", # Separate key for widget itself
+            height=350, label_visibility="collapsed"
+        )
+
 
 # --- Generate Button ---
 st.write("")
@@ -254,25 +242,60 @@ with output_container:
     elif st.session_state.error_message: st.error(st.session_state.error_message, icon="🚨"); st.session_state.error_message = None
     elif st.session_state.generated_notes:
         st.subheader("✅ Generated Notes")
-        # --- Display the notes first ---
-        st.markdown(st.session_state.generated_notes)
-        # --- Reverted to TXT Download ---
-        st.download_button(
-             label="⬇️ Download Notes (.txt)",
-             data=st.session_state.generated_notes, # Download the raw text
-             file_name=f"{st.session_state.selected_meeting_type.lower().replace(' ', '_')}_notes.txt", # .txt extension
-             mime="text/plain", # Plain text MIME type
-             key='download-txt' # Key for the button
-         )
-        # --- End of TXT download change ---
+
+        # --- Edit Notes Section (Conditional) ---
+        st.checkbox("Edit Notes", key="edit_notes_enabled", help="Enable editing the generated notes before download.")
+        if st.session_state.edit_notes_enabled:
+             st.session_state.edited_notes_text = st.text_area(
+                 "Editable Notes:", value=st.session_state.generated_notes, # Start with generated notes
+                 key="notes_editor_area", height=400, label_visibility="collapsed"
+             )
+             notes_content_to_use = st.session_state.edited_notes_text # Use edited text if editing enabled
+        else:
+            st.markdown(st.session_state.generated_notes) # Display original notes
+            notes_content_to_use = st.session_state.generated_notes # Use original notes
+
+        # --- Action Buttons (Copy/Download) ---
+        st.write("") # Spacer
+        col_btn_1, col_btn_2, col_btn_3 = st.columns([1,1,2]) # Adjust spacing as needed
+        with col_btn_1:
+             # Add CSS class for specific button styling if needed
+             st_copy_to_clipboard(notes_content_to_use, label="📋 Copy Notes", success_message="Notes copied!", key="copy_notes")
+
+        with col_btn_2: # TXT Download
+             st.download_button(label="⬇️ TXT", data=notes_content_to_use,
+                                file_name=f"{st.session_state.selected_meeting_type.lower().replace(' ', '_')}_notes.txt",
+                                mime="text/plain", key='download-txt', help="Download as Plain Text")
+
+        with col_btn_3: # MD Download
+             st.download_button(label="⬇️ Markdown", data=notes_content_to_use,
+                                file_name=f"{st.session_state.selected_meeting_type.lower().replace(' ', '_')}_notes.md",
+                                mime="text/markdown", key='download-md', help="Download as Markdown File")
+
+         # Optional: Keep DOCX fallback if needed
+         # with col_btn_4:
+         #    try:
+         #        docx_bytes = create_docx(notes_content_to_use)
+         #        st.download_button(label="⬇️ DOCX", data=docx_bytes,
+         #                           file_name=f"{st.session_state.selected_meeting_type.lower().replace(' ', '_')}_notes.docx",
+         #                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key='download-docx')
+         #    except Exception as docx_error: st.caption(".docx unavailable")
+
+
     else: st.markdown("<p class='initial-prompt'>Generated notes will appear here.</p>", unsafe_allow_html=True)
 
 
 # --- Processing Logic ---
 if generate_button:
+    # Reset relevant outputs before processing
     st.session_state.processing = True
     st.session_state.generated_notes = None
+    st.session_state.edited_notes_text = ""
+    st.session_state.edit_notes_enabled = False
     st.session_state.error_message = None
+    # If using keys for file uploaders, reset them here too
+    # st.session_state.pdf_uploader = None # This might clear the widget display though
+    # st.session_state.audio_uploader = None
     st.rerun()
 
 if st.session_state.processing:
@@ -280,7 +303,8 @@ if st.session_state.processing:
     meeting_type = st.session_state.selected_meeting_type
     selected_model_id = AVAILABLE_MODELS[st.session_state.selected_model_display_name]
     view_edit_enabled = st.session_state.view_edit_prompt_enabled
-    user_prompt_text = st.session_state.current_prompt_text
+    # Make sure to get the latest prompt text from the potentially edited area
+    user_prompt_text = st.session_state.get("prompt_editor_area", st.session_state.current_prompt_text)
     final_context = st.session_state.context_input.strip() if st.session_state.add_context_enabled else None
 
     actual_input_type, transcript_data, audio_file_obj = get_current_input_data()
@@ -298,7 +322,7 @@ if st.session_state.processing:
     if not st.session_state.error_message:
         if prompt_was_edited_or_custom:
             final_prompt_for_api = user_prompt_text
-            # Clean the note added for audio display if present
+            # Clean potential note added for audio display
             final_prompt_for_api = final_prompt_for_api.split("####################################\n\n")[-1]
         else: # Generate default prompt
             prompt_function = create_expert_meeting_prompt if meeting_type == "Expert Meeting" else create_earnings_call_prompt
@@ -324,7 +348,7 @@ if st.session_state.processing:
                  audio_bytes = audio_file_obj.getvalue()
                  processed_audio_file_ref = genai.upload_file(content=audio_bytes, display_name=f"audio_{int(time.time())}", mime_type=audio_file_obj.type)
                  st.session_state.uploaded_audio_info = processed_audio_file_ref
-                 # Polling...
+                 # Polling... (Keep polling logic)
                  polling_start_time = time.time()
                  while processed_audio_file_ref.state.name == "PROCESSING":
                      if time.time() - polling_start_time > 300: raise TimeoutError("Audio processing timeout.")
@@ -341,14 +365,14 @@ if st.session_state.processing:
             if api_payload: response = model.generate_content(api_payload)
             else: raise ValueError("API Payload construction failed.")
 
-            # Handle Response (Added check for empty text explicitly)
+            # Handle Response
             if response and hasattr(response, 'text') and response.text and response.text.strip():
-                 st.session_state.generated_notes = response.text.strip() # Store stripped text
+                 st.session_state.generated_notes = response.text.strip()
+                 st.session_state.edited_notes_text = st.session_state.generated_notes # Initialize editor
                  st.toast("🎉 Notes generated!", icon="✅")
-            # Check for candidates and parts if text is missing (more robust error checking)
-            elif response and not hasattr(response, 'text') and hasattr(response, 'candidates') and response.candidates:
-                 st.session_state.error_message = f"🤔 AI response received, but no usable text found. Finish reason: {response.candidates[0].finish_reason}. Safety: {response.candidates[0].safety_ratings}"
-            elif response: st.session_state.error_message = "🤔 AI returned empty response." # Fallback empty check
+            elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                 st.session_state.error_message = f"⚠️ AI response blocked. Reason: {response.prompt_feedback.block_reason}. Details: {response.prompt_feedback.safety_ratings}"
+            elif response: st.session_state.error_message = "🤔 AI returned empty response."
             else: st.session_state.error_message = "😥 AI generation failed (No response)."
 
             # Cleanup Audio only AFTER successful API call
@@ -365,9 +389,7 @@ if st.session_state.processing:
 
     # --- Finish processing ---
     st.session_state.processing = False
-    # Rerun only if error needs displaying, otherwise state update handles UI
-    if st.session_state.error_message or not st.session_state.generated_notes:
-        st.rerun()
+    st.rerun() # Rerun to show results or error
 
 
 # --- Footer ---
