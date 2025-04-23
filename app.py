@@ -2,10 +2,11 @@ import streamlit as st
 import google.generativeai as genai
 import os
 import io
-import time # For potential delays with file processing
+import time
 from dotenv import load_dotenv
 import PyPDF2
 
+# --- [ Previous code remains the same: imports, config, helpers ] ---
 # --- Page Configuration ---
 st.set_page_config(
     page_title="Meeting Notes Generator",
@@ -22,8 +23,6 @@ if not API_KEY:
     st.stop()
 
 # --- Global variable for uploaded file response ---
-# This helps manage the file lifecycle across reruns if needed,
-# though for simple upload/process it might not be strictly necessary.
 if 'uploaded_audio_info' not in st.session_state:
     st.session_state.uploaded_audio_info = None
 
@@ -73,7 +72,7 @@ def extract_text_from_pdf(pdf_file_stream):
         return None
 
 # --- Helper Function: Create Prompt for Text/PDF Input ---
-# This remains the same for text-based inputs
+# (No changes needed)
 def create_text_prompt(transcript, context=None):
     """Creates the structured prompt for the Gemini model from TEXT transcript."""
     prompt_parts = [
@@ -119,7 +118,7 @@ def create_text_prompt(transcript, context=None):
     return "\n".join(prompt_parts)
 
 # --- Helper Function: Create Prompt for Audio Input ---
-# This prompt asks the model to first transcribe, then generate notes from the audio
+# (No changes needed)
 def create_audio_prompt(context=None):
     """Creates the structured prompt for the Gemini model when input is AUDIO."""
     prompt_parts = [
@@ -192,15 +191,12 @@ with col1:
     elif input_method == "Upload PDF":
         uploaded_pdf_file = st.file_uploader("Upload PDF transcript:", type="pdf", key="pdf_uploader")
     else: # Upload Audio
-        # Supported audio formats will depend on the Gemini API, common ones are usually supported.
-        # Check Google's documentation for the specific model (1.5 Flash/Pro) for the latest list.
-        # Common formats: WAV, MP3, AIFF, AAC, OGG, FLAC
         uploaded_audio_file = st.file_uploader(
             "Upload meeting audio:",
             type=['wav', 'mp3', 'm4a', 'ogg', 'flac', 'aac'], # Add relevant audio types
             key="audio_uploader"
         )
-        st.caption("Supports formats like WAV, MP3, M4A, OGG, FLAC. Max file size depends on API limits (often generous for Gemini 1.5).")
+        st.caption("Supports formats like WAV, MP3, M4A, OGG, FLAC. Max file size depends on API limits.")
 
 
 with col2:
@@ -212,8 +208,13 @@ st.divider() # Visual separator
 # --- Processing Logic ---
 submit_button = st.button("✨ Generate Notes", type="primary", use_container_width=True)
 notes_placeholder = st.empty() # Create a placeholder for the notes output
+download_placeholder = st.empty() # Create a placeholder for the download button
 
 if submit_button:
+    # Clear previous results and download button
+    notes_placeholder.empty()
+    download_placeholder.empty()
+
     transcript = None
     audio_file_input = None # To hold the processed audio file for the API
     error_message = None
@@ -247,33 +248,41 @@ if submit_button:
              input_type = "audio"
              notes_placeholder.info("⏳ Preparing audio file...")
              try:
-                 # Upload the file to Google's service
-                 # This is necessary for the API call with generate_content
                  audio_bytes = uploaded_audio_file.getvalue()
+                 # Use a unique name for the upload if desired, or just the original name
+                 upload_display_name = f"meeting_audio_{int(time.time())}_{uploaded_audio_file.name}"
                  audio_file_for_api = genai.upload_file(
-                     path=uploaded_audio_file.name, # Pass name for potential MIME type inference
-                     display_name=uploaded_audio_file.name, # Optional display name
+                     # path=uploaded_audio_file.name, # Using path directly might fail in some environments
+                     # Instead, provide content bytes and a name
+                     content=audio_bytes,
+                     display_name=upload_display_name,
+                     mime_type=uploaded_audio_file.type # Pass the MIME type detected by Streamlit
                  )
-                 # Give feedback while upload/processing happens server-side
-                 notes_placeholder.info(f"⏳ Uploading audio '{audio_file_for_api.display_name}'... This may take a moment depending on size.")
+                 notes_placeholder.info(f"⏳ Uploading '{uploaded_audio_file.name}' ({round(len(audio_bytes)/1024/1024, 2)} MB)...")
 
-                 # Store the file info in session state if needed for potential reuse or cleanup
                  st.session_state.uploaded_audio_info = audio_file_for_api
 
-                 # Check if the file is ready (optional, but good practice)
                  while audio_file_for_api.state.name == "PROCESSING":
-                     time.sleep(2) # Wait before checking again
+                     notes_placeholder.info(f"⏳ Processing audio '{uploaded_audio_file.name}' on server...")
+                     time.sleep(3) # Check status less frequently for larger files
                      audio_file_for_api = genai.get_file(audio_file_for_api.name)
-                     notes_placeholder.info(f"⏳ Processing audio '{audio_file_for_api.display_name}'...")
+
 
                  if audio_file_for_api.state.name == "FAILED":
-                      error_message = f"😥 Audio file processing failed: {audio_file_for_api.name}"
-                      # Clean up failed file object if desired (optional)
-                      # genai.delete_file(audio_file_for_api.name)
+                      error_message = f"😥 Audio file processing failed for '{uploaded_audio_file.name}'."
                       st.session_state.uploaded_audio_info = None
-                 else:
-                     notes_placeholder.info(f"✅ Audio '{audio_file_for_api.display_name}' ready.")
+                      # Attempt to delete the failed file from Google's side
+                      try: genai.delete_file(audio_file_for_api.name)
+                      except Exception: pass
+                 elif audio_file_for_api.state.name == "ACTIVE":
+                     notes_placeholder.info(f"✅ Audio '{uploaded_audio_file.name}' ready.")
                      audio_file_input = audio_file_for_api # Use this object for the API call
+                 else:
+                     # Handle other unexpected states if necessary
+                     error_message = f"Audio file '{uploaded_audio_file.name}' is in an unexpected state: {audio_file_for_api.state.name}"
+                     st.session_state.uploaded_audio_info = None
+                     try: genai.delete_file(audio_file_for_api.name)
+                     except Exception: pass
 
 
              except Exception as e:
@@ -286,54 +295,70 @@ if submit_button:
         notes_placeholder.info("⏳ Generating notes... This might take longer for audio input.")
         try:
             final_context = context_input.strip() if context_input else None
+            generated_notes = None # Variable to store the final notes text
 
             if input_type in ["text", "pdf"]:
                 full_prompt = create_text_prompt(transcript, final_context)
-                # Display prompt for debugging if needed (optional)
-                # with st.expander("Show Prompt Sent to Gemini (Text/PDF)"):
-                #    st.text(full_prompt)
                 response = model.generate_content(full_prompt)
+                generated_notes = response.text # Store the result
             elif input_type == "audio":
                 full_prompt = create_audio_prompt(final_context)
-                # Display prompt for debugging if needed (optional)
-                # with st.expander("Show Prompt Sent to Gemini (Audio)"):
-                #    st.text(full_prompt)
-
                 # Send the prompt AND the audio file object
                 response = model.generate_content([full_prompt, audio_file_input])
+                generated_notes = response.text # Store the result
 
-                # Optional: Clean up the uploaded file from Google's side after use
-                # try:
-                #    if st.session_state.uploaded_audio_info:
-                #        genai.delete_file(st.session_state.uploaded_audio_info.name)
-                #        st.session_state.uploaded_audio_info = None
-                # except Exception as delete_err:
-                #    st.warning(f"Could not delete uploaded audio file from cloud: {delete_err}")
-
+                # --- Optional: Clean up the uploaded audio file after successful use ---
+                try:
+                    if st.session_state.uploaded_audio_info:
+                        # print(f"Attempting to delete file: {st.session_state.uploaded_audio_info.name}") # Debug print
+                        genai.delete_file(st.session_state.uploaded_audio_info.name)
+                        st.session_state.uploaded_audio_info = None
+                        # print("File deleted successfully from cloud.") # Debug print
+                except Exception as delete_err:
+                    # Don't block the user, just log a warning or ignore
+                    # print(f"Warning: Could not delete uploaded audio file from cloud: {delete_err}") # Debug print
+                    pass # Ignore cleanup error
             else:
-                 # Should not happen if logic is correct, but good failsafe
                  raise ValueError("Invalid input_type determined.")
 
-            # Use markdown to render potential formatting from the model
-            notes_placeholder.markdown(response.text)
+            # --- Display Notes and Download Button ---
+            if generated_notes:
+                 notes_placeholder.markdown(generated_notes) # Display notes first
+
+                 # Use the download_placeholder to add the button below the notes
+                 download_placeholder.download_button(
+                     label="⬇️ Download Notes (.txt)",
+                     data=generated_notes, # The text content to download
+                     file_name="meeting_notes.txt", # Default filename
+                     mime="text/plain", # MIME type for text file
+                     key='download-txt' # Unique key for the button
+                 )
+            else:
+                notes_placeholder.warning(" Gemini returned an empty response.")
+
 
         except Exception as e:
             st.error(f"😥 An error occurred while generating notes with the Gemini API:")
-            # Be careful about leaking too much detail in production errors
             st.error(f"{e}")
-            # Try to clear the placeholder if there was an error after the spinner started
-            notes_placeholder.empty()
+            notes_placeholder.empty() # Clear any "Generating..." message on error
+            download_placeholder.empty() # Ensure no download button on error
 
-            # Optional: Clean up audio file if generation failed mid-way
-            # try:
-            #    if st.session_state.uploaded_audio_info:
-            #        genai.delete_file(st.session_state.uploaded_audio_info.name)
-            #        st.session_state.uploaded_audio_info = None
-            # except Exception: pass # Ignore cleanup error if main error occurred
+            # --- Optional: Attempt audio cleanup even if generation failed ---
+            try:
+                if input_type == "audio" and st.session_state.uploaded_audio_info:
+                    # print(f"Attempting to delete file after error: {st.session_state.uploaded_audio_info.name}") # Debug print
+                    genai.delete_file(st.session_state.uploaded_audio_info.name)
+                    st.session_state.uploaded_audio_info = None
+                    # print("File deleted successfully from cloud after error.") # Debug print
+            except Exception:
+                # print(f"Warning: Could not delete uploaded audio file after error: {delete_err}") # Debug print
+                pass # Ignore cleanup error
 
 
     elif error_message:
         notes_placeholder.error(error_message)
+        download_placeholder.empty() # Ensure no download button on input error
+
 
 # --- Add some footer information (optional) ---
 st.divider()
