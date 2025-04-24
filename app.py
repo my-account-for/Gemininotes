@@ -257,6 +257,7 @@ def get_current_input_data():
     return input_type, transcript, audio_file
 
 # --- Function to update prompt display text ---
+# --- Function to update prompt display text ---
 def get_prompt_display_text():
     """Generates the appropriate prompt text for display/editing."""
     meeting_type = st.session_state.selected_meeting_type
@@ -268,27 +269,24 @@ def get_prompt_display_text():
 
         # --- Define prompt_func based on meeting type ---
         if meeting_type == "Earnings Call":
-            # --- ROBUSTNESS FIX: Ensure topics text is always a string ---
             user_topics_text_for_display = str(st.session_state.get('earnings_call_topics', "") or "")
-            # --- END FIX ---
+            # Lambda definition remains the same (accepts positional t, c)
             prompt_func = lambda t, c: create_earnings_call_prompt(t, user_topics_text_for_display, c)
         elif meeting_type == "Expert Meeting":
+            # Direct function assignment
             prompt_func = create_expert_meeting_prompt
         else:
             st.error(f"Internal Error: Invalid meeting type '{meeting_type}' for prompt preview.")
-            return "Error generating prompt preview." # Return early on error
+            return "Error generating prompt preview."
 
         placeholder = "[TRANSCRIPT WILL APPEAR HERE]"
 
-        # --- Call the appropriate function ---
+        # --- Call the function using POSITIONAL arguments ---
         try:
-             if meeting_type == "Earnings Call":
-                 base_prompt = prompt_func(transcript=placeholder, context=temp_context)
-             elif meeting_type == "Expert Meeting":
-                  base_prompt = prompt_func(transcript=placeholder, context=temp_context)
-             else:
-                 base_prompt = "Error: Could not determine prompt function."
+             # This call now works for both the lambda and the direct function assignment
+             base_prompt = prompt_func(placeholder, temp_context) # Use positional arguments
 
+             # Add audio note if needed
              if input_type == "Upload Audio":
                  display_text = ("# NOTE FOR AUDIO: 3-step process (Transcribe -> Refine -> Notes).\n"
                                  "# This prompt is used in Step 3 with the *refined* transcript.\n"
@@ -297,10 +295,14 @@ def get_prompt_display_text():
                  display_text = base_prompt
 
         except Exception as e:
+             # Catch potential errors during prompt generation itself
              st.error(f"Error generating prompt preview: {e}")
-             display_text = f"# Error generating preview: {e}"
+             # Log the error for debugging if needed: print(f"Error details: {e}")
+             display_text = f"# Error generating preview: Review inputs/prompt structure. Details logged if possible."
+
 
     elif meeting_type == "Custom":
+         # (Custom prompt logic remains the same)
          audio_note = ("\n# NOTE FOR AUDIO: If using audio, the system will first transcribe and then\n"
                        "# *refine* the transcript (speaker ID, translation, corrections).\n"
                        "# Your custom prompt below will receive this *refined transcript* as the primary text input.\n"
@@ -309,7 +311,6 @@ def get_prompt_display_text():
          current_or_default = st.session_state.current_prompt_text or default_custom
          display_text = current_or_default + (audio_note if st.session_state.input_method_radio == 'Upload Audio' else "")
 
-    # --- Ensure this return is the last statement of the function ---
     return display_text
 
 # --- NEWLINE ADDED HERE ---
