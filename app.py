@@ -16,8 +16,12 @@ from pydub import AudioSegment # !pip install pydub
 
 # --- Page Configuration ---
 # ... (remains the same) ...
-st.set_page_config(...)
-
+st.set_page_config(
+    page_title="SynthNotes AI", # Removed emoji
+    page_icon="✨", # page_icon is usually fine with emojis
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 # --- Custom CSS Injection ---
 # ... (remains the same) ...
 st.markdown(""" <style> ... </style> """, unsafe_allow_html=True)
