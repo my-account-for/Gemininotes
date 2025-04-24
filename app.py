@@ -116,18 +116,25 @@ def create_expert_meeting_prompt(transcript, context=None):
         "You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.",
         "Generate detailed, factual notes from the provided meeting transcript.",
         "Follow this specific structure EXACTLY:", "\n**Structure:**",
+        # --- Check quotes and line breaks within this section carefully ---
         "- **Opening overview or Expert background (Optional):** If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple language. DO NOT summarize.",
         "- **Q&A format:** Structure the main body STRICTLY in Question/Answer format.",
         "  - **Questions:** Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).",
         "  - **Answers:** Use bullet points directly below the question. Each bullet MUST be a complete sentence with one distinct fact. Capture ALL specifics (data, names, examples, $, %, etc.). DO NOT use sub-bullets or section headers within answers. DO NOT add interpretations, summaries, conclusions, or action items.",
+        # --- End careful check section ---
         "\n**Additional Instructions:**",
         "- Accuracy is paramount. Capture ALL facts precisely.", "- Be clear and concise.",
         "- Include ONLY information present in the transcript.", "- If a section (like Opening Overview) isn't present, OMIT it.",
-        "\n---", (f"\n**MEETING TRANSCRIPT:**\n{transcript}\n---" if transcript else ""),
+        "\n---",
+        # Conditionally add transcript part
+        (f"\n**MEETING TRANSCRIPT:**\n{transcript}\n---" if transcript else ""),
     ]
-    # General context can still be useful
-    if context: prompt_parts.extend(["\n**ADDITIONAL CONTEXT (Use for understanding):**\n", context, "\n---"])
+    # Conditionally add context part
+    if context:
+        prompt_parts.extend(["\n**ADDITIONAL CONTEXT (Use for understanding):**\n", context, "\n---"])
+    # Add final instruction
     prompt_parts.append("\n**GENERATED NOTES (Q&A Format):**\n")
+    # Join parts, filtering out any potential empty strings from conditional logic
     return "\n".join(filter(None, prompt_parts))
 # --- END Restored Prompt ---
 
