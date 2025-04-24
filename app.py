@@ -17,6 +17,7 @@ st.set_page_config(
 )
 
 # --- Custom CSS Injection ---
+# (CSS remains the same - omitted for brevity)
 st.markdown("""
 <style>
     /* Overall App Background */
@@ -85,16 +86,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-
 # --- Define Available Models & Meeting Types ---
 AVAILABLE_MODELS = {
-    "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash", "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
-    "Gemini 1.5 Flash-8B (High Volume)": "gemini-1.5-flash-8b", "Gemini 2.0 Flash (Next Gen Speed)": "gemini-2.0-flash",
-    "Gemini 2.0 Flash-Lite (Low Latency)": "gemini-2.0-flash-lite", "Gemini 2.5 Flash Preview (Adaptive)": "gemini-2.5-flash-preview-04-17",
-    "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "models/gemini-2.5-pro-exp-03-25",
+    "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
+    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro", # Recommended for refinement
+    # Add other models back if desired
+    "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "models/gemini-2.5-pro-exp-03-25", # Good for notes
 }
 DEFAULT_MODEL_NAME = "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)"
-if DEFAULT_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_MODEL_NAME = "Gemini 1.5 Flash (Fast & Versatile)"
+if DEFAULT_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_MODEL_NAME = "Gemini 1.5 Pro (Complex Reasoning)" # Fallback to Pro
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 DEFAULT_MEETING_TYPE = MEETING_TYPES[0]
 
@@ -106,6 +106,7 @@ try:
     filename_gen_config = {"temperature": 0.2, "max_output_tokens": 50, "response_mime_type": "text/plain"}
     main_gen_config = {"temperature": 0.7, "top_p": 1.0, "top_k": 32, "max_output_tokens": 8192, "response_mime_type": "text/plain"}
     transcription_gen_config = {"temperature": 0.1, "response_mime_type": "text/plain"}
+    refinement_gen_config = {"temperature": 0.3, "response_mime_type": "text/plain", "max_output_tokens": 8192} # Allow longer output for refined transcript
     safety_settings = [{"category": c, "threshold": "BLOCK_MEDIUM_AND_ABOVE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
 except Exception as e: st.error(f"### 💥 Error Configuring Google AI Client: {e}", icon="🚨"); st.stop()
 
@@ -118,7 +119,8 @@ default_state = {
     'input_method_radio': 'Paste Text', 'text_input': '', 'pdf_uploader': None, 'audio_uploader': None,
     'context_input': '', 'earnings_call_topics': '', 'edit_notes_enabled': False,
     'edited_notes_text': "", 'suggested_filename': None, 'history': [],
-    # 'processing_step': None, # Removed
+    'raw_transcript': None, # To store intermediate transcript
+    'refined_transcript': None, # To store refined transcript
 }
 for key, value in default_state.items():
     if key not in st.session_state: st.session_state[key] = value
@@ -128,7 +130,7 @@ def extract_text_from_pdf(pdf_file_stream):
     try: pdf_file_stream.seek(0); pdf_reader = PyPDF2.PdfReader(pdf_file_stream); text = "\n".join([p.extract_text() for p in pdf_reader.pages if p.extract_text()]); return text.strip() if text else None
     except Exception as e: st.session_state.error_message = f"⚙️ PDF Extraction Error: {e}"; return None
 
-# --- Restored ORIGINAL Expert Meeting Prompt ---
+# --- Prompts (No changes needed here, they operate on the *final* transcript) ---
 def create_expert_meeting_prompt(transcript, context=None):
     """Creates the prompt for 'Expert Meeting' type (Q&A format)."""
     core_prompt = """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.
@@ -148,12 +150,11 @@ Follow this specific structure EXACTLY:
 - If a section (like Opening Overview) isn't present, OMIT it.
 ---"""
     final_prompt_elements = [core_prompt]
-    if transcript: final_prompt_elements.append(f"\n**MEETING TRANSCRIPT:**\n{transcript}\n---")
+    if transcript: final_prompt_elements.append(f"\n**MEETING TRANSCRIPT:**\n{transcript}\n---") # Will receive refined transcript if audio
     if context: final_prompt_elements.append(f"\n**ADDITIONAL CONTEXT (Use for understanding):**\n{context}\n---")
     final_prompt_elements.append("\n**GENERATED NOTES (Q&A Format):**\n")
     return "\n".join(final_prompt_elements)
 
-# --- MODIFIED Earnings Call Prompt ---
 def create_earnings_call_prompt(transcript, user_topics=None, context=None):
     """Creates the prompt for 'Earnings Call' type, tailored for investment firms, allowing user topics."""
     topic_instructions = ""
@@ -171,7 +172,7 @@ def create_earnings_call_prompt(transcript, user_topics=None, context=None):
                      "**Formatting Requirements (Mandatory):**\n- US$ for dollars (US$2.5M), % for percentages.\n- State comparison periods (+5% YoY, -2% QoQ).\n- Represent fiscal periods accurately (Q3 FY25).\n- Use common abbreviations (CEO, KPI).\n- Use bullet points under headings.\n- Each bullet = complete sentence with distinct info.\n- Capture ALL numbers, names, data accurately.\n- Use quotes \"\" for significant statements.\n- DO NOT summarize or interpret unless part of the structure.",
                      "\n**Note Structure:**", "- **Call Participants:** (List names/titles or 'Not specified')", topic_instructions,
                      "\n**CRITICAL:** Ensure accuracy and adhere strictly to structure and formatting.", "\n---",
-                     (f"\n**EARNINGS CALL TRANSCRIPT:**\n{transcript}\n---" if transcript else ""), ]
+                     (f"\n**EARNINGS CALL TRANSCRIPT:**\n{transcript}\n---" if transcript else ""), ] # Will receive refined transcript if audio
     if context: prompt_parts.extend(["\n**ADDITIONAL CONTEXT:**\n", context, "\n---"])
     prompt_parts.append("\n**GENERATED EARNINGS CALL NOTES:**\n"); return "\n".join(filter(None, prompt_parts))
 
@@ -191,9 +192,9 @@ def get_current_input_data():
     elif input_type == "Upload Audio": audio_file = st.session_state.audio_uploader
     return input_type, transcript, audio_file
 
-# --- Function to update prompt display text (Removed on_change, called only when rendering) ---
+# --- Function to update prompt display text ---
 def get_prompt_display_text():
-    """Generates the appropriate prompt text for display/editing, does NOT modify state."""
+    """Generates the appropriate prompt text for display/editing."""
     meeting_type = st.session_state.selected_meeting_type
     display_text = "" # Default to empty
 
@@ -206,19 +207,30 @@ def get_prompt_display_text():
              if topics_str: user_topics = [topic.strip() for topic in topics_str.split(',')]
 
         prompt_func = create_expert_meeting_prompt if meeting_type == "Expert Meeting" else lambda t, c: create_earnings_call_prompt(t, user_topics, c)
-        placeholder = "[TRANSCRIPT WILL APPEAR HERE]" if input_type != "Upload Audio" else None
+        placeholder = "[TRANSCRIPT WILL APPEAR HERE]"
 
+        # **MODIFICATION**: Explain audio workflow for default prompts
         if input_type == "Upload Audio":
-             base_prompt = prompt_func(transcript=None, context=temp_context)
-             display_text = ("# NOTE FOR AUDIO: Default uses 2 steps (Transcribe then Notes).\n"
-                             "# If edited, ensure your prompt handles the audio file.\n"
+             base_prompt = prompt_func(transcript=placeholder, context=temp_context)
+             display_text = ("# NOTE FOR AUDIO: The system performs a 3-step process:\n"
+                             "# 1. Transcribe Audio -> 2. Refine Transcript -> 3. Generate Notes.\n"
+                             "# This prompt below is used in Step 3, receiving the *refined* transcript.\n"
+                             "# You can edit this Step 3 prompt.\n"
                              "####################################\n\n" + base_prompt)
         else:
             display_text = prompt_func(transcript=placeholder, context=temp_context)
 
     elif meeting_type == "Custom":
-         # For custom, show the current state or a placeholder if empty
-         display_text = st.session_state.current_prompt_text or "# Enter your custom prompt here...\n# For audio, include transcription instructions."
+         # **MODIFICATION**: Explain audio workflow for custom prompts
+         audio_note = ("\n# NOTE FOR AUDIO: If using audio, the system will first transcribe and then\n"
+                       "# *refine* the transcript (speaker ID, translation, corrections).\n"
+                       "# Your custom prompt below will receive this *refined transcript* as the primary text input.\n"
+                       "# Design your prompt accordingly (e.g., process the provided transcript).\n")
+         default_custom = "# Enter your custom prompt here..."
+
+         # Combine default text and audio note
+         current_or_default = st.session_state.current_prompt_text or default_custom
+         display_text = current_or_default + (audio_note if st.session_state.input_method_radio == 'Upload Audio' else "")
 
     return display_text
 
@@ -244,60 +256,49 @@ def clear_all_state():
     st.session_state.suggested_filename = None
     st.session_state.uploaded_audio_info = None # Clear cloud ref
     st.session_state.history = [] # Clear history
+    st.session_state.raw_transcript = None # Clear intermediate transcript
+    st.session_state.refined_transcript = None # Clear refined transcript
     st.toast("Inputs and outputs cleared!", icon="🧹")
-    # Note: We don't call update_prompt_display_text here anymore. The UI will naturally clear.
 
 def generate_suggested_filename(notes_content, meeting_type):
     # (Keep function as is)
     if not notes_content: return None
     try:
         st.session_state.generating_filename = True; st.toast("💡 Generating filename...", icon="⏳")
-        filename_model = genai.GenerativeModel("gemini-1.5-flash")
+        # Use a fast model for filename generation
+        filename_model = genai.GenerativeModel("gemini-1.5-flash", safety_settings=safety_settings, generation_config=filename_gen_config)
         today_date = datetime.now().strftime("%Y%m%d"); mt_cleaned = meeting_type.replace(" ", "")
         filename_prompt = (f"Suggest filename: YYYYMMDD_ClientOrTopic_MeetingType. Date={today_date}. Type='{mt_cleaned}'. Max 3 words topic. Output ONLY filename.\nNOTES:{notes_content[:1000]}")
-        response = filename_model.generate_content(filename_prompt, generation_config=filename_gen_config, safety_settings=safety_settings)
+        response = filename_model.generate_content(filename_prompt) # Removed specific config here, rely on model default or pre-set
         if response and hasattr(response, 'text') and response.text:
             s_name = re.sub(r'[^\w\-.]', '_', response.text.strip())[:100]
-            if re.match(r"\d{8}_[\w\-\.]+_\w+", s_name): st.toast("💡 Filename suggested!", icon="✅"); return s_name
-            else: st.warning(f"Filename sugg '{s_name}' bad format.", icon="⚠️"); return None
+            # Relaxed format check slightly - allows simpler names if AI struggles
+            if s_name: # Just check if not empty after cleaning
+                 st.toast("💡 Filename suggested!", icon="✅"); return s_name
+            else: st.warning(f"Filename suggestion empty/invalid.", icon="⚠️"); return None
         elif hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason: st.warning(f"Filename blocked: {response.prompt_feedback.block_reason}", icon="⚠️"); return None
         else: st.warning("Could not gen filename.", icon="⚠️"); return None
     except Exception as e: st.warning(f"Filename gen error: {e}", icon="⚠️"); return None
     finally: st.session_state.generating_filename = False
 
 def add_to_history(notes):
-    """Adds the generated notes to the session state history (max 3 entries)."""
-    if not notes:
-        # If notes are empty or None, do nothing and return.
-        return
-
-    # Only proceed if notes exist
+    # (Keep function as is)
+    if not notes: return
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        new_entry = {"timestamp": timestamp, "notes": notes} # Define new_entry here
-
-        # Get current history, default to empty list if not found or wrong type
+        new_entry = {"timestamp": timestamp, "notes": notes}
         current_history = st.session_state.get('history', [])
         if not isinstance(current_history, list):
-            st.warning("History state was not a list, resetting.", icon="⚠️")
-            current_history = []
-
-        # Add the new entry to the beginning
+            st.warning("History state was not a list, resetting.", icon="⚠️"); current_history = []
         current_history.insert(0, new_entry)
-
-        # Keep only the latest 3 entries
         st.session_state.history = current_history[:3]
-
-    except Exception as e:
-        # Catch potential errors during history update itself
-        st.warning(f"⚠️ Error updating note history: {e}", icon="❗")
-        # Optionally reset history if it seems corrupted
-        # st.session_state.history = []
+    except Exception as e: st.warning(f"⚠️ Error updating note history: {e}", icon="❗")
 
 def restore_note_from_history(index):
     # (Keep function as is)
     if 0 <= index < len(st.session_state.history): entry = st.session_state.history[index]; st.session_state.generated_notes = entry["notes"]; st.session_state.edited_notes_text = entry["notes"]; \
         st.session_state.edit_notes_enabled = False; st.session_state.suggested_filename = None; st.session_state.error_message = None; st.toast(f"Restored notes from {entry['timestamp']}", icon="📜")
+
 
 # --- Streamlit App UI ---
 st.title("✨ SynthNotes AI"); st.markdown("Instantly transform meeting recordings into structured, factual notes.")
@@ -305,11 +306,11 @@ with st.container(border=True): # Input Section
     col_main_1, col_main_2 = st.columns([3, 1])
     with col_main_1:
         col1a, col1b = st.columns(2)
-        with col1a: st.subheader("Meeting Details"); st.radio(label="Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type", horizontal=True) # Removed on_change
-        with col1b: st.subheader("AI Model"); st.selectbox(label="Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_model_display_name", label_visibility="collapsed")
+        with col1a: st.subheader("Meeting Details"); st.radio(label="Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type", horizontal=True)
+        with col1b: st.subheader("AI Model (for Final Notes)"); st.selectbox(label="Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_model_display_name", label_visibility="collapsed")
     with col_main_2: st.subheader(""); st.button("🧹 Clear All", on_click=clear_all_state, use_container_width=True, type="secondary")
     st.divider(); st.subheader("Source Input")
-    st.radio(label="Input type:", options=("Paste Text", "Upload PDF", "Upload Audio"), key="input_method_radio", horizontal=True, label_visibility="collapsed") # Removed on_change
+    st.radio(label="Input type:", options=("Paste Text", "Upload PDF", "Upload Audio"), key="input_method_radio", horizontal=True, label_visibility="collapsed")
     input_type_ui = st.session_state.input_method_radio
     if input_type_ui == "Paste Text": st.text_area("Paste transcript:", height=150, key="text_input", placeholder="Paste transcript...")
     elif input_type_ui == "Upload PDF": st.file_uploader("Upload PDF:", type="pdf", key="pdf_uploader")
@@ -317,25 +318,22 @@ with st.container(border=True): # Input Section
     st.divider(); col3a, col3b = st.columns(2); selected_mt = st.session_state.selected_meeting_type
     with col3a: # Topics (Earnings Call only) / Context (All)
         if selected_mt == "Earnings Call": st.text_area("Earnings Call Topics (Optional, comma-sep):", key="earnings_call_topics", height=75, placeholder="E.g., Guidance, Segment Perf...")
-        st.checkbox("Add General Context", key="add_context_enabled") # Removed on_change
+        st.checkbox("Add General Context", key="add_context_enabled")
         if st.session_state.add_context_enabled: st.text_area("Context Details:", height=75, key="context_input", placeholder="Company Name, Ticker...")
     with col3b: # View/Edit Prompt Checkbox
-        if selected_mt != "Custom": st.checkbox("View/Edit Prompt", key="view_edit_prompt_enabled") # Removed on_change
+        if selected_mt != "Custom": st.checkbox("View/Edit Final Notes Prompt", key="view_edit_prompt_enabled")
 
 # Prompt Area (Conditional)
 show_prompt_area = (st.session_state.view_edit_prompt_enabled and selected_mt != "Custom") or (selected_mt == "Custom")
 if show_prompt_area:
     with st.container(border=True):
-        prompt_title = "Prompt Preview/Editor" if selected_mt != "Custom" else "Custom Prompt (Required)"
-        st.subheader(prompt_title); caption = "Edit prompt..." if selected_mt != "Custom" else "Enter prompt..."
-        # Generate default prompt text for display *here* if needed and state is empty
-        default_display_prompt = ""
-        if not st.session_state.current_prompt_text and selected_mt != "Custom":
-             default_display_prompt = get_prompt_display_text() # Call helper to generate default
-        elif selected_mt == "Custom" and not st.session_state.current_prompt_text:
-             default_display_prompt = "# Enter your custom prompt here...\n# For audio, include transcription instructions."
-
-        st.caption(caption); st.text_area(label="Prompt Text:", value=st.session_state.current_prompt_text or default_display_prompt, key="current_prompt_text", height=350, label_visibility="collapsed")
+        prompt_title = "Final Notes Prompt Preview/Editor" if selected_mt != "Custom" else "Custom Final Notes Prompt (Required)"
+        st.subheader(prompt_title)
+        # Regenerate display text whenever this area is shown
+        display_prompt_text = get_prompt_display_text()
+        # Use display_prompt_text as the 'value' if current_prompt_text is empty, otherwise use current_prompt_text
+        prompt_value = st.session_state.current_prompt_text if st.session_state.current_prompt_text else display_prompt_text
+        st.text_area(label="Prompt Text:", value=prompt_value, key="current_prompt_text", height=350, label_visibility="collapsed", help="This prompt is used for the *final* step of generating notes.")
 
 # Generate Button
 st.write(""); generate_button = st.button("🚀 Generate Notes", type="primary", use_container_width=True, disabled=st.session_state.processing or st.session_state.generating_filename)
@@ -345,11 +343,20 @@ output_container = st.container(border=True)
 with output_container:
     # (Output display logic remains largely the same)
     st.markdown('<div class="output-container"></div>', unsafe_allow_html=True)
-    if st.session_state.processing: st.info("⏳ Processing request...", icon="🧠")
+    if st.session_state.processing: st.info("⏳ Processing request... Check status messages below.", icon="🧠") # Modified message
     elif st.session_state.generating_filename: st.info("⏳ Generating filename...", icon="💡")
-    elif st.session_state.error_message: st.error(st.session_state.error_message, icon="🚨"); st.session_state.error_message = None
+    elif st.session_state.error_message: st.error(st.session_state.error_message, icon="🚨"); st.session_state.error_message = None # Clear after showing
     elif st.session_state.generated_notes:
-        st.subheader("✅ Generated Notes"); st.checkbox("Edit Notes", key="edit_notes_enabled")
+        st.subheader("✅ Generated Notes")
+        # Display intermediate transcripts if they exist (useful for debugging/transparency)
+        if st.session_state.raw_transcript:
+            with st.expander("View Raw Transcript (Step 1 Output)"):
+                st.text_area("Raw Transcript", st.session_state.raw_transcript, height=200, disabled=True)
+        if st.session_state.refined_transcript:
+             with st.expander("View Refined Transcript (Step 2 Output)"):
+                st.text_area("Refined Transcript", st.session_state.refined_transcript, height=300, disabled=True)
+
+        st.checkbox("Edit Notes", key="edit_notes_enabled")
         notes_content_to_use = st.session_state.edited_notes_text if st.session_state.edit_notes_enabled else st.session_state.generated_notes
         if st.session_state.edit_notes_enabled: st.text_area("Editable Notes:", value=notes_content_to_use, key="edited_notes_text", height=400, label_visibility="collapsed")
         else: st.markdown(notes_content_to_use)
@@ -360,6 +367,7 @@ with output_container:
     else: st.markdown("<p class='initial-prompt'>Generated notes will appear here.</p>", unsafe_allow_html=True)
 
 # --- History Section ---
+# (History display logic remains the same - omitted for brevity)
 with st.expander("📜 Recent Notes History (Last 3)", expanded=False):
     if not st.session_state.history:
         st.caption("No history yet.")
@@ -367,146 +375,200 @@ with st.expander("📜 Recent Notes History (Last 3)", expanded=False):
         for i, entry in enumerate(st.session_state.history):
             with st.container():
                 st.markdown(f"**#{i+1} - {entry['timestamp']}**")
-                # Use st.code for better preview formatting and scrollbars if needed
                 st.code(entry['notes'][:300] + ("..." if len(entry['notes']) > 300 else ""), language=None)
                 st.button(f"View/Use Notes #{i+1}", key=f"restore_{i}",
                           on_click=restore_note_from_history, args=(i,))
-                # --- Correct indentation for the divider ---
                 if i < len(st.session_state.history) - 1:
                     st.divider()
-                # --- End correction ---
+
 # --- Processing Logic ---
 if generate_button:
     st.session_state.processing = True; st.session_state.generating_filename = False; st.session_state.generated_notes = None
     st.session_state.edited_notes_text = ""; st.session_state.edit_notes_enabled = False; st.session_state.error_message = None
-    st.session_state.suggested_filename = None; st.rerun()
+    st.session_state.suggested_filename = None; st.session_state.raw_transcript = None; st.session_state.refined_transcript = None
+    st.rerun()
 
 if st.session_state.processing and not st.session_state.generating_filename:
-    try: # Outer try
+    processed_audio_file_ref = None # Define outside try for cleanup
+    try: # Outer try-finally for overall processing and cleanup
         # State & Input Retrieval
-        meeting_type = st.session_state.selected_meeting_type; selected_model_id = AVAILABLE_MODELS[st.session_state.selected_model_display_name]
-        view_edit_enabled = st.session_state.view_edit_prompt_enabled; user_prompt_text = st.session_state.current_prompt_text
+        meeting_type = st.session_state.selected_meeting_type
+        selected_model_id = AVAILABLE_MODELS[st.session_state.selected_model_display_name]
+        user_prompt_text = st.session_state.current_prompt_text
         general_context = st.session_state.context_input.strip() if st.session_state.add_context_enabled else None
-        user_topics_str = st.session_state.earnings_call_topics.strip() if meeting_type == "Earnings Call" else ""; user_topic_list = [t.strip() for t in user_topics_str.split(',')] if user_topics_str else None
+        user_topics_str = st.session_state.earnings_call_topics.strip() if meeting_type == "Earnings Call" else ""
+        user_topic_list = [t.strip() for t in user_topics_str.split(',')] if user_topics_str else None
         actual_input_type, transcript_data, audio_file_obj = get_current_input_data()
 
-        # Validation
-        if actual_input_type == "Paste Text" and not transcript_data: raise ValueError("Text area empty.")
-        elif actual_input_type == "Upload PDF" and not transcript_data and not st.session_state.error_message: raise ValueError("PDF error.")
-        elif actual_input_type == "Upload Audio" and not audio_file_obj: raise ValueError("No audio uploaded.")
-        if meeting_type == "Custom" and not user_prompt_text.strip(): raise ValueError("Custom Prompt empty.")
+        # --- Define Models for Each Step ---
+        # Use Flash for speed in transcription, Pro for complex refinement, user choice for notes
+        transcription_model = genai.GenerativeModel("gemini-1.5-flash", safety_settings=safety_settings, generation_config=transcription_gen_config)
+        refinement_model = genai.GenerativeModel("gemini-1.5-pro", safety_settings=safety_settings, generation_config=refinement_gen_config)
+        notes_model = genai.GenerativeModel(selected_model_id, safety_settings=safety_settings, generation_config=main_gen_config)
 
-        # Initialize variables
-        final_prompt_for_api = None; processed_audio_file_ref = None; api_payload_parts = []
-        prompt_was_edited_or_custom = (meeting_type == "Custom" or view_edit_enabled); notes_model_id = selected_model_id
-        transcribed_text_for_notes = transcript_data
+        # --- Initialize Transcript Variable ---
+        final_transcript_for_notes = transcript_data # Start with text/PDF data
+        st.session_state.raw_transcript = None
+        st.session_state.refined_transcript = None
 
-        # Inner Try for pre-processing, prompt-building, audio handling
+        # --- Validation ---
+        if actual_input_type == "Paste Text" and not final_transcript_for_notes: raise ValueError("Text input is empty.")
+        elif actual_input_type == "Upload PDF" and not final_transcript_for_notes: raise ValueError("PDF processing failed or returned empty text.")
+        elif actual_input_type == "Upload Audio" and not audio_file_obj: raise ValueError("No audio file uploaded.")
+        if meeting_type == "Custom" and not user_prompt_text.strip(): raise ValueError("Custom Prompt is required but empty.")
+
+        # ==============================================
+        # --- STEP 1 & 2: Audio Processing Pipeline ---
+        # ==============================================
+        if actual_input_type == "Upload Audio":
+            # --- Upload Audio ---
+            st.toast(f"☁️ Uploading '{audio_file_obj.name}'...", icon="⬆️")
+            audio_bytes = audio_file_obj.getvalue(); temp_file_path = None
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file_obj.name)[1]) as tf:
+                    tf.write(audio_bytes); temp_file_path = tf.name
+                if not temp_file_path: raise Exception("Failed to create temporary file for audio.")
+                # Use a unique name for the uploaded file if needed, or rely on Gemini's handling
+                processed_audio_file_ref = genai.upload_file(path=temp_file_path, display_name=f"audio_{int(time.time())}_{audio_file_obj.name}")
+                st.session_state.uploaded_audio_info = processed_audio_file_ref # Store cloud ref for potential cleanup
+            finally:
+                if temp_file_path and os.path.exists(temp_file_path): os.remove(temp_file_path)
+
+            st.toast(f"🎧 Processing uploaded audio...", icon="⏳")
+            polling_start = time.time()
+            while processed_audio_file_ref.state.name == "PROCESSING":
+                if time.time() - polling_start > 600: raise TimeoutError("Audio processing timed out (10 minutes).") # Increased timeout
+                time.sleep(10); processed_audio_file_ref = genai.get_file(processed_audio_file_ref.name)
+            if processed_audio_file_ref.state.name != "ACTIVE": raise Exception(f"Audio file processing failed. Final state: {processed_audio_file_ref.state.name}")
+            st.toast(f"🎧 Audio ready!", icon="✅")
+
+            # --- Step 1: Transcription ---
+            try:
+                st.toast(f"✍️ Step 1: Transcribing audio...", icon="⏳")
+                t_prompt = "Transcribe the audio accurately. Output only the raw transcript text."
+                t_response = transcription_model.generate_content([t_prompt, processed_audio_file_ref])
+
+                if t_response and hasattr(t_response, 'text') and t_response.text.strip():
+                    st.session_state.raw_transcript = t_response.text.strip()
+                    st.toast("✍️ Step 1: Transcription complete!", icon="✅")
+                    final_transcript_for_notes = st.session_state.raw_transcript # Use raw as fallback if refinement fails
+                elif hasattr(t_response, 'prompt_feedback') and t_response.prompt_feedback.block_reason:
+                    raise Exception(f"Transcription blocked: {t_response.prompt_feedback.block_reason}")
+                else: raise Exception("Transcription failed: AI returned empty response.")
+            except Exception as trans_err:
+                raise Exception(f"❌ Error during Step 1 (Transcription): {trans_err}") from trans_err
+
+            # --- Step 2: Refinement ---
+            try:
+                st.toast(f"🧹 Step 2: Refining transcript...", icon="⏳")
+                refinement_prompt = f"""Please refine the following raw audio transcript:
+
+                **Raw Transcript:**
+                ```
+                {st.session_state.raw_transcript}
+                ```
+
+                **Instructions:**
+                1.  **Identify Speakers:** Assign consistent labels (e.g., Speaker 1, Speaker 2). Place the label on a new line before the speaker's turn.
+                2.  **Translate to English:** Convert any non-English speech found within the transcript to English, ensuring it fits naturally within the conversation.
+                3.  **Correct Errors:** Fix spelling mistakes and grammatical errors. Use the overall conversation context to correct potentially misheard words or phrases.
+                4.  **Format:** Ensure clear separation between speaker turns using the speaker labels. Maintain the original conversational flow and content.
+                5.  **Output:** Provide *only* the refined, speaker-diarized, translated, and corrected transcript text. Do not add any introduction, summary, or commentary before or after the transcript.
+
+                **Additional Context (Optional - use for understanding terms, names, etc.):**
+                {general_context if general_context else "None provided."}
+
+                **Refined Transcript:**
+                """
+                r_response = refinement_model.generate_content(refinement_prompt)
+
+                if r_response and hasattr(r_response, 'text') and r_response.text.strip():
+                    st.session_state.refined_transcript = r_response.text.strip()
+                    final_transcript_for_notes = st.session_state.refined_transcript # Use refined transcript for notes
+                    st.toast("🧹 Step 2: Refinement complete!", icon="✅")
+                elif hasattr(r_response, 'prompt_feedback') and r_response.prompt_feedback.block_reason:
+                    st.warning(f"⚠️ Refinement blocked: {r_response.prompt_feedback.block_reason}. Using raw transcript for notes.", icon="⚠️")
+                    # Keep final_transcript_for_notes as raw_transcript (already set)
+                else:
+                    st.warning("🤔 Refinement step returned empty response. Using raw transcript for notes.", icon="⚠️")
+                    # Keep final_transcript_for_notes as raw_transcript (already set)
+
+            except Exception as refine_err:
+                 st.warning(f"❌ Error during Step 2 (Refinement): {refine_err}. Using raw transcript for notes.", icon="⚠️")
+                 # Keep final_transcript_for_notes as raw_transcript (already set)
+
+        # =============================
+        # --- STEP 3: Generate Notes ---
+        # =============================
+        if not final_transcript_for_notes:
+             raise ValueError("No transcript available (from text, PDF, or audio processing) to generate notes.")
+
+        # --- Determine Final Prompt Text ---
+        final_prompt_for_api = None
+        if meeting_type == "Custom":
+            final_prompt_for_api = user_prompt_text # User provides the full prompt
+            # We assume the user's custom prompt knows how to handle the transcript provided.
+            # For clarity, we might insert the transcript if a placeholder exists, but the current setup relies on user design.
+            # Let's build the payload expecting the prompt first, then the data.
+            api_payload_parts = [final_prompt_for_api, f"\n\n--- TRANSCRIPT START ---\n{final_transcript_for_notes}\n--- TRANSCRIPT END ---"]
+
+        else: # Standard meeting types
+            if meeting_type == "Expert Meeting":
+                prompt_function = create_expert_meeting_prompt
+            elif meeting_type == "Earnings Call":
+                prompt_function = lambda t, c: create_earnings_call_prompt(t, user_topic_list, c)
+            else: # Should not happen due to validation, but safety check
+                raise ValueError(f"Invalid meeting type '{meeting_type}' for standard prompt generation.")
+
+            # Generate the prompt *using* the final transcript (raw or refined)
+            final_prompt_for_api = prompt_function(final_transcript_for_notes, general_context)
+            api_payload_parts = [final_prompt_for_api] # Standard prompts contain the transcript
+
+
+        if not final_prompt_for_api:
+            raise ValueError("Failed to determine the final prompt for note generation.")
+
+        # --- Generate Notes API Call ---
         try:
-            # --- Handle Audio Upload & Transcription (if applicable) ---
-            if actual_input_type == "Upload Audio":
-                if not audio_file_obj: raise ValueError("Audio missing.")
-                st.toast(f"☁️ Uploading '{audio_file_obj.name}'...", icon="⬆️"); audio_bytes = audio_file_obj.getvalue(); temp_file_path = None
-                try: # Tempfile
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file_obj.name)[1]) as tf: tf.write(audio_bytes); temp_file_path = tf.name
-                    if temp_file_path: processed_audio_file_ref = genai.upload_file(path=temp_file_path, display_name=f"audio_{int(time.time())}_{audio_file_obj.name}")
-                    else: raise Exception("Temp file failed.")
-                finally:
-                    if temp_file_path and os.path.exists(temp_file_path): os.remove(temp_file_path) # Disk cleanup
-                st.session_state.uploaded_audio_info = processed_audio_file_ref # Store cloud ref
-                st.toast(f"🎧 Processing audio...", icon="⏳"); polling_start = time.time() # Polling
-                while processed_audio_file_ref.state.name == "PROCESSING":
-                    if time.time() - polling_start > 300: raise TimeoutError("Audio timeout.")
-                    time.sleep(5); processed_audio_file_ref = genai.get_file(processed_audio_file_ref.name)
-                if processed_audio_file_ref.state.name != "ACTIVE": raise Exception(f"Audio state: {processed_audio_file_ref.state.name}")
-                st.toast(f"🎧 Audio ready!", icon="✅")
+            st.toast(f"📝 Step 3: Generating notes...", icon="✨")
+            # Use the user-selected model for this final step
+            response = notes_model.generate_content(api_payload_parts) # Send the constructed payload
 
-                # --- TWO-STEP LOGIC ---
-                if not prompt_was_edited_or_custom:
-                    st.toast(f"✍️ Transcribing audio...", icon="⏳")
-                    t_prompt = "Transcribe accurately. Output only raw text."; t_model = genai.GenerativeModel(selected_model_id)
-                    t_response = t_model.generate_content([t_prompt, processed_audio_file_ref], generation_config=transcription_gen_config, safety_settings=safety_settings)
-                    if t_response and hasattr(t_response, 'text') and t_response.text.strip():
-                        transcribed_text_for_notes = t_response.text.strip(); st.toast("✍️ Transcription complete!", icon="✅"); actual_input_type = "Generated Transcript"
-                    else: raise Exception("Audio transcription failed.")
-            # --- End Audio Pre-processing ---
+            # Handle Response
+            if response and hasattr(response, 'text') and response.text and response.text.strip():
+                st.session_state.generated_notes = response.text.strip()
+                st.session_state.edited_notes_text = st.session_state.generated_notes
+                add_to_history(st.session_state.generated_notes) # Add to history
+                st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type) # Suggest filename
+                st.toast("🎉 Notes generated successfully!", icon="✅")
+            elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                st.session_state.error_message = f"⚠️ Note generation blocked: {response.prompt_feedback.block_reason}."
+            elif response:
+                st.session_state.error_message = "🤔 AI returned empty response during note generation."
+            else:
+                st.session_state.error_message = "😥 Note generation failed (No response from API)."
 
-            # --- Determine Final Prompt Text ---
-            if not st.session_state.error_message: # Check error before proceeding
-                if prompt_was_edited_or_custom: final_prompt_for_api = user_prompt_text.split("#######")[-1].strip() # Clean note
-                else: # Generate default prompt
-                    if meeting_type == "Expert Meeting": prompt_function = create_expert_meeting_prompt
-                    elif meeting_type == "Earnings Call": prompt_function = lambda t, c: create_earnings_call_prompt(t, user_topic_list, c)
-                    else: raise ValueError(f"Invalid meeting type '{meeting_type}' for default prompt.")
-                    if transcribed_text_for_notes: final_prompt_for_api = prompt_function(transcribed_text_for_notes, general_context)
-                    else: st.session_state.error_message = "Error: Source text unavailable."
+        except Exception as api_call_err:
+            st.session_state.error_message = f"❌ Error during Step 3 (API Call for Notes): {api_call_err}"
 
-            if not final_prompt_for_api and not st.session_state.error_message: st.session_state.error_message = "Error: Failed to determine prompt."
 
-            # --- Prepare API Payload ---
-            if not st.session_state.error_message and final_prompt_for_api:
-                api_payload_parts.append(final_prompt_for_api)
-                if actual_input_type == "Upload Audio" and prompt_was_edited_or_custom:
-                    if processed_audio_file_ref: api_payload_parts.append(processed_audio_file_ref)
-                    else: st.session_state.error_message = "Error: Audio ref missing."
-            elif not st.session_state.error_message: st.session_state.error_message = "Error: Prompt not ready."
-
-        except Exception as pre_process_err:
-            st.session_state.error_message = f"❌ Pre-processing Error: {pre_process_err}"
-            # --- Corrected Cleanup Block ---
-            if st.session_state.uploaded_audio_info:
-                try:
-                    # Attempt cleanup even if pre-processing failed
-                    genai.delete_file(st.session_state.uploaded_audio_info.name)
-                    st.session_state.uploaded_audio_info = None
-                except Exception as cleanup_err:
-                    # Log or warn about the cleanup failure specifically if needed
-                    st.warning(f"Cloud cleanup attempt during error handling failed: {cleanup_err}", icon="⚠️")
-            # --- End Corrected Cleanup Block ---
-
-        # --- Generate Notes API Call ---
-        # (Rest of the code remains the same)
-
-        # --- Generate Notes API Call ---
-        if not st.session_state.error_message and api_payload_parts:
-            try: # Inner try for API call
-                st.toast(f"📝 Generating notes...", icon="✨")
-                model = genai.GenerativeModel(model_name=notes_model_id, safety_settings=safety_settings, generation_config=main_gen_config)
-                response = model.generate_content(api_payload_parts)
-
-                # Handle Response
-                if response and hasattr(response, 'text') and response.text and response.text.strip():
-                    st.session_state.generated_notes = response.text.strip(); st.session_state.edited_notes_text = st.session_state.generated_notes
-                    add_to_history(st.session_state.generated_notes); st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type)
-                    st.toast("🎉 Notes generated!", icon="✅")
-                elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason: st.session_state.error_message = f"⚠️ Response blocked: {response.prompt_feedback.block_reason}."
-                elif response: st.session_state.error_message = "🤔 AI returned empty response."
-                else: st.session_state.error_message = "😥 Generation failed (No response)."
-
-            except Exception as api_call_err: st.session_state.error_message = f"❌ API Call Error: {api_call_err}"
-
-        # --- Cloud Audio Cleanup (always attempt if ref exists) ---
-        if st.session_state.uploaded_audio_info:
-            try: st.toast("☁️ Cleaning cloud audio...", icon="🗑️"); genai.delete_file(st.session_state.uploaded_audio_info.name); st.session_state.uploaded_audio_info = None
-            except Exception as e: st.warning(f"Cloud cleanup failed: {e}", icon="⚠️")
-        # End of inner try...except and cleanup
+    except Exception as e:
+        # Catch errors from validation, audio upload/processing, prompt generation, etc.
+        st.session_state.error_message = f"❌ Processing Error: {e}"
 
     # --- Outer FINALLY block: Always runs ---
     finally:
-        st.session_state.processing = False
-        # --- Attempt Cloud Audio Cleanup if reference exists ---
-        # Correct indentation for try/except block
+        st.session_state.processing = False # Mark processing as finished
+        # --- Cloud Audio Cleanup (always attempt if ref exists) ---
         if st.session_state.uploaded_audio_info:
             try:
-                # This check might be redundant if error handling inside the main try already cleared it,
-                # but it's safe to attempt deletion again here if the ref still exists.
-                st.toast("☁️ Final check: Cleaning cloud audio...", icon="🗑️",) # Optional feedback
+                st.toast("☁️ Cleaning up uploaded audio...", icon="🗑️")
                 genai.delete_file(st.session_state.uploaded_audio_info.name)
                 st.session_state.uploaded_audio_info = None # Clear ref after successful deletion
             except Exception as final_cleanup_error:
                 # Log or display a warning if final cleanup fails, but don't stop the rerun
-                st.warning(f"Final cloud audio cleanup failed: {final_cleanup_error}", icon="⚠️")
-        # --- End correction ---
+                st.warning(f"Final cloud audio cleanup failed: {final_cleanup_error}", icon="⚠️") # Show warning but continue
+
         st.rerun() # Rerun to display final results or errors
 
 # --- Footer ---
