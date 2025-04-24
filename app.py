@@ -112,16 +112,16 @@ DEFAULT_MEETING_TYPE = MEETING_TYPES[0]
 SECTOR_OPTIONS = ["Other / Manual Topics", "IT Services", "QSR"]
 DEFAULT_SECTOR = SECTOR_OPTIONS[0]
 SECTOR_TOPICS = {
-    "IT Services": """Future investments related comments:
-- Capital allocation:
-- Talent supply chain related comments:
-- Org structure change:
-- Other comments:
+    "IT Services": """Future investments related comments (Including GenAI, AI, Data, Cloud, etc):
+Capital allocation:
+Talent supply chain related comments:
+Org structure change:
+Other comments:
 Short-term comments:
 - Guidance:
 - Order booking:
 - Impact of macro slowdown:
-- Signal:""",
+- Vertical wise comments:""",
     "QSR": """Customer proposition:
 Menu strategy (Includes: new product launches, etc):
 Operational update (Includes: SSSG, SSTG, Price hike, etc):
