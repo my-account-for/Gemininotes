@@ -135,9 +135,9 @@ try:
     genai.configure(api_key=API_KEY)
     # Generation configs will be used in generate_content calls
     filename_gen_config = {"temperature": 0.2, "max_output_tokens": 50, "response_mime_type": "text/plain"}
-    main_gen_config = {"temperature": 0.7, "top_p": 1.0, "top_k": 32, "max_output_tokens": 8192, "response_mime_type": "text/plain"}
+    main_gen_config = {"temperature": 0.7, "top_p": 1.0, "top_k": 32, "response_mime_type": "text/plain"}
     transcription_gen_config = {"temperature": 0.1, "response_mime_type": "text/plain"}
-    refinement_gen_config = {"temperature": 0.3, "response_mime_type": "text/plain", "max_output_tokens": 8192}
+    refinement_gen_config = {"temperature": 0.3, "response_mime_type": "text/plain"}
     safety_settings = [{"category": c, "threshold": "BLOCK_MEDIUM_AND_ABOVE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
 except Exception as e: st.error(f"### 💥 Error Configuring Google AI Client: {e}", icon="🚨"); st.stop()
 
