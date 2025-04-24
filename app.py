@@ -204,17 +204,18 @@ Follow this specific structure EXACTLY:
 """,
 
         # OPTION 3: Uses Option 2 for notes, THEN adds a summary. This prompt is for the *summary step*.
+        # ***** UPDATED SUMMARY PROMPT BELOW *****
         "Summary Prompt (for Option 3)": """Based ONLY on the detailed 'GENERATED NOTES (Q&A Format - Concise)' provided below, create a concise executive summary highlighting the most significant insights, findings, or critical points discussed.
 
 **Format:**
-1.  Identify the main themes or key topics discussed in the notes.
-2.  For each theme/topic, create a clear heading (e.g., **Key Theme 1: Market Trends**).
-3.  Under each heading, use bullet points to list the most significant insights, findings, or critical points related to that theme.
-4.  Focus on capturing the essence and importance of the information, synthesizing the key takeaways from the detailed Q&A points. These bullets should represent crucial insights, not just a repetition of individual facts.
+1.  Identify the main themes or key topics discussed in the notes (e.g., **GenAI Impact**, **Vendor Landscape**, **Genpact Specifics**). Create a clear, concise heading for each theme using bold text.
+2.  Under each heading, use primary bullet points (`- `) to list the most significant insights, findings, or critical points related to that theme.
+3.  **Crucially: Each bullet point should represent a single, distinct key takeaway or significant piece of information.** DO NOT use indented sub-bullets or nested lists. If a point has multiple important facets, break them down into separate primary bullet points under the same theme heading.
+4.  Focus on synthesizing the key takeaways from the detailed Q&A points. These bullets should represent crucial insights, not just a repetition of individual facts. Aim for clear, impactful statements.
 
 **Instructions:**
 - Aim for a total summary length of approximately 500-1000 words.
-- Maintain an objective and professional tone.
+- Maintain an objective and professional tone, reflecting the expert's views accurately.
 - Ensure the summary accurately reflects the content and emphasis of the detailed notes it is based on.
 - Do not introduce any information, conclusions, or opinions not explicitly supported by the GENERATED NOTES provided below.
 
@@ -225,6 +226,7 @@ Follow this specific structure EXACTLY:
 
 **EXECUTIVE SUMMARY:**
 """
+        # ***** END OF UPDATED SUMMARY PROMPT *****
     },
     "Earnings Call": """You are an expert AI assistant creating DETAILED notes from an earnings call transcript for an investment firm.
 Output MUST be comprehensive, factual notes, capturing all critical financial and strategic information.
@@ -362,7 +364,9 @@ def get_prompt_display_text():
                 if prompt_template_to_display:
                      display_text = format_prompt_safe(prompt_template_to_display, **format_kwargs)
                      if expert_option == "Option 3: Option 2 + Executive Summary":
-                         display_text += "\n\n# NOTE: Option 3 includes an additional Executive Summary step generated *after* these notes, using a separate prompt."
+                         # Append note about the separate summary step prompt (which isn't shown here)
+                         summary_prompt_preview = PROMPTS["Expert Meeting"][EXPERT_MEETING_SUMMARY_PROMPT_KEY].split("---")[0] # Show first part
+                         display_text += f"\n\n# NOTE: Option 3 includes an additional Executive Summary step generated *after* these notes, using a separate prompt starting like:\n'''\n{summary_prompt_preview.strip()}\n'''"
                 else:
                     display_text = "# Error: Could not find prompt template for display."
 
@@ -489,7 +493,7 @@ with st.container(border=True): # Input Section
                     help="Choose the desired output format.\n"
                          "- Option 1: Very strict, one fact per bullet.\n"
                          "- Option 2: More natural flow, combines related points.\n"
-                         "- Option 3: Option 2 notes + ~500-1000 word summary."
+                         "- Option 3: Option 2 notes + Executive Summary (using updated prompt)." # Updated help text slightly
                 )
             # --- End Conditional ---
         with col1b:
@@ -885,7 +889,7 @@ if st.session_state.processing and not st.session_state.generating_filename:
                     # --- Option 3: Generate Summary ---
                     if meeting_type == "Expert Meeting" and expert_meeting_option == "Option 3: Option 2 + Executive Summary":
                         status.update(label=f"✨ Step 3b: Generating Executive Summary using {st.session_state.selected_notes_model_display_name}...")
-                        # Use the dedicated summary prompt key
+                        # Use the dedicated summary prompt key (which has been updated)
                         summary_prompt_template = PROMPTS["Expert Meeting"].get(EXPERT_MEETING_SUMMARY_PROMPT_KEY)
                         if not summary_prompt_template:
                              raise ValueError(f"Could not find summary prompt template with key: {EXPERT_MEETING_SUMMARY_PROMPT_KEY}")
