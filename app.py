@@ -269,14 +269,11 @@ def get_prompt_display_text():
         # --- Define prompt_func based on meeting type ---
         if meeting_type == "Earnings Call":
             # --- ROBUSTNESS FIX: Ensure topics text is always a string ---
-            # Get current text area content, default to empty string if None or not found
             user_topics_text_for_display = str(st.session_state.get('earnings_call_topics', "") or "")
             # --- END FIX ---
-            # Define the lambda using the guaranteed string
             prompt_func = lambda t, c: create_earnings_call_prompt(t, user_topics_text_for_display, c)
         elif meeting_type == "Expert Meeting":
             prompt_func = create_expert_meeting_prompt
-            # No extra arguments needed for expert meeting
         else:
             st.error(f"Internal Error: Invalid meeting type '{meeting_type}' for prompt preview.")
             return "Error generating prompt preview." # Return early on error
@@ -285,17 +282,13 @@ def get_prompt_display_text():
 
         # --- Call the appropriate function ---
         try:
-             # Make the call, passing the arguments it expects
              if meeting_type == "Earnings Call":
-                 # The lambda handles the arguments correctly here
                  base_prompt = prompt_func(transcript=placeholder, context=temp_context)
              elif meeting_type == "Expert Meeting":
-                  # Call directly with the two args
                   base_prompt = prompt_func(transcript=placeholder, context=temp_context)
              else:
                  base_prompt = "Error: Could not determine prompt function."
 
-             # Add audio note if needed
              if input_type == "Upload Audio":
                  display_text = ("# NOTE FOR AUDIO: 3-step process (Transcribe -> Refine -> Notes).\n"
                                  "# This prompt is used in Step 3 with the *refined* transcript.\n"
@@ -304,13 +297,10 @@ def get_prompt_display_text():
                  display_text = base_prompt
 
         except Exception as e:
-             # Catch potential errors during prompt generation itself
              st.error(f"Error generating prompt preview: {e}")
              display_text = f"# Error generating preview: {e}"
 
-
     elif meeting_type == "Custom":
-         # (Custom prompt logic remains the same)
          audio_note = ("\n# NOTE FOR AUDIO: If using audio, the system will first transcribe and then\n"
                        "# *refine* the transcript (speaker ID, translation, corrections).\n"
                        "# Your custom prompt below will receive this *refined transcript* as the primary text input.\n"
@@ -319,7 +309,15 @@ def get_prompt_display_text():
          current_or_default = st.session_state.current_prompt_text or default_custom
          display_text = current_or_default + (audio_note if st.session_state.input_method_radio == 'Upload Audio' else "")
 
-    return display_textdef clear_all_state():
+    # --- Ensure this return is the last statement of the function ---
+    return display_text
+
+# --- NEWLINE ADDED HERE ---
+
+def clear_all_state():
+    # Reset selections and inputs
+    st.session_state.selected_meeting_type = DEFAULT_MEETING_TYPE
+    # ... rest of clear_all_state function ...
     # Reset selections and inputs
     st.session_state.selected_meeting_type = DEFAULT_MEETING_TYPE
     st.session_state.selected_notes_model_display_name = DEFAULT_NOTES_MODEL_NAME # Use renamed key
