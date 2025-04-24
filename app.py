@@ -327,7 +327,7 @@ with output_container:
 
 # --- Processing Logic ---
 # Now this line (previously line 317) will work because generate_button is defined above
-if generate_button:
+ if generate_button:
     # Reset state
     st.session_state.processing = True
     # ... (reset other state variables) ...
@@ -335,7 +335,7 @@ if generate_button:
 
 # ... (rest of the processing logic) ...
 
-if st.session_state.processing and not st.session_state.generating_filename:
+ if st.session_state.processing and not st.session_state.generating_filename:
     # Use uploaded_audio_info to store the SINGLE cloud file reference
     st.session_state.uploaded_audio_info = None
     with st.status("🚀 Initializing process...", expanded=True) as status:
