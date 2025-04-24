@@ -266,9 +266,33 @@ def generate_suggested_filename(notes_content, meeting_type):
     finally: st.session_state.generating_filename = False
 
 def add_to_history(notes):
-    # (Keep function as is)
-    if not notes: return; timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S"); new_entry = {"timestamp": timestamp, "notes": notes};
-    current_history = st.session_state.get('history', []); current_history.insert(0, new_entry); st.session_state.history = current_history[:3]
+    """Adds the generated notes to the session state history (max 3 entries)."""
+    if not notes:
+        # If notes are empty or None, do nothing and return.
+        return
+
+    # Only proceed if notes exist
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_entry = {"timestamp": timestamp, "notes": notes} # Define new_entry here
+
+        # Get current history, default to empty list if not found or wrong type
+        current_history = st.session_state.get('history', [])
+        if not isinstance(current_history, list):
+            st.warning("History state was not a list, resetting.", icon="⚠️")
+            current_history = []
+
+        # Add the new entry to the beginning
+        current_history.insert(0, new_entry)
+
+        # Keep only the latest 3 entries
+        st.session_state.history = current_history[:3]
+
+    except Exception as e:
+        # Catch potential errors during history update itself
+        st.warning(f"⚠️ Error updating note history: {e}", icon="❗")
+        # Optionally reset history if it seems corrupted
+        # st.session_state.history = []
 
 def restore_note_from_history(index):
     # (Keep function as is)
