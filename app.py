@@ -20,6 +20,7 @@ st.set_page_config(
 )
 
 # --- Custom CSS Injection ---
+# (CSS remains the same as previous version)
 st.markdown("""
 <style>
     /* Overall App Background */
@@ -157,12 +158,12 @@ Follow this specific structure EXACTLY:
 - **Opening overview or Expert background (Optional):** If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple language. DO NOT summarize.
 - **Q&A format:** Structure the main body STRICTLY in Question/Answer format.
   - **Questions:** Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).
-  - **Answers:** Use bullet points directly below the question. **Each bullet MUST be a complete sentence representing one single, distinct factual point.** Capture ALL specifics (data, names, examples, $, %, etc.). DO NOT use sub-bullets or section headers within answers. DO NOT add interpretations, summaries, conclusions, or action items.
+  - **Answers:** Use bullet points directly below the question. **Each bullet MUST be a complete sentence representing one single, distinct factual point.** Capture ALL specifics (data, names, examples, $, %, etc.). DO NOT use sub-bullets or section headers within answers. **DO NOT add interpretations, summaries, conclusions, or action items not explicitly stated in the transcript.**
 
 **Additional Instructions:**
 - Accuracy is paramount. Capture ALL facts precisely.
 - Be clear and concise, adhering strictly to one fact per bullet point.
-- Include ONLY information present in the transcript.
+- Include ONLY information present in the transcript. DO NOT add external information.
 - If a section (like Opening Overview) isn't present, OMIT it.
 ---
 **MEETING TRANSCRIPT:**
@@ -187,12 +188,12 @@ Follow this specific structure EXACTLY:
 		- **Strive for natural sentence flow. While focusing on distinct facts, combine closely related details or sequential points into a single sentence where it enhances readability and avoids excessive choppiness, without adding interpretation or summarization.**
 		- Capture ALL specifics (data, names, examples, $, %, etc.).
 		- DO NOT use sub-bullets or section headers within answers.
-		- DO NOT add interpretations, summaries, conclusions, or action items.
+		- **DO NOT add interpretations, summaries, conclusions, or action items not explicitly stated in the transcript.**
 
 **Additional Instructions:**
 - Accuracy is paramount. Capture ALL facts precisely.
 - **Write clearly and concisely, avoiding unnecessary words. Favor informative sentences over overly simplistic ones.**
-- Include ONLY information present in the transcript.
+- Include ONLY information present in the transcript. DO NOT add external information.
 - If a section (like Opening Overview) isn't present, OMIT it.
 ---
 **MEETING TRANSCRIPT:**
@@ -204,20 +205,21 @@ Follow this specific structure EXACTLY:
 """,
 
         # OPTION 3: Uses Option 2 for notes, THEN adds a summary. This prompt is for the *summary step*.
-        # ***** UPDATED SUMMARY PROMPT BELOW *****
+        # Includes negative constraints added based on user request.
         "Summary Prompt (for Option 3)": """Based ONLY on the detailed 'GENERATED NOTES (Q&A Format - Concise)' provided below, create a concise executive summary highlighting the most significant insights, findings, or critical points discussed.
 
 **Format:**
 1.  Identify the main themes or key topics discussed in the notes (e.g., **GenAI Impact**, **Vendor Landscape**, **Genpact Specifics**). Create a clear, concise heading for each theme using bold text.
 2.  Under each heading, use primary bullet points (`- `) to list the most significant insights, findings, or critical points related to that theme.
 3.  **Crucially: Each bullet point should represent a single, distinct key takeaway or significant piece of information.** DO NOT use indented sub-bullets or nested lists. If a point has multiple important facets, break them down into separate primary bullet points under the same theme heading.
-4.  Focus on synthesizing the key takeaways from the detailed Q&A points. These bullets should represent crucial insights, not just a repetition of individual facts. Aim for clear, impactful statements.
+4.  Focus on synthesizing the key takeaways from the detailed Q&A points. These bullets should represent crucial insights. **DO NOT list minor details or repeat verbatim points from the Q&A.**
 
 **Instructions:**
 - Aim for a total summary length of approximately 500-1000 words.
 - Maintain an objective and professional tone, reflecting the expert's views accurately.
 - Ensure the summary accurately reflects the content and emphasis of the detailed notes it is based on.
-- Do not introduce any information, conclusions, or opinions not explicitly supported by the GENERATED NOTES provided below.
+- **Do not introduce any information, conclusions, or opinions not explicitly supported by the GENERATED NOTES provided below.**
+- **DO NOT hallucinate or invent details.**
 
 ---
 **GENERATED NOTES (Input for Summary):**
@@ -226,7 +228,6 @@ Follow this specific structure EXACTLY:
 
 **EXECUTIVE SUMMARY:**
 """
-        # ***** END OF UPDATED SUMMARY PROMPT *****
     },
     "Earnings Call": """You are an expert AI assistant creating DETAILED notes from an earnings call transcript for an investment firm.
 Output MUST be comprehensive, factual notes, capturing all critical financial and strategic information.
@@ -240,7 +241,8 @@ Output MUST be comprehensive, factual notes, capturing all critical financial an
 - Each bullet = complete sentence with distinct info.
 - Capture ALL numbers, names, data accurately.
 - Use quotes "" for significant statements.
-- DO NOT summarize or interpret unless part of the structure.
+- **DO NOT summarize or interpret unless part of the structure or explicitly stated in the call.**
+- **DO NOT add information not mentioned in the transcript.**
 
 **Note Structure:**
 - **Call Participants:** (List names/titles or 'Not specified')
@@ -337,6 +339,24 @@ def get_current_input_data():
     elif input_type == "Upload Audio": audio_file = st.session_state.audio_uploader
     return input_type, transcript, audio_file
 
+# *** IMPROVEMENT: Input validation function ***
+def validate_inputs():
+    """Checks if required inputs are present based on selected method."""
+    input_method = st.session_state.input_method_radio
+    meeting_type = st.session_state.selected_meeting_type
+    custom_prompt = st.session_state.current_prompt_text
+
+    if input_method == "Paste Text" and not st.session_state.text_input.strip():
+        return False, "Please paste the transcript text."
+    if input_method == "Upload PDF" and st.session_state.pdf_uploader is None:
+        return False, "Please upload a PDF file."
+    if input_method == "Upload Audio" and st.session_state.audio_uploader is None:
+        return False, "Please upload an audio file."
+    if meeting_type == "Custom" and not custom_prompt.strip():
+         return False, "Custom prompt cannot be empty for 'Custom' meeting type."
+
+    return True, ""
+
 def get_prompt_display_text():
     """Generates the appropriate prompt text for display/editing."""
     meeting_type = st.session_state.selected_meeting_type
@@ -397,11 +417,12 @@ def get_prompt_display_text():
              display_text = f"# Error generating preview: Review inputs/prompt structure. Details logged if possible."
 
     elif meeting_type == "Custom":
+         # *** IMPROVEMENT: Clearer Custom Prompt Guidance ***
          audio_note = ("\n# NOTE FOR AUDIO: If using audio, the system will first chunk and transcribe,\n"
                        "# then *refine* the full transcript (speaker ID, translation, corrections).\n"
                        "# Your custom prompt below will receive this *refined transcript* as the primary text input.\n"
                        "# Design your prompt accordingly.\n")
-         default_custom = "# Enter your custom prompt here..."
+         default_custom = "# Enter your custom prompt here...\n# The {transcript} and {context_section} placeholders will be populated automatically.\n# Example: Summarize this meeting:\n# {transcript}\n# {context_section}"
          current_or_default = st.session_state.current_prompt_text or default_custom
          display_text = current_or_default + (audio_note if st.session_state.input_method_radio == 'Upload Audio' else "")
 
@@ -485,22 +506,27 @@ with st.container(border=True): # Input Section
             st.radio("Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type", horizontal=True)
             # --- Conditional Expert Meeting Option ---
             if st.session_state.selected_meeting_type == "Expert Meeting":
+                # *** IMPROVEMENT: Clearer Option Explanations ***
                 st.radio(
                     "Expert Meeting Note Style:",
                     options=EXPERT_MEETING_OPTIONS, # Use the defined list for user choices
                     key="expert_meeting_prompt_option",
                     index=EXPERT_MEETING_OPTIONS.index(DEFAULT_EXPERT_MEETING_OPTION), # Set default index
-                    help="Choose the desired output format.\n"
-                         "- Option 1: Very strict, one fact per bullet.\n"
-                         "- Option 2: More natural flow, combines related points.\n"
-                         "- Option 3: Option 2 notes + Executive Summary (using updated prompt)." # Updated help text slightly
+                    help="Choose the desired output format:\n"
+                         "- **Option 1:** Very strict Q&A, one distinct fact per bullet.\n"
+                         "- **Option 2 (Default):** Q&A with more natural sentence flow, may combine closely related points per bullet.\n"
+                         "- **Option 3:** Option 2 notes followed by a concise Executive Summary (~500-1000 words)."
                 )
             # --- End Conditional ---
         with col1b:
             st.subheader("AI Model Selection")
-            st.selectbox("Notes Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_notes_model_display_name", help="Model used for final note generation (and summary if applicable).")
-            st.selectbox("Transcription Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_transcription_model_display_name", help="Model used for Audio Transcription (Step 1 - per chunk). Faster models recommended.")
-            st.selectbox("Refinement Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_refinement_model_display_name", help="Model used for Audio Refinement (Step 2 - full transcript). More capable models recommended.")
+            # *** IMPROVEMENT: Model Selection Guidance ***
+            st.selectbox("Notes Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_notes_model_display_name",
+                         help="Model used for final note generation (and summary if applicable). **Pro models** offer better reasoning for complex notes/summaries. **Flash models** are faster/cheaper.")
+            st.selectbox("Transcription Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_transcription_model_display_name",
+                         help="Model used for Audio Transcription (Step 1 - per chunk). **Flash models** are recommended for speed and cost-effectiveness here.")
+            st.selectbox("Refinement Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_refinement_model_display_name",
+                         help="Model used for Audio Refinement (Step 2 - combines chunks, adds speaker labels, corrects). **Pro models** are recommended for better accuracy and handling complex dialogue.")
 
     with col_main_2: st.subheader(""); st.button("🧹 Clear All", on_click=clear_all_state, use_container_width=True, type="secondary", key="clear_button")
 
@@ -531,15 +557,31 @@ if show_prompt_area:
         display_prompt_text = get_prompt_display_text()
         # If Custom, allow editing the text area directly, otherwise just display
         if selected_mt == "Custom":
-            prompt_value = st.session_state.current_prompt_text if st.session_state.current_prompt_text else display_prompt_text
-            st.text_area(label="Prompt Text:", value=prompt_value, key="current_prompt_text", height=350, label_visibility="collapsed", help="This prompt is used for the *final* step of generating notes.")
+            prompt_value = st.session_state.current_prompt_text if st.session_state.current_prompt_text else "" # Start empty if not set
+            st.text_area(label="Prompt Text:",
+                         value=prompt_value,
+                         key="current_prompt_text",
+                         height=350,
+                         label_visibility="collapsed",
+                         placeholder=display_prompt_text, # Show example/guidance as placeholder
+                         help="Enter your full custom prompt. Use {transcript} for the main input and {context_section} for added context (if enabled). See placeholder for example.")
+            # *** IMPROVEMENT: Clearer Custom Prompt Guidance (Caption) ***
+            st.caption("Placeholders `{transcript}` and `{context_section}` will be automatically filled.")
         else: # For non-custom, just display the generated prompt preview
              st.text_area(label="Prompt Text:", value=display_prompt_text, key="current_prompt_text_display", height=350, label_visibility="collapsed", help="This prompt is used for the *final* step of generating notes. Edit via options above.", disabled=True)
              st.session_state.current_prompt_text = display_prompt_text # Store the previewed prompt for potential use, though direct editing is disabled
 
 
 # Generate Button
-st.write(""); generate_button = st.button("🚀 Generate Notes", type="primary", use_container_width=True, disabled=st.session_state.processing or st.session_state.generating_filename)
+st.write("")
+# *** IMPROVEMENT: Input Validation Feedback (Disable button) ***
+is_valid, error_msg = validate_inputs()
+generate_tooltip = error_msg if not is_valid else "Generate notes based on current inputs and settings."
+generate_button = st.button("🚀 Generate Notes",
+                            type="primary",
+                            use_container_width=True,
+                            disabled=st.session_state.processing or st.session_state.generating_filename or not is_valid,
+                            help=generate_tooltip)
 
 # Output Section
 output_container = st.container(border=True)
@@ -552,7 +594,8 @@ with output_container:
             with st.expander("View Raw Transcript (Step 1 Output - Combined from Chunks)"):
                 st.text_area("Raw Transcript", st.session_state.raw_transcript, height=200, disabled=True)
         if st.session_state.refined_transcript:
-             with st.expander("View Refined Transcript (Step 2 Output)"):
+             # *** IMPROVEMENT: Refined Transcript Accessibility ***
+             with st.expander("View Refined Transcript (Step 2 Output - Speaker Labels, Corrections)", expanded=bool(st.session_state.refined_transcript)):
                 st.text_area("Refined Transcript", st.session_state.refined_transcript, height=300, disabled=True)
 
         # Display Notes / Summary
@@ -595,7 +638,7 @@ with output_container:
                 st.download_button(label="⬇️ Refined Tx (.txt)", data=st.session_state.refined_transcript, file_name=f"{refined_fname_base}.txt", mime="text/plain", key='download-refined-txt', use_container_width=True, help="Download the speaker-diarized and corrected transcript from Step 2.")
             else: st.button("Refined Tx N/A", disabled=True, use_container_width=True, help="Refined transcript is only available after successful audio processing.")
     elif not st.session_state.processing:
-        st.markdown("<p class='initial-prompt'>Generated notes will appear here.</p>", unsafe_allow_html=True)
+        st.markdown("<p class='initial-prompt'>Configure inputs above and click 'Generate Notes'.</p>", unsafe_allow_html=True) # Slightly more informative initial text
 
 # History Section
 with st.expander("📜 Recent Notes History (Last 3)", expanded=False):
@@ -607,33 +650,51 @@ with st.expander("📜 Recent Notes History (Last 3)", expanded=False):
                 # Display logic might need adjustment if summaries are included
                 display_note = entry['notes']
                 summary_separator = "\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n"
+                preview_text = ""
                 if summary_separator in display_note:
-                     display_note = display_note.split(summary_separator, 1)[0] + "\n... (Summary omitted in preview)"
+                     notes_part, summary_part = display_note.split(summary_separator, 1)
+                     # Show start of notes and indicate summary presence
+                     preview_text = "\n".join(notes_part.strip().splitlines()[:3]) + "\n... (+ Executive Summary)"
+                else:
+                    preview_text = "\n".join(display_note.strip().splitlines()[:3]) + "..."
 
-                st.code(display_note[:300] + ("..." if len(display_note) > 300 else ""), language=None)
+                # Use text instead of code for better wrapping/readability potentially
+                st.text(preview_text[:300] + ("..." if len(preview_text) > 300 else ""))
                 st.button(f"View/Use Notes #{i+1}", key=f"restore_{i}", on_click=restore_note_from_history, args=(i,))
                 if i < len(st.session_state.history) - 1: st.divider()
 
 # --- Processing Logic ---
 if generate_button:
-    # Reset state before starting
-    st.session_state.processing = True
-    st.session_state.generating_filename = False
-    st.session_state.generated_notes = None
-    st.session_state.edited_notes_text = ""
-    st.session_state.edit_notes_enabled = False
-    st.session_state.error_message = None
-    st.session_state.suggested_filename = None
-    st.session_state.raw_transcript = None
-    st.session_state.refined_transcript = None
-    st.session_state.processed_audio_chunk_references = []
-    st.rerun()
+    # *** IMPROVEMENT: Double check validation before proceeding (Button disable might have race conditions) ***
+    is_valid_on_click, error_msg_on_click = validate_inputs()
+    if not is_valid_on_click:
+        st.session_state.error_message = f"Validation Error: {error_msg_on_click}"
+        st.rerun() # Stop processing and show error
+    else:
+        # Reset state before starting
+        st.session_state.processing = True
+        st.session_state.generating_filename = False
+        st.session_state.generated_notes = None
+        st.session_state.edited_notes_text = ""
+        st.session_state.edit_notes_enabled = False
+        st.session_state.error_message = None
+        st.session_state.suggested_filename = None
+        st.session_state.raw_transcript = None
+        st.session_state.refined_transcript = None
+        st.session_state.processed_audio_chunk_references = []
+        st.rerun()
 
 if st.session_state.processing and not st.session_state.generating_filename:
     processed_audio_chunk_references = [] # Local list for cleanup within this run
 
     with st.status("🚀 Initializing process...", expanded=True) as status:
         try: # Outer try-finally for overall process and cleanup
+
+            # *** IMPROVEMENT: Input Validation Feedback (Early Exit) ***
+            is_valid_process, error_msg_process = validate_inputs()
+            if not is_valid_process:
+                raise ValueError(f"Input validation failed: {error_msg_process}") # Raise error to be caught by outer try/except
+
             # State & Input Retrieval
             status.update(label="⚙️ Reading inputs and settings...")
             meeting_type = st.session_state.selected_meeting_type
@@ -657,8 +718,8 @@ if st.session_state.processing and not st.session_state.generating_filename:
             st.session_state.raw_transcript = None
             st.session_state.refined_transcript = None
 
-            # Validation
-            status.update(label="✔️ Validating inputs...")
+            # Validation (Redundant due to earlier checks, but keep as safety)
+            status.update(label="✔️ Re-validating inputs...")
             if actual_input_type == "Paste Text" and not final_transcript_for_notes: raise ValueError("Text input is empty.")
             elif actual_input_type == "Upload PDF" and not final_transcript_for_notes: raise ValueError("PDF processing failed or returned empty text.")
             elif actual_input_type == "Upload Audio" and not audio_file_obj: raise ValueError("No audio file uploaded.")
@@ -742,15 +803,7 @@ if st.session_state.processing and not st.session_state.generating_filename:
                         raise Exception(f"❌ Error processing chunk {chunk_num}: {chunk_err}") from chunk_err
                     finally:
                         if temp_chunk_path and os.path.exists(temp_chunk_path): os.remove(temp_chunk_path)
-                        if chunk_file_ref:
-                            try:
-                                status.update(label=f"🗑️ Cleaning up cloud file for chunk {chunk_num}...")
-                                genai.delete_file(chunk_file_ref.name)
-                                if chunk_file_ref in processed_audio_chunk_references:
-                                    processed_audio_chunk_references.remove(chunk_file_ref)
-                            except Exception as del_err:
-                                st.warning(f"⚠️ Failed to delete cloud file for chunk {chunk_num} ({chunk_file_ref.name}): {del_err}. Will retry cleanup later.", icon="🗑️")
-
+                        # Cleanup moved to the main finally block for better robustness
 
                 # --- Combine Transcripts ---
                 status.update(label="🧩 Combining chunk transcripts...")
@@ -770,10 +823,10 @@ if st.session_state.processing and not st.session_state.generating_filename:
                         ```
 
                         **Instructions:**
-                        1.  **Identify Speakers:** Assign consistent labels (e.g., Speaker 1, Speaker 2). Place the label on a new line before the speaker's turn.
+                        1.  **Identify Speakers:** Assign consistent labels (e.g., Speaker 1, Speaker 2). Place the label on a new line before the speaker's turn. If you cannot distinguish speakers reliably, use a single label like 'SPEAKER'.
                         2.  **Translate to English:** Convert any non-English speech found within the transcript to English, ensuring it fits naturally within the conversation.
-                        3.  **Correct Errors:** Fix spelling mistakes and grammatical errors. Use the overall conversation context to correct potentially misheard words or phrases.
-                        4.  **Format:** Ensure clear separation between speaker turns using the speaker labels. Maintain the original conversational flow and content.
+                        3.  **Correct Errors:** Fix obvious spelling mistakes and grammatical errors. Use the overall conversation context to correct potentially misheard words or phrases where confident. Preserve technical terms or names if unsure.
+                        4.  **Format:** Ensure clear separation between speaker turns using the speaker labels. Maintain the original conversational flow and content. Remove filler words (um, uh) only if excessive and not affecting meaning.
                         5.  **Output:** Provide *only* the refined, speaker-diarized, translated, and corrected transcript text. Do not add any introduction, summary, or commentary before or after the transcript.
 
                         **Additional Context (Optional - use for understanding terms, names, etc.):**
@@ -846,7 +899,7 @@ if st.session_state.processing and not st.session_state.generating_filename:
                      for line in user_topics_text.strip().split('\n'):
                           trimmed_line = line.strip()
                           if trimmed_line and not trimmed_line.startswith(('-', '*')): formatted_topics.append(f"- **{trimmed_line}**")
-                          else: formatted_topics.append(line)
+                          else: formatted_topics.append(line) # Keep existing bullets/indentation if user provided
                      topic_list_str = "\n".join(formatted_topics)
                      topic_instructions = (f"Structure the main body of the notes under the following user-specified headings EXACTLY as provided:\n{topic_list_str}\n\n"
                                            f"- **Other Key Points** (Use this MANDATORY heading for important info NOT covered above)\n\n"
@@ -930,7 +983,7 @@ if st.session_state.processing and not st.session_state.generating_filename:
                         # Not Option 3, or summary failed - just use the generated notes
                         if 'generated_notes' not in st.session_state or not st.session_state.generated_notes: # Avoid overwriting if already set by failed summary
                              st.session_state.generated_notes = generated_notes_content
-                             status.update(label="✅ Notes generated successfully!", state="complete")
+                        status.update(label="✅ Notes generated successfully!", state="complete") # Mark complete here if not option 3
 
                     # --- Post-generation steps (common) ---
                     if st.session_state.generated_notes: # Check if we have notes (either solo or combined)
@@ -961,10 +1014,16 @@ if st.session_state.processing and not st.session_state.generating_filename:
             st.session_state.processing = False # Mark processing as finished
             # --- Cloud Audio Chunk Cleanup (Catch-all) ---
             if processed_audio_chunk_references:
+                # Use a separate status for cleanup if desired, or just toast
                 st.toast(f"☁️ Performing final cleanup of {len(processed_audio_chunk_references)} remaining cloud chunk file(s)...", icon="🗑️")
-                for file_ref in processed_audio_chunk_references:
-                    try: genai.delete_file(file_ref.name)
-                    except Exception as final_cleanup_error: st.warning(f"Final cloud audio chunk cleanup failed for {file_ref.name}: {final_cleanup_error}", icon="⚠️")
+                # Make a copy for safe iteration while removing
+                refs_to_delete = list(processed_audio_chunk_references)
+                for file_ref in refs_to_delete:
+                    try:
+                        genai.delete_file(file_ref.name)
+                        processed_audio_chunk_references.remove(file_ref) # Remove from original list on success
+                    except Exception as final_cleanup_error:
+                        st.warning(f"Final cloud audio chunk cleanup failed for {file_ref.name}: {final_cleanup_error}", icon="⚠️")
                 # Clear the session state list as well, even if deletion failed for some
                 st.session_state.processed_audio_chunk_references = []
 
