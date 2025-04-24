@@ -11,267 +11,282 @@ import PyPDF2
 import docx
 import re
 import math
-from pydub import AudioSegment # !pip install pydub
-# Make sure ffmpeg is installed in your environment!
+# Removed pydub import
 
 # --- Page Configuration ---
-# ... (remains the same) ...
 st.set_page_config(
-    page_title="SynthNotes AI", # Removed emoji
-    page_icon="✨", # page_icon is usually fine with emojis
+    page_title="SynthNotes AI", # Simplified title
+    page_icon="✨",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
 # --- Custom CSS Injection ---
-# ... (remains the same) ...
+# (CSS remains the same - omitted for brevity)
 st.markdown(""" <style> ... </style> """, unsafe_allow_html=True)
 
 
 # --- Define Available Models & Meeting Types ---
-# ... (remains the same) ...
-AVAILABLE_MODELS = { ... }
-DEFAULT_NOTES_MODEL_NAME = ...
-DEFAULT_TRANSCRIPTION_MODEL_NAME = ...
-DEFAULT_REFINEMENT_MODEL_NAME = ...
-MEETING_TYPES = ...
-DEFAULT_MEETING_TYPE = ...
+# ... (Model definitions remain the same) ...
+AVAILABLE_MODELS = {
+    "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
+    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
+    "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "models/gemini-2.5-pro-exp-03-25",
+}
+DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)"
+if DEFAULT_NOTES_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_NOTES_MODEL_NAME = "Gemini 1.5 Pro (Complex Reasoning)"
+DEFAULT_TRANSCRIPTION_MODEL_NAME = "Gemini 1.5 Flash (Fast & Versatile)"
+if DEFAULT_TRANSCRIPTION_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_TRANSCRIPTION_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
+DEFAULT_REFINEMENT_MODEL_NAME = "Gemini 1.5 Pro (Complex Reasoning)"
+if DEFAULT_REFINEMENT_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_REFINEMENT_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
+
+MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
+DEFAULT_MEETING_TYPE = MEETING_TYPES[0]
 
 # --- Sector-Specific Topics ---
-# ... (remains the same) ...
-SECTOR_OPTIONS = ...
-DEFAULT_SECTOR = ...
-SECTOR_TOPICS = { ... }
+# ... (Sector definitions remain the same) ...
+SECTOR_OPTIONS = ["Other / Manual Topics", "IT Services", "QSR"]
+DEFAULT_SECTOR = SECTOR_OPTIONS[0]
+SECTOR_TOPICS = {
+    "IT Services": """...""", # Keep full topic strings
+    "QSR": """..."""
+}
 
 # --- Load API Key and Configure Gemini Client ---
-# ... (remains the same) ...
 load_dotenv(); API_KEY = os.getenv("GEMINI_API_KEY")
-if not API_KEY: st.error(...); st.stop()
+if not API_KEY: st.error("### 🔑 API Key Not Found!", icon="🚨"); st.stop()
 try:
-    genai.configure(...)
-    # ... (Generation Configs remain the same) ...
-    filename_gen_config = ...
-    notes_gen_config = ...
-    transcription_gen_config = ... # Still useful for single calls
-    refinement_chunk_gen_config = ...
-    safety_settings = ...
-except Exception as e: st.error(...); st.stop()
+    genai.configure(api_key=API_KEY)
+    # Base Generation Configs
+    filename_gen_config = {"temperature": 0.2, "max_output_tokens": 50, "response_mime_type": "text/plain"}
+    # Config for notes step - NO max_output_tokens
+    notes_gen_config = {"temperature": 0.7, "top_p": 1.0, "top_k": 32, "response_mime_type": "text/plain"}
+    # Config for transcription - Keep 8k limit as safety/default
+    transcription_gen_config = {"temperature": 0.1, "max_output_tokens": 8192, "response_mime_type": "text/plain"}
+    # Config for refinement chunk - Keep 8k limit PER CHUNK
+    refinement_chunk_gen_config = {"temperature": 0.3, "max_output_tokens": 8192, "response_mime_type": "text/plain"}
+    safety_settings = [{"category": c, "threshold": "BLOCK_MEDIUM_AND_ABOVE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
+except Exception as e: st.error(f"### 💥 Error Configuring Google AI Client: {e}", icon="🚨"); st.stop()
 
 # --- Initialize Session State ---
 default_state = {
-    # ... (Existing state variables) ...
-    'chunking_occurred_transcription': False, # NEW flag
-    'chunking_occurred_refinement': False,
+    'processing': False, 'generating_filename': False, 'generated_notes': None, 'error_message': None,
+    'uploaded_audio_info': None, # Will store the single cloud file reference
+    'add_context_enabled': False,
+    'selected_notes_model_display_name': DEFAULT_NOTES_MODEL_NAME,
+    'selected_transcription_model_display_name': DEFAULT_TRANSCRIPTION_MODEL_NAME,
+    'selected_refinement_model_display_name': DEFAULT_REFINEMENT_MODEL_NAME,
+    'selected_meeting_type': DEFAULT_MEETING_TYPE,
+    'view_edit_prompt_enabled': False, 'current_prompt_text': "",
+    'input_method_radio': 'Paste Text', 'text_input': '', 'pdf_uploader': None, 'audio_uploader': None,
+    'context_input': '',
+    'selected_sector': DEFAULT_SECTOR,
+    'earnings_call_topics': '',
+    'edit_notes_enabled': False,
+    'edited_notes_text': "", 'suggested_filename': None, 'history': [],
+    'raw_transcript': None,
+    'refined_transcript': None,
+    # 'chunking_occurred_transcription': False, # No longer needed
+    'chunking_occurred_refinement': False, # Keep this one
 }
-# ... (Initialize state loop) ...
-for key, value in default_state.items(): ...
+for key, value in default_state.items():
+    if key not in st.session_state: st.session_state[key] = value
 
 # --- Helper Functions ---
-def extract_text_from_pdf(pdf_file_stream): ...
-def update_topic_template(): ...
-def create_expert_meeting_prompt(transcript, context=None): ...
-def create_earnings_call_prompt(transcript, user_topics_text=None, context=None): ...
-def create_docx(text): ...
-def get_current_input_data(): ...
-def get_prompt_display_text(): ...
+def extract_text_from_pdf(pdf_file_stream): ... # (Keep implementation)
+def update_topic_template(): ... # (Keep implementation)
+def create_expert_meeting_prompt(transcript, context=None): ... # (Keep implementation)
+def create_earnings_call_prompt(transcript, user_topics_text=None, context=None): ... # (Keep implementation)
+def create_docx(text): ... # (Keep implementation)
+def get_current_input_data(): ... # (Keep implementation)
+def get_prompt_display_text(): ... # (Keep implementation)
+
 def clear_all_state():
-    # ... (Existing resets) ...
-    st.session_state.chunking_occurred_transcription = False # Reset NEW flag
-    st.session_state.chunking_occurred_refinement = False
+    # Reset selections and inputs
+    st.session_state.selected_meeting_type = DEFAULT_MEETING_TYPE
+    st.session_state.selected_notes_model_display_name = DEFAULT_NOTES_MODEL_NAME
+    st.session_state.selected_transcription_model_display_name = DEFAULT_TRANSCRIPTION_MODEL_NAME
+    st.session_state.selected_refinement_model_display_name = DEFAULT_REFINEMENT_MODEL_NAME
+    st.session_state.input_method_radio = 'Paste Text'
+    st.session_state.text_input = ""
+    st.session_state.pdf_uploader = None
+    st.session_state.audio_uploader = None
+    st.session_state.context_input = ""
+    st.session_state.add_context_enabled = False
+    st.session_state.selected_sector = DEFAULT_SECTOR
+    st.session_state.earnings_call_topics = ""
+    st.session_state.current_prompt_text = ""
+    st.session_state.view_edit_prompt_enabled = False
+    # Reset outputs
+    st.session_state.generated_notes = None
+    st.session_state.edited_notes_text = ""
+    st.session_state.edit_notes_enabled = False
+    st.session_state.error_message = None
+    st.session_state.processing = False
+    st.session_state.suggested_filename = None
+    st.session_state.uploaded_audio_info = None # Reset cloud ref
+    st.session_state.history = []
+    st.session_state.raw_transcript = None
+    st.session_state.refined_transcript = None
+    # st.session_state.chunking_occurred_transcription = False # Removed
+    st.session_state.chunking_occurred_refinement = False # Reset flag
     st.toast("Inputs and outputs cleared!", icon="🧹")
 
-def generate_suggested_filename(notes_content, meeting_type): ...
-def add_to_history(notes): ...
-def restore_note_from_history(index): ...
-def chunk_and_refine_transcript(raw_transcript, refinement_model, general_context, status): ... # (Keep this function)
+def generate_suggested_filename(notes_content, meeting_type): ... # (Keep implementation)
+def add_to_history(notes): ... # (Keep implementation)
+def restore_note_from_history(index): ... # (Keep implementation)
 
-# --- NEW: Audio Transcription Helper with Chunking ---
-def transcribe_audio_possibly_chunked(audio_file_obj, transcription_model, status):
+# --- RENAMED: Text Refinement Helper Function (Handles Text Chunking) ---
+def refine_transcript_possibly_chunked(raw_transcript_text, refinement_model, general_context, status):
     """
-    Transcribes audio. Chunks input audio if duration exceeds threshold.
-    Returns concatenated transcript and a flag indicating if chunking occurred.
-    Requires pydub and ffmpeg.
+    Refines transcript TEXT. Chunks TEXT input if it's too long.
+    Warns about potential context loss if chunking occurs.
+    Returns the concatenated refined transcript text and a flag indicating if chunking occurred.
     """
-    MAX_CHUNK_DURATION_MINS = 30 # Target duration for each audio chunk
-    # Threshold slightly higher than chunk duration to avoid chunking for borderline cases
-    DURATION_THRESHOLD_MINS = 35
-    MAX_POLLING_TIME_SEC = 600 # Max time to wait for one chunk upload/process
-    POLLING_INTERVAL_SEC = 10
-
-    transcript_chunks_text = []
-    gemini_file_references = [] # To store cloud refs for cleanup
+    MAX_INPUT_CHUNK_CHARS = 35000 # Heuristic for *text* input length
+    MIN_TRANSCRIPT_LEN_FOR_CHUNK = 40000 # Only chunk if text is reasonably long
+    refined_outputs = []
     chunking_performed = False
-    original_filename = audio_file_obj.name
 
-    status.update(label="🔊 Analyzing audio file...")
-    try:
-        # Load audio using pydub - requires ffmpeg
-        audio_file_obj.seek(0) # Ensure stream position is at the beginning
-        # Determine format (important for pydub)
-        file_extension = os.path.splitext(original_filename)[1].lower().replace('.', '')
-        if not file_extension:
-             # Try common formats if no extension
-             try: audio = AudioSegment.from_file(io.BytesIO(audio_file_obj.getvalue()), format="mp3")
-             except:
-                  try: audio = AudioSegment.from_file(io.BytesIO(audio_file_obj.getvalue()), format="wav")
-                  except:
-                       try: audio = AudioSegment.from_file(io.BytesIO(audio_file_obj.getvalue()), format="m4a")
-                       except: raise ValueError("Could not determine audio format. Please use standard extensions (mp3, wav, m4a, etc.).")
-        else:
-             audio = AudioSegment.from_file(io.BytesIO(audio_file_obj.getvalue()), format=file_extension)
+    # Check length of the input *text*
+    if len(raw_transcript_text) > MIN_TRANSCRIPT_LEN_FOR_CHUNK:
+        chunking_performed = True
+        st.warning(
+            "⚠️ Raw transcript text is long. Performing refinement in chunks. "
+            "Speaker labels and context may be inconsistent across chunks.", icon="❗"
+        )
+        status.update(label="🧹 Step 2: Transcript text long, preparing chunks...")
 
-        duration_ms = len(audio)
-        duration_mins = duration_ms / (1000 * 60)
-        status.update(label=f"🔊 Audio duration: {duration_mins:.1f} minutes.")
+        # Split text by paragraph, group into chunks
+        segments = raw_transcript_text.split('\n\n')
+        current_chunk_segments = []
+        current_chunk_len = 0
+        input_text_chunks = []
 
-        if duration_mins > DURATION_THRESHOLD_MINS:
-            chunking_performed = True
-            chunk_duration_ms = MAX_CHUNK_DURATION_MINS * 60 * 1000
-            num_chunks = math.ceil(duration_ms / chunk_duration_ms)
-            st.warning(f"⚠️ Audio duration ({duration_mins:.1f} min) exceeds threshold. Splitting into {num_chunks} chunks for transcription.", icon="❗")
-            status.update(label=f"🔊 Splitting audio into {num_chunks} chunks...")
+        for segment in segments:
+            segment_len = len(segment)
+            if current_chunk_len > 0 and (current_chunk_len + segment_len + 2) > MAX_INPUT_CHUNK_CHARS:
+                input_text_chunks.append("\n\n".join(current_chunk_segments))
+                current_chunk_segments = [segment]
+                current_chunk_len = segment_len
+            else:
+                current_chunk_segments.append(segment)
+                current_chunk_len += segment_len + 2
 
-            for i in range(num_chunks):
-                start_ms = i * chunk_duration_ms
-                end_ms = min((i + 1) * chunk_duration_ms, duration_ms)
-                audio_chunk = audio[start_ms:end_ms]
-                status.update(label=f"☁️ Uploading audio chunk {i+1}/{num_chunks}...")
+        if current_chunk_segments:
+            input_text_chunks.append("\n\n".join(current_chunk_segments))
 
-                # Export chunk to a temporary file (use wav for broad compatibility)
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_chunk_file:
-                    try:
-                        audio_chunk.export(temp_chunk_file.name, format="wav")
-                        temp_chunk_path = temp_chunk_file.name
+        num_chunks = len(input_text_chunks)
+        status.update(label=f"🧹 Step 2: Refining transcript text in {num_chunks} chunks...")
 
-                        # Upload the temporary chunk file
-                        processed_chunk_ref = genai.upload_file(
-                            path=temp_chunk_path,
-                            display_name=f"chunk_{i+1}_{int(time.time())}_{original_filename}"
-                        )
-                        gemini_file_references.append(processed_chunk_ref) # Add ref for later use & cleanup
+        # Loop through text chunks and refine
+        for i, chunk_text in enumerate(input_text_chunks):
+            status.update(label=f"🧹 Step 2: Refining text chunk {i+1}/{num_chunks}...")
+            # (Refinement prompt for chunk remains the same as before)
+            refinement_prompt = f"""Please refine the following raw audio transcript chunk: ... **Refined Transcript Chunk:** """ # Keep prompt content
+            refinement_prompt = f"""Please refine the following raw audio transcript chunk:
 
-                        # Poll for upload completion
-                        polling_start = time.time()
-                        while processed_chunk_ref.state.name == "PROCESSING":
-                           if time.time() - polling_start > MAX_POLLING_TIME_SEC: raise TimeoutError(f"Audio chunk {i+1} upload timed out.")
-                           time.sleep(POLLING_INTERVAL_SEC); processed_chunk_ref = genai.get_file(processed_chunk_ref.name)
-                        if processed_chunk_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {i+1} processing failed. State: {processed_chunk_ref.state.name}")
-                        status.update(label=f"☁️ Audio chunk {i+1}/{num_chunks} ready.")
+            **Raw Transcript Chunk:**
+            ```
+            {chunk_text}
+            ```
 
-                    finally:
-                        # Ensure local temp file is deleted
-                        if temp_chunk_path and os.path.exists(temp_chunk_path):
-                            os.remove(temp_chunk_path)
+            **Instructions:**
+            1.  **Identify Speakers:** Assign consistent labels (e.g., Speaker 1, Speaker 2). Place the label on a new line before the speaker's turn. ***Note: Speaker labels may restart within this chunk.***
+            2.  **Translate to English:** Convert any non-English speech found within the transcript to English, ensuring it fits naturally within the conversation.
+            3.  **Correct Errors:** Fix spelling mistakes and grammatical errors. Use the overall conversation context *within this chunk* to correct potentially misheard words or phrases.
+            4.  **Format:** Ensure clear separation between speaker turns using the speaker labels. Maintain the original conversational flow and content *of this chunk*.
+            5.  **Output:** Provide *only* the refined, speaker-diarized, translated, and corrected transcript text for this chunk. Do not add any introduction, summary, or commentary.
 
-            # --- Transcription Loop (after all chunks uploaded) ---
-            status.update(label=f"✍️ Transcribing {num_chunks} audio chunks...")
-            for i, file_ref in enumerate(gemini_file_references):
-                status.update(label=f"✍️ Transcribing chunk {i+1}/{num_chunks}...")
-                transcript_text = ""
-                try:
-                    t_prompt = "Transcribe the audio accurately. Output only the raw transcript text."
-                    # Use transcription_gen_config (with output limit per chunk)
-                    t_response = transcription_model.generate_content(
-                        [t_prompt, file_ref],
-                        generation_config=transcription_gen_config
-                    )
-                    if t_response and hasattr(t_response, 'text') and t_response.text.strip():
-                        transcript_text = t_response.text.strip()
-                        transcript_chunks_text.append(transcript_text)
-                    elif hasattr(t_response, 'prompt_feedback') and t_response.prompt_feedback.block_reason:
-                        st.warning(f"⚠️ Transcription blocked for chunk {i+1}: {t_response.prompt_feedback.block_reason}", icon="⚠️")
-                        transcript_chunks_text.append(f"\n\n--- TRANSCRIPTION FAILED/BLOCKED FOR CHUNK {i+1} ---\n\n")
-                    else:
-                        st.warning(f"🤔 Transcription returned empty for chunk {i+1}", icon="⚠️")
-                        transcript_chunks_text.append(f"\n\n--- TRANSCRIPTION FAILED FOR CHUNK {i+1} ---\n\n")
-                except Exception as trans_chunk_err:
-                    st.warning(f"❌ Error transcribing chunk {i+1}: {trans_chunk_err}", icon="⚠️")
-                    transcript_chunks_text.append(f"\n\n--- TRANSCRIPTION ERROR FOR CHUNK {i+1} ---\n\n")
-                finally:
-                    # --- CRITICAL: Clean up cloud file immediately after use ---
-                    try:
-                        status.update(label=f"🗑️ Cleaning up cloud file for chunk {i+1}...")
-                        genai.delete_file(file_ref.name)
-                        # Remove from list to avoid double deletion attempt if outer finally runs
-                        # Be cautious if modifying list while iterating - maybe copy list first
-                    except Exception as cleanup_err:
-                         st.warning(f"⚠️ Failed to delete cloud file for chunk {i+1}: {cleanup_err}", icon="❗")
+            **Additional Context (Optional - use for understanding terms, names, etc.):**
+            {general_context if general_context else "None provided."}
 
-            status.update(label="✍️ Finished transcribing all chunks.")
+            **Refined Transcript Chunk:**
+            """
+            try:
+                r_response = refinement_model.generate_content(
+                    refinement_prompt,
+                    generation_config=refinement_chunk_gen_config, # Use config WITH output limit
+                    safety_settings=safety_settings
+                )
+                if r_response and hasattr(r_response, 'text') and r_response.text.strip():
+                    refined_outputs.append(r_response.text.strip())
+                # ... (Handle block/empty response for chunk, append raw chunk as fallback) ...
+                elif hasattr(r_response, 'prompt_feedback') and r_response.prompt_feedback.block_reason:
+                    st.warning(f"⚠️ Refinement blocked for chunk {i+1}: {r_response.prompt_feedback.block_reason}. Using raw chunk.", icon="⚠️")
+                    refined_outputs.append(f"--- RAW CHUNK {i+1} (Refinement Failed/Blocked) ---\n{chunk_text}")
+                else:
+                    st.warning(f"🤔 Refinement returned empty response for chunk {i+1}. Using raw chunk.", icon="⚠️")
+                    refined_outputs.append(f"--- RAW CHUNK {i+1} (Refinement Failed) ---\n{chunk_text}")
 
+            except Exception as refine_chunk_err:
+                 st.warning(f"❌ Error refining text chunk {i+1}: {refine_chunk_err}. Using raw chunk.", icon="⚠️")
+                 refined_outputs.append(f"--- RAW CHUNK {i+1} (Refinement Error) ---\n{chunk_text}")
 
-        else:
-             # Audio is short enough, process as single file
-             status.update(label=f"☁️ Uploading audio file '{original_filename}'...")
-             processed_audio_file_ref = None # Define for finally block
-             try:
-                  with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(original_filename)[1]) as tf:
-                       audio_file_obj.seek(0)
-                       tf.write(audio_file_obj.getvalue()); temp_file_path = tf.name
-                  if not temp_file_path: raise Exception("Failed to create temporary file for audio.")
-                  processed_audio_file_ref = genai.upload_file(path=temp_file_path, display_name=f"audio_{int(time.time())}_{original_filename}")
-                  gemini_file_references.append(processed_audio_file_ref) # Add the single ref for cleanup
+        # Combine refined text chunks
+        final_refined_text = "\n\n".join(refined_outputs)
+        status.update(label="🧹 Step 2: Finished refining all text chunks.")
+        return final_refined_text, chunking_performed
 
-                  # Poll for upload completion
-                  status.update(label="🎧 Processing uploaded audio...")
-                  polling_start = time.time()
-                  while processed_audio_file_ref.state.name == "PROCESSING":
-                       if time.time() - polling_start > MAX_POLLING_TIME_SEC: raise TimeoutError("Audio processing timed out.")
-                       time.sleep(POLLING_INTERVAL_SEC); processed_audio_file_ref = genai.get_file(processed_audio_file_ref.name)
-                  if processed_audio_file_ref.state.name != "ACTIVE": raise Exception(f"Audio file processing failed. Final state: {processed_audio_file_ref.state.name}")
-                  status.update(label="🎧 Audio ready!")
+    else:
+        # Transcript TEXT is short enough, refine in one go
+        status.update(label=f"🧹 Step 2: Refining transcript text (single pass)...")
+        # (Original full refinement prompt remains the same)
+        refinement_prompt = f"""Please refine the following raw audio transcript: ... **Refined Transcript:** """ # Keep prompt content
+        refinement_prompt = f"""Please refine the following raw audio transcript:
 
-                  # Transcribe the single file
-                  status.update(label="✍️ Step 1: Transcribing audio (single pass)...")
-                  t_prompt = "Transcribe the audio accurately. Output only the raw transcript text."
-                  t_response = transcription_model.generate_content(
-                       [t_prompt, processed_audio_file_ref],
-                       generation_config=transcription_gen_config
-                  )
-                  if t_response and hasattr(t_response, 'text') and t_response.text.strip():
-                       transcript_chunks_text.append(t_response.text.strip())
-                       status.update(label="✍️ Step 1: Transcription complete!")
-                  elif hasattr(t_response, 'prompt_feedback') and t_response.prompt_feedback.block_reason:
-                       raise Exception(f"Transcription blocked: {t_response.prompt_feedback.block_reason}")
-                  else: raise Exception("Transcription failed: AI returned empty response.")
+        **Raw Transcript:**
+        ```
+        {raw_transcript_text}
+        ```
 
-             finally:
-                 # Clean up local temp file
-                 if 'temp_file_path' in locals() and temp_file_path and os.path.exists(temp_file_path):
-                     os.remove(temp_file_path)
-                 # Clean up the single cloud file immediately after transcription attempt
-                 if processed_audio_file_ref:
-                     try:
-                         status.update(label=f"🗑️ Cleaning up cloud file...")
-                         genai.delete_file(processed_audio_file_ref.name)
-                     except Exception as cleanup_err:
-                         st.warning(f"⚠️ Failed to delete cloud file: {cleanup_err}", icon="❗")
+        **Instructions:**
+        1.  **Identify Speakers:** Assign consistent labels (e.g., Speaker 1, Speaker 2). Place the label on a new line before the speaker's turn.
+        2.  **Translate to English:** Convert any non-English speech found within the transcript to English, ensuring it fits naturally within the conversation.
+        3.  **Correct Errors:** Fix spelling mistakes and grammatical errors. Use the overall conversation context to correct potentially misheard words or phrases.
+        4.  **Format:** Ensure clear separation between speaker turns using the speaker labels. Maintain the original conversational flow and content.
+        5.  **Output:** Provide *only* the refined, speaker-diarized, translated, and corrected transcript text. Do not add any introduction, summary, or commentary before or after the transcript.
 
+        **Additional Context (Optional - use for understanding terms, names, etc.):**
+        {general_context if general_context else "None provided."}
 
-        # Combine transcript chunks
-        final_transcript = "\n\n".join(transcript_chunks_text)
-        return final_transcript, chunking_performed
+        **Refined Transcript:**
+        """
+        try:
+            r_response = refinement_model.generate_content(
+                refinement_prompt,
+                generation_config=refinement_chunk_gen_config, # Still use config with output limit
+                safety_settings=safety_settings
+            )
+            if r_response and hasattr(r_response, 'text') and r_response.text.strip():
+                status.update(label="🧹 Step 2: Refinement complete!")
+                return r_response.text.strip(), chunking_performed
+            # ... (Handle block/empty/error for single pass, return raw text as fallback) ...
+            elif hasattr(r_response, 'prompt_feedback') and r_response.prompt_feedback.block_reason:
+                st.warning(f"⚠️ Refinement blocked: {r_response.prompt_feedback.block_reason}. Using raw transcript.", icon="⚠️")
+                status.update(label="⚠️ Refinement blocked. Using raw transcript.")
+                return raw_transcript_text, chunking_performed
+            else:
+                st.warning("🤔 Refinement returned empty response. Using raw transcript.", icon="⚠️")
+                status.update(label="⚠️ Refinement failed. Using raw transcript.")
+                return raw_transcript_text, chunking_performed
+        except Exception as refine_err:
+            st.warning(f"❌ Error during Step 2 (Refinement): {refine_err}. Using raw transcript.", icon="⚠️")
+            status.update(label="⚠️ Refinement error. Using raw transcript.")
+            return raw_transcript_text, chunking_performed
 
-    except ImportError:
-         st.error("Audio processing requires 'pydub'. Please install it (`pip install pydub`).", icon="🚨")
-         raise # Re-raise to stop processing
-    except FileNotFoundError:
-         st.error("Audio processing requires 'ffmpeg'. Please ensure it's installed and accessible in your system PATH.", icon="🚨")
-         raise # Re-raise to stop processing
-    except Exception as audio_err:
-        st.error(f"Error during audio processing/transcription: {audio_err}", icon="🚨")
-        raise # Re-raise to stop processing
 
 # --- Streamlit App UI ---
-# ... (UI Definition remains the same) ...
+# ... (UI definition remains the same) ...
 st.title("✨ SynthNotes AI"); st.markdown("Instantly transform meeting recordings into structured, factual notes.")
-# ... Input Section ...
+# ... Input Section (including model selectors) ...
 # ... Prompt Area ...
 # ... Generate Button ...
 
 # --- Output Section ---
 output_container = st.container(border=True)
 with output_container:
-    # (Output display logic remains the same, but add transcription chunk warning)
+    # (Output display logic)
     if st.session_state.generating_filename: st.info("⏳ Generating filename...", icon="💡")
     elif st.session_state.error_message: st.error(st.session_state.error_message, icon="🚨"); st.session_state.error_message = None
     elif st.session_state.generated_notes:
@@ -280,17 +295,16 @@ with output_container:
         if st.session_state.raw_transcript:
             with st.expander("View Raw Transcript (Step 1 Output)"):
                 st.text_area("Raw Transcript", st.session_state.raw_transcript, height=200, disabled=True)
-                # Add warning if transcription chunking happened
-                if 'chunking_occurred_transcription' in st.session_state and st.session_state.chunking_occurred_transcription:
-                     st.warning("Note: Transcription was performed in chunks due to audio length. Minor discontinuities might exist.", icon="⚠️")
+                # Removed transcription chunk warning
         if st.session_state.refined_transcript:
              with st.expander("View Refined Transcript (Step 2 Output)"):
                 st.text_area("Refined Transcript", st.session_state.refined_transcript, height=300, disabled=True)
+                # Keep refinement chunk warning
                 if 'chunking_occurred_refinement' in st.session_state and st.session_state.chunking_occurred_refinement:
                     st.warning("Note: Refinement was performed in chunks due to transcript length. Speaker labels/context may be inconsistent.", icon="⚠️")
         # ... (Notes display, edit, download buttons) ...
         st.checkbox("Edit Notes", key="edit_notes_enabled")
-        # ... (rest of notes display/download)
+        # ...
 
     elif not st.session_state.processing:
         st.markdown("<p class='initial-prompt'>Generated notes will appear here.</p>", unsafe_allow_html=True)
@@ -304,59 +318,119 @@ if generate_button:
     # Reset state
     st.session_state.processing = True
     # ... (reset other state variables) ...
-    st.session_state.chunking_occurred_transcription = False # Reset flag
-    st.session_state.chunking_occurred_refinement = False
+    # st.session_state.chunking_occurred_transcription = False # Removed
+    st.session_state.chunking_occurred_refinement = False # Reset
     st.rerun()
 
 if st.session_state.processing and not st.session_state.generating_filename:
-    # Use a single list to track ALL cloud files for final cleanup attempt
-    cloud_files_to_cleanup = []
+    # Use uploaded_audio_info to store the SINGLE cloud file reference
+    st.session_state.uploaded_audio_info = None
     with st.status("🚀 Initializing process...", expanded=True) as status:
         try: # Outer try-finally
             status.update(label="⚙️ Reading inputs and settings...")
-            # ... (Retrieve state) ...
-            st.session_state.chunking_occurred_transcription = False # Reset flags at start
+            # ... (Retrieve state: meeting_type, model IDs, context, topics, etc.) ...
+            meeting_type = st.session_state.selected_meeting_type
+            notes_model_id = AVAILABLE_MODELS[st.session_state.selected_notes_model_display_name]
+            transcription_model_id = AVAILABLE_MODELS[st.session_state.selected_transcription_model_display_name]
+            refinement_model_id = AVAILABLE_MODELS[st.session_state.selected_refinement_model_display_name]
+            # ... (rest of state retrieval)
+            general_context = ...
+            earnings_call_topics_text = ...
+            actual_input_type, transcript_data, audio_file_obj = get_current_input_data()
+
+            # Reset flags
             st.session_state.chunking_occurred_refinement = False
 
             status.update(label="🧠 Initializing AI models...")
-            # ... (Initialize models) ...
-            transcription_model = genai.GenerativeModel(...)
-            refinement_model = genai.GenerativeModel(...)
-            notes_model = genai.GenerativeModel(...)
+            # Initialize models
+            transcription_model = genai.GenerativeModel(transcription_model_id, safety_settings=safety_settings)
+            refinement_model = genai.GenerativeModel(refinement_model_id, safety_settings=safety_settings)
+            notes_model = genai.GenerativeModel(notes_model_id, safety_settings=safety_settings)
 
-
-            final_transcript_for_notes = transcript_data
+            final_transcript_for_notes = transcript_data # Start with text/PDF data
             st.session_state.raw_transcript = None
             st.session_state.refined_transcript = None
+            uploaded_file_ref = None # Temporary variable for the single uploaded file
 
             status.update(label="✔️ Validating inputs...")
             # ... (Input Validation) ...
 
             # ==============================================
-            # --- STEP 1: Transcription (Possibly Chunked) ---
+            # --- STEP 1: Transcription (Single Audio Upload) ---
             # ==============================================
             if actual_input_type == "Upload Audio":
-                 # Call the new helper function
-                 raw_text_result, chunking_happened_trans = transcribe_audio_possibly_chunked(
-                     audio_file_obj,
-                     transcription_model,
-                     status # Pass status object
-                 )
-                 st.session_state.raw_transcript = raw_text_result
-                 st.session_state.chunking_occurred_transcription = chunking_happened_trans
-                 final_transcript_for_notes = st.session_state.raw_transcript
-                 # Note: Cloud file cleanup for transcription chunks now happens *inside* the helper function
+                temp_file_path = None # Define for potential cleanup
+                try:
+                    status.update(label=f"☁️ Uploading '{audio_file_obj.name}'...")
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio_file_obj.name)[1]) as tf:
+                         audio_file_obj.seek(0)
+                         tf.write(audio_file_obj.getvalue()); temp_file_path = tf.name
+                    if not temp_file_path: raise Exception("Failed to create temporary file for audio.")
+
+                    # Upload the single file
+                    uploaded_file_ref = genai.upload_file(
+                        path=temp_file_path,
+                        display_name=f"audio_{int(time.time())}_{audio_file_obj.name}"
+                    )
+                    # Store the single reference in session state for potential later cleanup if needed
+                    st.session_state.uploaded_audio_info = uploaded_file_ref
+
+                    status.update(label="🎧 Processing uploaded audio...")
+                    # Poll for the single upload completion
+                    polling_start = time.time(); MAX_POLLING_TIME_SEC = 600; POLLING_INTERVAL_SEC = 10
+                    while uploaded_file_ref.state.name == "PROCESSING":
+                        if time.time() - polling_start > MAX_POLLING_TIME_SEC: raise TimeoutError("Audio processing timed out.")
+                        time.sleep(POLLING_INTERVAL_SEC); uploaded_file_ref = genai.get_file(uploaded_file_ref.name)
+                    if uploaded_file_ref.state.name != "ACTIVE": raise Exception(f"Audio file processing failed. State: {uploaded_file_ref.state.name}")
+                    status.update(label="🎧 Audio ready for transcription!")
+
+                    # --- Perform single transcription call ---
+                    status.update(label=f"✍️ Step 1: Transcribing audio...")
+                    t_prompt = "Transcribe the audio accurately. Output only the raw transcript text."
+                    # Use transcription_gen_config (with 8k output limit)
+                    t_response = transcription_model.generate_content(
+                        [t_prompt, uploaded_file_ref],
+                        generation_config=transcription_gen_config
+                    )
+
+                    if t_response and hasattr(t_response, 'text') and t_response.text.strip():
+                        st.session_state.raw_transcript = t_response.text.strip()
+                        status.update(label="✍️ Step 1: Transcription complete!")
+                        final_transcript_for_notes = st.session_state.raw_transcript
+                    # ... (Handle transcription error/block) ...
+                    elif hasattr(t_response, 'prompt_feedback') and t_response.prompt_feedback.block_reason:
+                        raise Exception(f"Transcription blocked: {t_response.prompt_feedback.block_reason}")
+                    else: raise Exception("Transcription failed: AI returned empty response.")
+
+                except Exception as step1_err:
+                     raise Exception(f"Error during Audio Upload/Transcription: {step1_err}") from step1_err
+                finally:
+                     # Clean up local temp file
+                     if temp_file_path and os.path.exists(temp_file_path):
+                         try: os.remove(temp_file_path)
+                         except OSError as e: st.warning(f"Could not delete temp file {temp_file_path}: {e}")
+                     # Clean up the single cloud file IMMEDIATELY after transcription attempt
+                     if uploaded_file_ref:
+                         try:
+                             status.update(label=f"🗑️ Cleaning up cloud audio file...")
+                             genai.delete_file(uploaded_file_ref.name)
+                             st.session_state.uploaded_audio_info = None # Clear ref after deletion
+                             status.update(label=f"🗑️ Cloud audio file cleaned up.")
+                         except Exception as cleanup_err:
+                             st.warning(f"⚠️ Failed to delete cloud audio file ({uploaded_file_ref.name}): {cleanup_err}", icon="❗")
+                             # Keep ref in session state if deletion failed, for final cleanup attempt
 
             # ==============================================
-            # --- STEP 2: Refinement (Possibly Chunked) ---
+            # --- STEP 2: Refinement (Possibly Text Chunked) ---
             # ==============================================
-            if final_transcript_for_notes: # Check if we have a transcript (from text, PDF, or Step 1)
-                 # Refinement needs the raw transcript regardless of input type if available
+            if final_transcript_for_notes: # Check if we have a transcript
+                 # Refinement always uses the raw transcript if available (most direct from audio)
+                 # Otherwise uses the text/PDF input
                  transcript_to_refine = st.session_state.raw_transcript if st.session_state.raw_transcript else final_transcript_for_notes
 
-                 if transcript_to_refine: # Check if there's actually text to refine
-                      # Call the refinement chunking helper
-                      refined_text_result, chunking_happened_ref = chunk_and_refine_transcript(
+                 if transcript_to_refine:
+                      # Call the TEXT chunking/refinement helper
+                      refined_text_result, chunking_happened_ref = refine_transcript_possibly_chunked(
                           transcript_to_refine,
                           refinement_model,
                           general_context,
@@ -364,10 +438,9 @@ if st.session_state.processing and not st.session_state.generating_filename:
                       )
                       st.session_state.refined_transcript = refined_text_result
                       st.session_state.chunking_occurred_refinement = chunking_happened_ref
-                      final_transcript_for_notes = st.session_state.refined_transcript # Update for notes step
+                      final_transcript_for_notes = st.session_state.refined_transcript # Use refined for notes
                  else:
-                      status.update(label="⚠️ Step 2: Skipped Refinement (No transcript text available).")
-
+                      status.update(label="⚠️ Step 2: Skipped Refinement (No transcript text found).")
 
             # =============================
             # --- STEP 3: Generate Notes ---
@@ -385,15 +458,29 @@ if st.session_state.processing and not st.session_state.generating_filename:
                 response = notes_model.generate_content(
                     api_payload_parts,
                     generation_config=notes_gen_config
+                    # Safety settings already part of model init
                 )
                 # ... (Handle Notes Response) ...
-                if response and hasattr(response, 'text') and response.text.strip(): ... # Success
-                elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason: ... # Block
-                elif response: ... # Empty
-                else: ... # No response
-                status.update(label="✅ Notes generated successfully!", state="complete") # Or error state
+                if response and hasattr(response, 'text') and response.text.strip():
+                    st.session_state.generated_notes = response.text.strip()
+                    st.session_state.edited_notes_text = st.session_state.generated_notes
+                    add_to_history(st.session_state.generated_notes)
+                    st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type)
+                    status.update(label="✅ Notes generated successfully!", state="complete")
+                # ... (Handle block/empty/no response, update status to error) ...
+                elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                    st.session_state.error_message = f"⚠️ Note generation blocked: {response.prompt_feedback.block_reason}."
+                    status.update(label=f"❌ Blocked: {response.prompt_feedback.block_reason}", state="error")
+                elif response:
+                    st.session_state.error_message = "🤔 AI returned empty response during note generation."
+                    status.update(label="❌ Error: AI returned empty response.", state="error")
+                else:
+                    st.session_state.error_message = "😥 Note generation failed (No response from API)."
+                    status.update(label="❌ Error: Note generation failed (No response).", state="error")
 
-            except Exception as api_call_err: ... # Handle API call error
+            except Exception as api_call_err:
+                st.session_state.error_message = f"❌ Error during Step 3 (API Call for Notes): {api_call_err}"
+                status.update(label=f"❌ Error: {api_call_err}", state="error")
 
 
         except Exception as e: # Catch errors from validation, audio, steps 1/2 etc.
@@ -402,27 +489,20 @@ if st.session_state.processing and not st.session_state.generating_filename:
 
         finally: # Runs after try/except within the 'with status' block
             st.session_state.processing = False
-            # --- Cloud Audio Cleanup (Attempt any *remaining* - should be none if helper funcs worked) ---
-            # The helper functions should handle their own cleanup. This is a final safeguard.
-            # Copy list before iterating if modifying it inside the loop
-            remaining_files = st.session_state.get('uploaded_audio_info', []) # Assuming this is populated correctly now
-            if isinstance(remaining_files, genai.types.File): # Handle single file case
-                 remaining_files = [remaining_files]
-            elif not isinstance(remaining_files, list):
-                 remaining_files = []
-
-            if remaining_files:
-                st.toast(f"☁️ Performing final cleanup check for {len(remaining_files)} cloud file(s)...", icon="🗑️")
-                for file_ref in remaining_files:
-                     if file_ref and hasattr(file_ref, 'name'):
-                          try: genai.delete_file(file_ref.name)
-                          except Exception as final_cleanup_error: st.warning(f"Final cloud file cleanup failed for {file_ref.name}: {final_cleanup_error}", icon="⚠️")
-                st.session_state.uploaded_audio_info = None # Clear the list/ref
+            # --- Final Cloud Audio Cleanup Attempt (if Step 1 cleanup failed) ---
+            if st.session_state.uploaded_audio_info:
+                file_ref_to_clean = st.session_state.uploaded_audio_info
+                if file_ref_to_clean and hasattr(file_ref_to_clean, 'name'):
+                    try:
+                        st.toast(f"☁️ Performing final cleanup for cloud file {file_ref_to_clean.name}...", icon="🗑️")
+                        genai.delete_file(file_ref_to_clean.name)
+                        st.session_state.uploaded_audio_info = None # Clear ref if successful
+                    except Exception as final_cleanup_error:
+                        st.warning(f"Final cloud file cleanup failed for {file_ref_to_clean.name}: {final_cleanup_error}", icon="⚠️")
 
             st.rerun()
 
 
 # --- Footer ---
-# ... (remains the same) ...
 st.divider()
 st.caption("Powered by Google Gemini | App by SynthNotes AI")
