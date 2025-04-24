@@ -335,16 +335,22 @@ with output_container:
         with col_btn_dl2: st.download_button(label="⬇️ Markdown", data=notes_content_to_use, file_name=f"{fname_base}.md", mime="text/markdown", key='download-md', use_container_width=True)
     else: st.markdown("<p class='initial-prompt'>Generated notes will appear here.</p>", unsafe_allow_html=True)
 
-# History Section
+# --- History Section ---
 with st.expander("📜 Recent Notes History (Last 3)", expanded=False):
-    # (History display logic remains the same)
-    if not st.session_state.history: st.caption("No history yet.")
+    if not st.session_state.history:
+        st.caption("No history yet.")
     else:
         for i, entry in enumerate(st.session_state.history):
-            with st.container(): st.markdown(f"**#{i+1} - {entry['timestamp']}**"); st.markdown(f"```\n{entry['notes'][:200]}...\n```"); st.button(f"View/Use #{i+1}", key=f"restore_{i}", on_click=restore_note_from_history, args=(i,)); \
-                               if i < len(st.session_state.history) - 1: st.divider()
-
-
+            with st.container():
+                st.markdown(f"**#{i+1} - {entry['timestamp']}**")
+                # Use st.code for better preview formatting and scrollbars if needed
+                st.code(entry['notes'][:300] + ("..." if len(entry['notes']) > 300 else ""), language=None)
+                st.button(f"View/Use Notes #{i+1}", key=f"restore_{i}",
+                          on_click=restore_note_from_history, args=(i,))
+                # --- Correct indentation for the divider ---
+                if i < len(st.session_state.history) - 1:
+                    st.divider()
+                # --- End correction ---
 # --- Processing Logic ---
 if generate_button:
     st.session_state.processing = True; st.session_state.generating_filename = False; st.session_state.generated_notes = None
