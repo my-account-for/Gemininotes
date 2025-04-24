@@ -22,7 +22,6 @@ st.set_page_config(
 # --- Custom CSS Injection ---
 st.markdown("""
 <style>
-    /* ... (CSS remains the same - Omitted for Brevity) ... */
     /* Overall App Background */
     .stApp { background: linear-gradient(to bottom right, #F0F2F6, #FFFFFF); }
     /* Main content area */
@@ -149,6 +148,7 @@ except Exception as e: st.error(f"### 💥 Error Configuring Google AI Client: {
 # Structure to hold prompts
 PROMPTS = {
     "Expert Meeting": {
+        # OPTION 1: The original, very strict format
         "Option 1: Existing (Detailed & Strict)": """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.
 Generate detailed, factual notes from the provided meeting transcript.
 Follow this specific structure EXACTLY:
@@ -157,11 +157,11 @@ Follow this specific structure EXACTLY:
 - **Opening overview or Expert background (Optional):** If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple language. DO NOT summarize.
 - **Q&A format:** Structure the main body STRICTLY in Question/Answer format.
   - **Questions:** Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).
-  - **Answers:** Use bullet points directly below the question. Each bullet MUST be a complete sentence with one distinct fact. Capture ALL specifics (data, names, examples, $, %, etc.). DO NOT use sub-bullets or section headers within answers. DO NOT add interpretations, summaries, conclusions, or action items.
+  - **Answers:** Use bullet points directly below the question. **Each bullet MUST be a complete sentence representing one single, distinct factual point.** Capture ALL specifics (data, names, examples, $, %, etc.). DO NOT use sub-bullets or section headers within answers. DO NOT add interpretations, summaries, conclusions, or action items.
 
 **Additional Instructions:**
 - Accuracy is paramount. Capture ALL facts precisely.
-- Be clear and concise.
+- Be clear and concise, adhering strictly to one fact per bullet point.
 - Include ONLY information present in the transcript.
 - If a section (like Opening Overview) isn't present, OMIT it.
 ---
@@ -170,8 +170,10 @@ Follow this specific structure EXACTLY:
 ---
 {context_section}
 ---
-**GENERATED NOTES (Q&A Format):**
+**GENERATED NOTES (Q&A Format - Strict):**
 """,
+
+        # OPTION 2: Less verbose, allows combining closely related points per bullet
         "Option 2: Less Verbose (Default)": """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.
 Generate detailed, factual notes from the provided meeting transcript.
 Follow this specific structure EXACTLY:
@@ -182,14 +184,14 @@ Follow this specific structure EXACTLY:
 	- **Questions:** Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).
 	- **Answers:** Use bullet points directly below the question.
 		- Each bullet point should convey specific factual information using clear, complete sentences.
-		- Strive for natural sentence flow. While focusing on distinct facts, combine closely related details or sequential points into a single sentence where it enhances readability and avoids excessive choppiness, without adding interpretation or summarization.
+		- **Strive for natural sentence flow. While focusing on distinct facts, combine closely related details or sequential points into a single sentence where it enhances readability and avoids excessive choppiness, without adding interpretation or summarization.**
 		- Capture ALL specifics (data, names, examples, $, %, etc.).
 		- DO NOT use sub-bullets or section headers within answers.
 		- DO NOT add interpretations, summaries, conclusions, or action items.
 
 **Additional Instructions:**
 - Accuracy is paramount. Capture ALL facts precisely.
-- Write clearly and concisely, avoiding unnecessary words.
+- **Write clearly and concisely, avoiding unnecessary words. Favor informative sentences over overly simplistic ones.**
 - Include ONLY information present in the transcript.
 - If a section (like Opening Overview) isn't present, OMIT it.
 ---
@@ -198,9 +200,11 @@ Follow this specific structure EXACTLY:
 ---
 {context_section}
 ---
-**GENERATED NOTES (Q&A Format):**
+**GENERATED NOTES (Q&A Format - Concise):**
 """,
-        "Summary Prompt": """Based ONLY on the detailed 'GENERATED NOTES (Q&A Format)' provided below, create a concise executive summary highlighting the most significant insights, findings, or critical points discussed.
+
+        # OPTION 3: Uses Option 2 for notes, THEN adds a summary. This prompt is for the *summary step*.
+        "Summary Prompt (for Option 3)": """Based ONLY on the detailed 'GENERATED NOTES (Q&A Format - Concise)' provided below, create a concise executive summary highlighting the most significant insights, findings, or critical points discussed.
 
 **Format:**
 1.  Identify the main themes or key topics discussed in the notes.
@@ -252,7 +256,17 @@ Output MUST be comprehensive, factual notes, capturing all critical financial an
     "Custom": "{user_custom_prompt}\n\n--- TRANSCRIPT START ---\n{transcript}\n--- TRANSCRIPT END ---\n{context_section}" # Simplified placeholder usage
 }
 
-DEFAULT_EXPERT_MEETING_OPTION = "Option 2: Less Verbose (Default)"
+# Define the user-facing names for the Expert Meeting options
+EXPERT_MEETING_OPTIONS = [
+    "Option 1: Existing (Detailed & Strict)",
+    "Option 2: Less Verbose (Default)",
+    "Option 3: Option 2 + Executive Summary" # This represents the combined process
+]
+DEFAULT_EXPERT_MEETING_OPTION = EXPERT_MEETING_OPTIONS[1] # Option 2 is default
+
+# Internal key for the summary prompt used by Option 3 logic
+EXPERT_MEETING_SUMMARY_PROMPT_KEY = "Summary Prompt (for Option 3)"
+
 
 # --- Initialize Session State ---
 default_state = {
@@ -263,7 +277,7 @@ default_state = {
     'selected_transcription_model_display_name': DEFAULT_TRANSCRIPTION_MODEL_NAME,
     'selected_refinement_model_display_name': DEFAULT_REFINEMENT_MODEL_NAME,
     'selected_meeting_type': DEFAULT_MEETING_TYPE,
-    'expert_meeting_prompt_option': DEFAULT_EXPERT_MEETING_OPTION, # <-- NEW State Variable
+    'expert_meeting_prompt_option': DEFAULT_EXPERT_MEETING_OPTION, # <-- Use defined default
     'view_edit_prompt_enabled': False, 'current_prompt_text': "",
     'input_method_radio': 'Paste Text', 'text_input': '', 'pdf_uploader': None, 'audio_uploader': None,
     'context_input': '',
@@ -287,62 +301,20 @@ def update_topic_template():
     if selected_sector in SECTOR_TOPICS: st.session_state.earnings_call_topics = SECTOR_TOPICS[selected_sector]
     else: st.session_state.earnings_call_topics = ""
 
-# Removed create_expert_meeting_prompt and create_earnings_call_prompt functions
-# They are replaced by fetching from the PROMPTS dictionary and formatting
-
-def format_prompt(meeting_type, transcript, context=None, **kwargs):
-    """Formats the prompt string based on meeting type and inputs."""
-    prompt_template = ""
-    format_args = {
-        "transcript": transcript if transcript else "[NO TRANSCRIPT PROVIDED]",
-        "context_section": f"\n**ADDITIONAL CONTEXT (Use for understanding):**\n{context}\n---" if context else ""
-    }
-
-    if meeting_type == "Expert Meeting":
-        expert_option = kwargs.get('expert_option', DEFAULT_EXPERT_MEETING_OPTION)
-        # Use Option 2 prompt as base for Option 3 note generation
-        base_option_key = expert_option if expert_option != "Option 3: Option 2 + Executive Summary" else "Option 2: Less Verbose (Default)"
-        prompt_template = PROMPTS["Expert Meeting"].get(base_option_key, PROMPTS["Expert Meeting"][DEFAULT_EXPERT_MEETING_OPTION]) # Fallback
-    elif meeting_type == "Earnings Call":
-        prompt_template = PROMPTS["Earnings Call"]
-        user_topics_text = kwargs.get('user_topics_text', "")
-        topic_instructions = ""
-        if user_topics_text and user_topics_text.strip():
-            formatted_topics = []
-            for line in user_topics_text.strip().split('\n'):
-                 trimmed_line = line.strip()
-                 if trimmed_line and not trimmed_line.startswith(('-', '*')): formatted_topics.append(f"- **{trimmed_line}**")
-                 else: formatted_topics.append(line)
-            topic_list_str = "\n".join(formatted_topics)
-            topic_instructions = (f"Structure the main body of the notes under the following user-specified headings EXACTLY as provided:\n{topic_list_str}\n\n"
-                                  f"- **Other Key Points** (Use this MANDATORY heading for important info NOT covered above)\n\n"
-                                  f"Place details under the most appropriate heading. If a topic isn't discussed, state 'Not discussed' under that heading.")
-        else:
-            topic_instructions = (f"Since no specific topics were provided, first identify the logical main themes discussed (e.g., Financials, Strategy, Outlook, Q&A). Use these themes as **bold headings**.\n"
-                                  f"Include a final mandatory section:\n- **Other Key Points** (for important info not covered in main themes)\n\n"
-                                  f"Place details under the most appropriate heading.")
-        format_args["topic_instructions"] = topic_instructions
-    elif meeting_type == "Custom":
-        prompt_template = PROMPTS["Custom"]
-        format_args["user_custom_prompt"] = kwargs.get('user_custom_prompt', "# Enter your custom prompt here...")
-        # For custom, context might be part of the main prompt or handled separately
-        # The current template includes context_section after transcript. Adjust if needed.
-    else:
-        raise ValueError(f"Unknown meeting type: {meeting_type}")
-
-    # Use copy to avoid modifying the original template in PROMPTS
-    final_prompt = copy.deepcopy(prompt_template)
+def format_prompt_safe(prompt_template, **kwargs):
+    """Safely formats a string template, replacing missing keys with placeholders."""
+    # Use a copy to avoid modifying the original template
+    formatted_prompt = copy.deepcopy(prompt_template)
     try:
-        # Basic formatting for safety
-        for key, value in format_args.items():
-             placeholder = "{" + key + "}"
-             # Ensure value is a string before replacing
-             str_value = str(value) if value is not None else ""
-             final_prompt = final_prompt.replace(placeholder, str_value)
-        return final_prompt
-    except KeyError as e:
-        st.error(f"Prompt formatting error: Missing key {e} for meeting type '{meeting_type}'")
-        return f"# Error: Prompt template key missing: {e}"
+        # Find all placeholders like {key}
+        placeholders = re.findall(r"\{([^}]+)\}", formatted_prompt)
+        for key in placeholders:
+            # Use the provided value if it exists, otherwise use a placeholder string
+            value = kwargs.get(key, f"[MISSING: {key}]")
+            # Ensure value is a string before replacing
+            str_value = str(value) if value is not None else ""
+            formatted_prompt = formatted_prompt.replace("{" + key + "}", str_value)
+        return formatted_prompt
     except Exception as e:
         st.error(f"Prompt formatting error: {e}")
         return f"# Error formatting prompt: {e}"
@@ -372,21 +344,39 @@ def get_prompt_display_text():
         temp_context = st.session_state.context_input.strip() if st.session_state.add_context_enabled else None
         input_type = st.session_state.input_method_radio
         placeholder = "[TRANSCRIPT WILL APPEAR HERE]"
-        kwargs_for_format = {}
+        format_kwargs = {
+            'transcript': placeholder,
+            'context_section': f"\n**ADDITIONAL CONTEXT (Use for understanding):**\n{temp_context}\n---" if temp_context else ""
+        }
+        prompt_template_to_display = None
 
         try:
             if meeting_type == "Expert Meeting":
                 expert_option = st.session_state.expert_meeting_prompt_option
-                kwargs_for_format['expert_option'] = expert_option
-                base_prompt_template = format_prompt(meeting_type, placeholder, temp_context, **kwargs_for_format)
-                display_text = base_prompt_template
-                if expert_option == "Option 3: Option 2 + Executive Summary":
-                     display_text += "\n\n# NOTE: Option 3 includes an additional Executive Summary step generated *after* these notes, using a separate prompt."
+                # Determine which prompt template to display based on selection
+                if expert_option == "Option 1: Existing (Detailed & Strict)":
+                    prompt_template_to_display = PROMPTS["Expert Meeting"]["Option 1: Existing (Detailed & Strict)"]
+                else: # For Option 2 and Option 3, display the Option 2 template (as it's the base for notes)
+                    prompt_template_to_display = PROMPTS["Expert Meeting"]["Option 2: Less Verbose (Default)"]
+
+                if prompt_template_to_display:
+                     display_text = format_prompt_safe(prompt_template_to_display, **format_kwargs)
+                     if expert_option == "Option 3: Option 2 + Executive Summary":
+                         display_text += "\n\n# NOTE: Option 3 includes an additional Executive Summary step generated *after* these notes, using a separate prompt."
+                else:
+                    display_text = "# Error: Could not find prompt template for display."
 
             elif meeting_type == "Earnings Call":
+                 prompt_template_to_display = PROMPTS["Earnings Call"]
                  user_topics_text_for_display = str(st.session_state.get('earnings_call_topics', "") or "")
-                 kwargs_for_format['user_topics_text'] = user_topics_text_for_display
-                 display_text = format_prompt(meeting_type, placeholder, temp_context, **kwargs_for_format)
+                 topic_instructions_preview = "" # Generate preview version of topics
+                 if user_topics_text_for_display and user_topics_text_for_display.strip():
+                     # Simplified topic formatting for preview
+                     topic_instructions_preview = f"Structure notes under user-specified headings (e.g., {user_topics_text_for_display.splitlines()[0]}...)\n- **Other Key Points**"
+                 else:
+                     topic_instructions_preview = "Identify logical main themes...\n- **Other Key Points**"
+                 format_kwargs['topic_instructions'] = topic_instructions_preview
+                 display_text = format_prompt_safe(prompt_template_to_display, **format_kwargs)
 
             else: # Should not happen if meeting_type != "Custom"
                  st.error(f"Internal Error: Invalid meeting type '{meeting_type}' for prompt preview.")
@@ -451,7 +441,9 @@ def generate_suggested_filename(notes_content, meeting_type):
         st.session_state.generating_filename = True
         filename_model = genai.GenerativeModel("gemini-1.5-flash", safety_settings=safety_settings) # Use flash for speed
         today_date = datetime.now().strftime("%Y%m%d"); mt_cleaned = meeting_type.replace(" ", "")
-        filename_prompt = (f"Suggest filename: YYYYMMDD_ClientOrTopic_MeetingType. Date={today_date}. Type='{mt_cleaned}'. Max 3 words topic. Output ONLY filename.\nNOTES:{notes_content[:1000]}")
+        # Extract initial part if summary exists
+        notes_preview = notes_content.split("\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n")[0]
+        filename_prompt = (f"Suggest filename: YYYYMMDD_ClientOrTopic_MeetingType. Date={today_date}. Type='{mt_cleaned}'. Max 3 words topic. Output ONLY filename.\nNOTES:{notes_preview[:1000]}")
         response = filename_model.generate_content(filename_prompt, generation_config=filename_gen_config, safety_settings=safety_settings)
         if response and hasattr(response, 'text') and response.text:
             s_name = re.sub(r'[^\w\-.]', '_', response.text.strip())[:100]
@@ -487,16 +479,19 @@ with st.container(border=True): # Input Section
         with col1a:
             st.subheader("Meeting Details")
             st.radio("Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type", horizontal=True)
-            # --- NEW: Conditional Expert Meeting Option ---
+            # --- Conditional Expert Meeting Option ---
             if st.session_state.selected_meeting_type == "Expert Meeting":
                 st.radio(
                     "Expert Meeting Note Style:",
-                    options=list(PROMPTS["Expert Meeting"].keys() - {"Summary Prompt"}), # Exclude summary prompt from options
+                    options=EXPERT_MEETING_OPTIONS, # Use the defined list for user choices
                     key="expert_meeting_prompt_option",
-                    # Default is handled by session state init
-                    help="Choose the desired output format. Option 3 adds a summary."
+                    index=EXPERT_MEETING_OPTIONS.index(DEFAULT_EXPERT_MEETING_OPTION), # Set default index
+                    help="Choose the desired output format.\n"
+                         "- Option 1: Very strict, one fact per bullet.\n"
+                         "- Option 2: More natural flow, combines related points.\n"
+                         "- Option 3: Option 2 notes + ~500-1000 word summary."
                 )
-            # --- End New ---
+            # --- End Conditional ---
         with col1b:
             st.subheader("AI Model Selection")
             st.selectbox("Notes Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_notes_model_display_name", help="Model used for final note generation (and summary if applicable).")
@@ -570,12 +565,15 @@ with output_container:
         else:
             # If Option 3, potentially split display
             if is_option3_summary:
-                 notes_part, summary_part = notes_content_to_use.split("\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n", 1)
-                 st.markdown("### Detailed Notes (Q&A Format)")
-                 st.markdown(notes_part)
-                 st.markdown("---")
-                 st.markdown("### Executive Summary")
-                 st.markdown(summary_part)
+                 try:
+                     notes_part, summary_part = notes_content_to_use.split("\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n", 1)
+                     st.markdown("### Detailed Notes (Q&A Format)")
+                     st.markdown(notes_part)
+                     st.markdown("---")
+                     st.markdown("### Executive Summary")
+                     st.markdown(summary_part)
+                 except ValueError: # Should not happen if separator is present
+                     st.markdown(notes_content_to_use) # Fallback to single block if split fails
             else:
                  st.markdown(notes_content_to_use) # Display as single block
 
@@ -604,8 +602,9 @@ with st.expander("📜 Recent Notes History (Last 3)", expanded=False):
                 st.markdown(f"**#{i+1} - {entry['timestamp']}**")
                 # Display logic might need adjustment if summaries are included
                 display_note = entry['notes']
-                if "\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n" in display_note:
-                     display_note = display_note.split("\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n", 1)[0] + "\n... (Summary omitted in preview)"
+                summary_separator = "\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n"
+                if summary_separator in display_note:
+                     display_note = display_note.split(summary_separator, 1)[0] + "\n... (Summary omitted in preview)"
 
                 st.code(display_note[:300] + ("..." if len(display_note) > 300 else ""), language=None)
                 st.button(f"View/Use Notes #{i+1}", key=f"restore_{i}", on_click=restore_note_from_history, args=(i,))
@@ -660,7 +659,7 @@ if st.session_state.processing and not st.session_state.generating_filename:
             elif actual_input_type == "Upload PDF" and not final_transcript_for_notes: raise ValueError("PDF processing failed or returned empty text.")
             elif actual_input_type == "Upload Audio" and not audio_file_obj: raise ValueError("No audio file uploaded.")
             if meeting_type == "Custom" and not user_custom_prompt_text.strip(): raise ValueError("Custom Prompt is required but empty.")
-            if meeting_type == "Expert Meeting" and not expert_meeting_option: raise ValueError("Expert Meeting option not selected.") # Should not happen with radio default
+            if meeting_type == "Expert Meeting" and not expert_meeting_option: raise ValueError("Expert Meeting option not selected.")
 
             # ==============================================
             # --- STEP 1 & 2: Audio Processing Pipeline ---
@@ -723,7 +722,7 @@ if st.session_state.processing and not st.session_state.generating_filename:
                         t_prompt = "Transcribe the audio accurately. Output only the raw transcript text."
                         t_response = transcription_model.generate_content(
                             [t_prompt, chunk_file_ref],
-                            generation_config=transcription_gen_config, safety_settings=safety_settings # Added safety settings
+                            generation_config=transcription_gen_config, safety_settings=safety_settings
                         )
 
                         if t_response and hasattr(t_response, 'text') and t_response.text.strip():
@@ -780,7 +779,7 @@ if st.session_state.processing and not st.session_state.generating_filename:
                         """
                         r_response = refinement_model.generate_content(
                             refinement_prompt,
-                            generation_config=refinement_gen_config, safety_settings=safety_settings # Added safety settings
+                            generation_config=refinement_gen_config, safety_settings=safety_settings
                         )
                         if r_response and hasattr(r_response, 'text') and r_response.text.strip():
                             st.session_state.refined_transcript = r_response.text.strip()
@@ -808,28 +807,60 @@ if st.session_state.processing and not st.session_state.generating_filename:
             status.update(label="📝 Preparing final prompt for note generation...")
             final_prompt_for_notes_api = None
             api_payload_parts = [] # For sending content to API
+            notes_prompt_key_to_use = None # Determine which key for the first call
 
             # --- Format Prompt Based on Meeting Type ---
             format_kwargs = {
                 'transcript': final_transcript_for_notes,
-                'context': general_context
+                'context_section': f"\n**ADDITIONAL CONTEXT (Use for understanding):**\n{general_context}\n---" if general_context else ""
             }
+
             if meeting_type == "Expert Meeting":
-                format_kwargs['expert_option'] = expert_meeting_option
-                final_prompt_for_notes_api = format_prompt(meeting_type, **format_kwargs)
-                api_payload_parts = [final_prompt_for_notes_api] # Basic structure
+                # Determine the prompt key for the *initial* note generation
+                if expert_meeting_option == "Option 1: Existing (Detailed & Strict)":
+                    notes_prompt_key_to_use = "Option 1: Existing (Detailed & Strict)"
+                elif expert_meeting_option == "Option 2: Less Verbose (Default)":
+                    notes_prompt_key_to_use = "Option 2: Less Verbose (Default)"
+                elif expert_meeting_option == "Option 3: Option 2 + Executive Summary":
+                    # Option 3 uses Option 2's prompt for the notes part
+                    notes_prompt_key_to_use = "Option 2: Less Verbose (Default)"
+                else:
+                    raise ValueError(f"Invalid Expert Meeting option selected: {expert_meeting_option}")
+
+                prompt_template = PROMPTS["Expert Meeting"].get(notes_prompt_key_to_use)
+                if not prompt_template:
+                     raise ValueError(f"Could not find prompt template for key: {notes_prompt_key_to_use}")
+                final_prompt_for_notes_api = format_prompt_safe(prompt_template, **format_kwargs)
+                api_payload_parts = [final_prompt_for_notes_api]
+
             elif meeting_type == "Earnings Call":
-                format_kwargs['user_topics_text'] = earnings_call_topics_text
-                final_prompt_for_notes_api = format_prompt(meeting_type, **format_kwargs)
-                api_payload_parts = [final_prompt_for_notes_api]
+                 prompt_template = PROMPTS["Earnings Call"]
+                 user_topics_text = earnings_call_topics_text
+                 topic_instructions = ""
+                 if user_topics_text and user_topics_text.strip():
+                     formatted_topics = []
+                     for line in user_topics_text.strip().split('\n'):
+                          trimmed_line = line.strip()
+                          if trimmed_line and not trimmed_line.startswith(('-', '*')): formatted_topics.append(f"- **{trimmed_line}**")
+                          else: formatted_topics.append(line)
+                     topic_list_str = "\n".join(formatted_topics)
+                     topic_instructions = (f"Structure the main body of the notes under the following user-specified headings EXACTLY as provided:\n{topic_list_str}\n\n"
+                                           f"- **Other Key Points** (Use this MANDATORY heading for important info NOT covered above)\n\n"
+                                           f"Place details under the most appropriate heading. If a topic isn't discussed, state 'Not discussed' under that heading.")
+                 else:
+                     topic_instructions = (f"Since no specific topics were provided, first identify the logical main themes discussed (e.g., Financials, Strategy, Outlook, Q&A). Use these themes as **bold headings**.\n"
+                                           f"Include a final mandatory section:\n- **Other Key Points** (for important info not covered in main themes)\n\n"
+                                           f"Place details under the most appropriate heading.")
+                 format_kwargs["topic_instructions"] = topic_instructions
+                 final_prompt_for_notes_api = format_prompt_safe(prompt_template, **format_kwargs)
+                 api_payload_parts = [final_prompt_for_notes_api]
+
             elif meeting_type == "Custom":
-                # For custom, the user prompt is the main part
-                format_kwargs['user_custom_prompt'] = user_custom_prompt_text
-                # The format_prompt function for Custom already includes transcript and context placeholders
-                final_prompt_for_notes_api = format_prompt(meeting_type, **format_kwargs)
-                # Custom might need transcript sent separately depending on how the user designs the prompt
-                # Assuming the custom prompt template handles {transcript} and {context_section}
-                api_payload_parts = [final_prompt_for_notes_api]
+                 prompt_template = PROMPTS["Custom"]
+                 format_kwargs["user_custom_prompt"] = user_custom_prompt_text
+                 # Note: context_section is already part of the Custom template
+                 final_prompt_for_notes_api = format_prompt_safe(prompt_template, **format_kwargs)
+                 api_payload_parts = [final_prompt_for_notes_api] # Send the formatted prompt directly
             else:
                 raise ValueError(f"Invalid meeting type '{meeting_type}' for prompt generation.")
 
@@ -854,13 +885,19 @@ if st.session_state.processing and not st.session_state.generating_filename:
                     # --- Option 3: Generate Summary ---
                     if meeting_type == "Expert Meeting" and expert_meeting_option == "Option 3: Option 2 + Executive Summary":
                         status.update(label=f"✨ Step 3b: Generating Executive Summary using {st.session_state.selected_notes_model_display_name}...")
-                        summary_prompt_template = PROMPTS["Expert Meeting"]["Summary Prompt"]
-                        summary_prompt = summary_prompt_template.format(generated_notes=generated_notes_content)
+                        # Use the dedicated summary prompt key
+                        summary_prompt_template = PROMPTS["Expert Meeting"].get(EXPERT_MEETING_SUMMARY_PROMPT_KEY)
+                        if not summary_prompt_template:
+                             raise ValueError(f"Could not find summary prompt template with key: {EXPERT_MEETING_SUMMARY_PROMPT_KEY}")
+
+                        # Format the summary prompt with the notes generated above
+                        summary_kwargs = {'generated_notes': generated_notes_content}
+                        summary_prompt = format_prompt_safe(summary_prompt_template, **summary_kwargs)
 
                         try:
                             summary_response = notes_model.generate_content(
                                 summary_prompt,
-                                generation_config=summary_gen_config, # Use potentially different config for summary
+                                generation_config=summary_gen_config, # Use summary config
                                 safety_settings=safety_settings
                             )
 
@@ -871,24 +908,28 @@ if st.session_state.processing and not st.session_state.generating_filename:
                                 status.update(label="✅ Notes and Summary generated successfully!", state="complete")
                             elif hasattr(summary_response, 'prompt_feedback') and summary_response.prompt_feedback.block_reason:
                                 st.warning(f"⚠️ Summary generation blocked: {summary_response.prompt_feedback.block_reason}. Only detailed notes provided.", icon="⚠️")
-                                st.session_state.generated_notes = generated_notes_content # Fallback to just notes
-                                status.update(label="⚠️ Summary Blocked. Notes generated.", state="warning")
+                                if 'generated_notes' not in st.session_state or not st.session_state.generated_notes: # Check if notes already set
+                                     st.session_state.generated_notes = generated_notes_content # Fallback to just notes
+                                status.update(label="⚠️ Summary Blocked. Only detailed notes generated.", state="warning")
                             else:
                                 st.warning("🤔 AI returned empty response during summary generation. Only detailed notes provided.", icon="⚠️")
-                                st.session_state.generated_notes = generated_notes_content # Fallback to just notes
-                                status.update(label="⚠️ Summary Failed. Notes generated.", state="warning")
+                                if 'generated_notes' not in st.session_state or not st.session_state.generated_notes:
+                                     st.session_state.generated_notes = generated_notes_content # Fallback to just notes
+                                status.update(label="⚠️ Summary Failed. Only detailed notes generated.", state="warning")
 
                         except Exception as summary_err:
                             st.warning(f"❌ Error during summary generation: {summary_err}. Only detailed notes provided.", icon="⚠️")
-                            st.session_state.generated_notes = generated_notes_content # Fallback to just notes
-                            status.update(label="⚠️ Summary Error. Notes generated.", state="warning")
+                            if 'generated_notes' not in st.session_state or not st.session_state.generated_notes:
+                                 st.session_state.generated_notes = generated_notes_content # Fallback
+                            status.update(label="⚠️ Summary Error. Only detailed notes generated.", state="warning")
                     else:
-                        # Not Option 3, just use the generated notes
-                        st.session_state.generated_notes = generated_notes_content
-                        status.update(label="✅ Notes generated successfully!", state="complete")
+                        # Not Option 3, or summary failed - just use the generated notes
+                        if 'generated_notes' not in st.session_state or not st.session_state.generated_notes: # Avoid overwriting if already set by failed summary
+                             st.session_state.generated_notes = generated_notes_content
+                             status.update(label="✅ Notes generated successfully!", state="complete")
 
                     # --- Post-generation steps (common) ---
-                    if st.session_state.generated_notes:
+                    if st.session_state.generated_notes: # Check if we have notes (either solo or combined)
                         st.session_state.edited_notes_text = st.session_state.generated_notes
                         add_to_history(st.session_state.generated_notes)
                         st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type)
