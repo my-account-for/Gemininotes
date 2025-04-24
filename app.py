@@ -1069,7 +1069,7 @@ if st.session_state.processing and not st.session_state.generating_filename:
                 generated_content = None
                 if response and hasattr(response, 'text') and response.text and response.text.strip():
                     generated_content = response.text.strip()
-                    status.update(f"✅ Initial {operation_desc} complete!")
+                    status.update(label=f"✅ Initial {operation_desc} complete!")
 
                     is_expert_summary_step = (meeting_type == "Expert Meeting" and \
                                               expert_meeting_option == "Option 3: Option 2 + Executive Summary" and \
