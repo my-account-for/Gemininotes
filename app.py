@@ -456,9 +456,22 @@ if st.session_state.processing and not st.session_state.generating_filename:
             except Exception as e: st.warning(f"Cloud cleanup failed: {e}", icon="⚠️")
         # End of inner try...except and cleanup
 
-    # --- Outer FINALLY block ---
+    # --- Outer FINALLY block: Always runs ---
     finally:
         st.session_state.processing = False
+        # --- Attempt Cloud Audio Cleanup if reference exists ---
+        # Correct indentation for try/except block
+        if st.session_state.uploaded_audio_info:
+            try:
+                # This check might be redundant if error handling inside the main try already cleared it,
+                # but it's safe to attempt deletion again here if the ref still exists.
+                st.toast("☁️ Final check: Cleaning cloud audio...", icon="🗑️",) # Optional feedback
+                genai.delete_file(st.session_state.uploaded_audio_info.name)
+                st.session_state.uploaded_audio_info = None # Clear ref after successful deletion
+            except Exception as final_cleanup_error:
+                # Log or display a warning if final cleanup fails, but don't stop the rerun
+                st.warning(f"Final cloud audio cleanup failed: {final_cleanup_error}", icon="⚠️")
+        # --- End correction ---
         st.rerun() # Rerun to display final results or errors
 
 # --- Footer ---
