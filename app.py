@@ -52,9 +52,32 @@ except Exception as e: st.error(f"### 💥 Error Configuring Google AI Client: {
 
 # --- Initialize Session State ---
 default_state = {
-    'processing': False, 'generating_filename': False, 'generated_notes': None, 'error_message': None,
-    'uploaded_audio_info': None, 'add_ ✨", page_icon="✨", layout="wide", initial_sidebar_state="collapsed"
-)
+    'processing': False,
+    'generating_filename': False,
+    'generated_notes': None,
+    'error_message': None,
+    'uploaded_audio_info': None,
+    'add_context_enabled': False,
+    'selected_model_display_name': DEFAULT_MODEL_NAME,
+    'selected_meeting_type': DEFAULT_MEETING_TYPE,
+    'view_edit_prompt_enabled': False,
+    'current_prompt_text': "",
+    'input_method_radio': 'Paste Text',
+    'text_input': '',
+    'pdf_uploader': None,
+    'audio_uploader': None,
+    'context_input': '', # General context
+    'earnings_call_topics': '', # Specific topics ONLY for earnings calls
+    'edit_notes_enabled': False,
+    'edited_notes_text': "",
+    'suggested_filename': None,
+    'history': [],
+    'processing_step': None, # Kept from previous version, might be useful
+}
+# Initialize session state keys if they don't exist
+for key, value in default_state.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 # --- Custom CSS Injection ---
 st.markdown("""
