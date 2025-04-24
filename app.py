@@ -429,8 +429,19 @@ if st.session_state.processing and not st.session_state.generating_filename:
 
         except Exception as pre_process_err:
             st.session_state.error_message = f"❌ Pre-processing Error: {pre_process_err}"
-            if st.session_state.uploaded_audio_info: try: genai.delete_file(st.session_state.uploaded_audio_info.name); st.session_state.uploaded_audio_info = None; except Exception: pass
+            # --- Corrected Cleanup Block ---
+            if st.session_state.uploaded_audio_info:
+                try:
+                    # Attempt cleanup even if pre-processing failed
+                    genai.delete_file(st.session_state.uploaded_audio_info.name)
+                    st.session_state.uploaded_audio_info = None
+                except Exception as cleanup_err:
+                    # Log or warn about the cleanup failure specifically if needed
+                    st.warning(f"Cloud cleanup attempt during error handling failed: {cleanup_err}", icon="⚠️")
+            # --- End Corrected Cleanup Block ---
 
+        # --- Generate Notes API Call ---
+        # (Rest of the code remains the same)
 
         # --- Generate Notes API Call ---
         if not st.session_state.error_message and api_payload_parts:
