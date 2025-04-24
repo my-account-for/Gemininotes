@@ -313,14 +313,27 @@ with output_container:
 # ... (remains the same) ...
 with st.expander("📜 Recent Notes History (Last 3)", expanded=False): ...
 
+# --- (Inside your UI definition section, before the output container) ---
+
+# ... other UI elements like model selectors, text area, etc. ...
+
+# --- Generate Button ---
+generate_button = st.button("✨ Generate Notes", type="primary", use_container_width=True, key="generate_main_button") # Add this line!
+
+# --- Output Section ---
+output_container = st.container(border=True)
+with output_container:
+    # ... (Output display logic) ...
+
 # --- Processing Logic ---
+# Now this line (previously line 317) will work because generate_button is defined above
 if generate_button:
     # Reset state
     st.session_state.processing = True
     # ... (reset other state variables) ...
-    # st.session_state.chunking_occurred_transcription = False # Removed
-    st.session_state.chunking_occurred_refinement = False # Reset
     st.rerun()
+
+# ... (rest of the processing logic) ...
 
 if st.session_state.processing and not st.session_state.generating_filename:
     # Use uploaded_audio_info to store the SINGLE cloud file reference
