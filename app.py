@@ -53,13 +53,29 @@ except Exception as e: st.error(f"### 💥 Error Configuring Google AI Client: {
 # --- Initialize Session State ---
 default_state = {
     'processing': False, 'generating_filename': False, 'generated_notes': None, 'error_message': None,
-    'uploaded_audio_info': None, 'add_context_enabled': False,
+    'uploaded_audio_info': None, 'add_ ✨", page_icon="✨", layout="wide", initial_sidebar_state="collapsed"
+)
+
+# --- Custom CSS Injection ---
+st.markdown("""
+<style>
+    /* ... Keep previous CSS ... */
+    footer {context_enabled': False,
     'selected_model_display_name': DEFAULT_MODEL_NAME, 'selected_meeting_type': DEFAULT_MEETING_TYPE,
-    'view_edit_prompt_enabled': False, 'current_prompt_text': "",
+    'view_edit_prompt_enabled': text-align: center; color: #9CA3AF; font-size: 0.8rem; padding: 2rem 0 1rem 0; }
+    footer a { color: #6B False, 'current_prompt_text': "",
     'input_method_radio': 'Paste Text', 'text_input': '', 'pdf_uploader': None, 'audio_uploader': None,
     'context_input': '', # General context
-    'earnings_call_topics': '', # Specific topics ONLY for earnings calls
-    'edit_notes_enabled': False, 'edited_notes_text': "", 'suggested_filename': None,
+    'earnings_call_topics': '', # <-- ADDED INITIALIZATION
+    'edit7280; text-decoration: none; }
+    footer a:hover { color: #007AFF; text-decoration: underline; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# --- Define Available Models & Meeting Types ---
+AVAILABLE_MODELS = {
+    "Gemini 1_notes_enabled': False, 'edited_notes_text': "", 'suggested_filename': None,
     'history': [],
 }
 for key, value in default_state.items():
