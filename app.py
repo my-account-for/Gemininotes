@@ -93,7 +93,7 @@ st.markdown("""
 # --- Define Available Models & Meeting Types ---
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
-    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro", "Gemini 2.5 Pro (paid)": "gemini-1.5-pro",
+    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro", "Gemini 2.5 Pro (paid)": "gemini-2.5-pro",
     "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "models/gemini-2.5-pro-exp-03-25", # Keep using this if available
 }
 # Ensure default models exist in the available list
