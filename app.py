@@ -233,8 +233,8 @@ Follow this specific structure EXACTLY:
 """
     },
     "Earnings Call": {
-        "Generate New Notes": """You are an expert AI assistant creating DETAILED notes from an earnings call transcript for an investment firm.
-Output MUST be comprehensive, factual notes, capturing all critical financial and strategic information.
+        "Generate New Notes": """You are an expert AI assistant creating DETAILED yet CONCISEnotes from an earnings call transcript for an investment firm.
+Output MUST be comprehensive, factual notes, capturing all critical financial and strategic information with **crisp language**.
 
 **Formatting Requirements (Mandatory):**
 - US$ for dollars (US$2.5M), % for percentages.
@@ -245,11 +245,11 @@ Output MUST be comprehensive, factual notes, capturing all critical financial an
 - Each bullet = complete sentence with distinct info.
 - Capture ALL numbers, names, data accurately.
 - Use quotes "" for significant statements.
+- **AVOID redundant phrasing and unnecessary elaboration.** Focus on the core facts.
 - **DO NOT summarize or interpret unless part of the structure or explicitly stated in the call.**
 - **DO NOT add information not mentioned in the transcript.**
 
 **Note Structure:**
-- **Call Participants:** (List names/titles or 'Not specified')
 {topic_instructions}
 
 **CRITICAL:** Ensure accuracy and adhere strictly to structure and formatting.
