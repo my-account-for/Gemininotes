@@ -1,5 +1,1 @@
-# Attempt to pre-accept EULA just in case it solves the sudo issue
-echo 'msodbcsql17 msodbcsql/accepted-eula select true' | sudo debconf-set-selections
-
-# Install ffmpeg
 ffmpeg
