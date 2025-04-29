@@ -93,7 +93,7 @@ st.markdown("""
 # --- Define Available Models & Meeting Types ---
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
-    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
+    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro", "Gemini 2.0 Flash (Fast & Versatile)": "gemini-2.0-flash-lite",
     "Gemini 2.5 Pro (paid)": "gemini-2.5-pro-preview-03-25", # Placeholder, might need actual model ID
     "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "models/gemini-2.5-pro-exp-03-25", # Keep using this if available
 }
@@ -101,7 +101,7 @@ AVAILABLE_MODELS = {
 DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)"
 if DEFAULT_NOTES_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_NOTES_MODEL_NAME = "Gemini 1.5 Pro (Complex Reasoning)"
 
-DEFAULT_TRANSCRIPTION_MODEL_NAME = "Gemini 1.5 Flash (Fast & Versatile)"
+DEFAULT_TRANSCRIPTION_MODEL_NAME = "Gemini 2.0 Flash (Fast & Versatile)"
 if DEFAULT_TRANSCRIPTION_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_TRANSCRIPTION_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0] # Fallback to first available
 
 DEFAULT_REFINEMENT_MODEL_NAME = "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)"
