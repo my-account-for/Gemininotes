@@ -207,20 +207,19 @@ Follow this specific structure EXACTLY:
 ---
 **GENERATED NOTES (Q&A Format - Concise):**
 """,
-        "Summary Prompt (for Option 3)": """Based ONLY on the detailed 'GENERATED NOTES (Q&A Format - Concise)' provided below, create a concise executive summary highlighting the most significant insights, findings, or critical points discussed.
+        "Summary Prompt (for Option 3)": """Based ONLY on the detailed 'GENERATED NOTES (Q&A Format - Concise)' provided below, create a **crisp executive summary** highlighting the **most impactful insights and key strategic takeaways.**
 
 **Format:**
-1.  Identify the main themes or key topics discussed in the notes (e.g., **GenAI Impact**, **Vendor Landscape**, **Genpact Specifics**). Create a clear, concise heading for each theme using bold text.
-2.  Under each heading, use primary bullet points (`- `) to list the most significant insights, findings, or critical points related to that theme.
-3.  **Crucially: Each bullet point should represent a single, distinct key takeaway or significant piece of information.** DO NOT use indented sub-bullets or nested lists. If a point has multiple important facets, break them down into separate primary bullet points under the same theme heading.
-4.  Focus on synthesizing the key takeaways from the detailed Q&A points. These bullets should represent crucial insights. **DO NOT list minor details or repeat verbatim points from the Q&A.**
+1.  Identify **key areas of insight** or pivotal topics from the notes. Use clear, bold headings for each. (e.g., **Strategic Growth Levers**, **Competitive Landscape Analysis**, **Operational Efficiency Gains**).
+2.  Under each heading, list **core insights or critical findings** as concise bullet points (`- `).
+3.  **Each bullet must be a distinct, high-impact takeaway.** Focus on the 'so what?' or the strategic implication of the point. Avoid verbose descriptions or simple restatements of Q&A points.
+4.  Do not use indented sub-bullets or nested lists. Keep the structure flat and direct.
 
 **Instructions:**
-- Aim for a total summary length of approximately 500-1000 words.
-- Maintain an objective and professional tone, reflecting the expert's views accurately.
-- Ensure the summary accurately reflects the content and emphasis of the detailed notes it is based on.
-- **Do not introduce any information, conclusions, or opinions not explicitly supported by the GENERATED NOTES provided below.**
-- **DO NOT hallucinate or invent details.**
+-   **Prioritize conciseness and clarity.** The summary should be easily digestible, extracting the essence of the discussion.
+-   Maintain an objective and professional tone, accurately reflecting the expert's views.
+-   Ensure insights are directly and explicitly supported by the 'GENERATED NOTES' provided. **No external information, assumptions, or interpretations beyond what is stated in the notes.**
+-   **DO NOT hallucinate or invent details.**
 
 ---
 **GENERATED NOTES (Input for Summary):**
@@ -481,6 +480,7 @@ def get_prompt_display_text(for_display_only=False):
     correct structure and placeholders identical to the processing logic.
     """
     meeting_type = st.session_state.get('selected_meeting_type', DEFAULT_MEETING_TYPE)
+    input_type = st.session_state.get('input_method_radio', 'Paste Text') # Get input type for notes
 
     # If editing is enabled AND there's text in the editor state, show that text.
     # Exception: If 'for_display_only' is True, force regeneration from template.
@@ -493,8 +493,7 @@ def get_prompt_display_text(for_display_only=False):
     # Generate the default prompt view from the base template
     display_text = ""
     temp_context = st.session_state.get('context_input',"").strip() if st.session_state.get('add_context_enabled') else None
-    input_type = st.session_state.get('input_method_radio', 'Paste Text')
-    transcript_placeholder = "{transcript}"
+    transcript_placeholder = "{transcript}" # This is the refined transcript for audio/expert_text_pdf
     context_placeholder_section = f"\n**ADDITIONAL CONTEXT (Use for understanding):**\n{temp_context}\n---" if temp_context else ""
 
     format_kwargs = {
@@ -516,6 +515,14 @@ def get_prompt_display_text(for_display_only=False):
                  if expert_option == "Option 3: Option 2 + Executive Summary":
                      summary_prompt_preview = PROMPTS["Expert Meeting"].get(EXPERT_MEETING_SUMMARY_PROMPT_KEY, "Summary prompt not found.").split("---")[0]
                      display_text += f"\n\n# NOTE: Option 3 includes an additional Executive Summary step generated *after* these notes, using a separate prompt starting like:\n'''\n{summary_prompt_preview.strip()}\n'''"
+
+                 # Add note for text/PDF refinement if applicable to Expert Meeting
+                 if input_type in ["Paste Text", "Upload PDF"]:
+                     text_refine_note = ("# NOTE FOR TEXT/PDF (Expert Meeting): Input text undergoes a refinement step\n"
+                                         "# (structure, grammar, clarity) *before* being used in the prompt below.\n"
+                                         "# This prompt (or your edited version) receives the *refined text*.\n"
+                                         "####################################\n\n")
+                     display_text = text_refine_note + display_text
             else:
                 display_text = "# Error: Could not find prompt template for Expert Meeting display."
 
@@ -545,13 +552,15 @@ def get_prompt_display_text(for_display_only=False):
              display_text = format_prompt_safe(prompt_template_to_display, **format_kwargs)
 
         elif meeting_type == "Custom":
-             audio_note = ("\n# NOTE FOR AUDIO: If using audio, the system will first chunk and transcribe,\n"
-                           "# then *refine* the full transcript (speaker ID, translation, corrections).\n"
-                           "# Your custom prompt below will receive this *refined transcript* as the primary text input.\n"
-                           "# Design your prompt accordingly.\n")
+             audio_or_text_refine_note = ""
+             if input_type == 'Upload Audio':
+                audio_or_text_refine_note = ("\n# NOTE FOR AUDIO: If using audio, the system will first chunk and transcribe,\n"
+                                             "# then *refine* the full transcript (speaker ID, translation, corrections).\n"
+                                             "# Your custom prompt below will receive this *refined transcript* as the primary text input.\n"
+                                             "# Design your prompt accordingly.\n")
+             # No specific text/PDF refine note for custom, as it's always a direct pass-through after initial extraction.
              default_custom = "# Enter your custom prompt here...\n# Use {transcript} and {context_section} placeholders.\n# Example: Summarize this meeting:\n# {transcript}\n# {context_section}"
-             # For Custom mode, the text area's value IS the prompt, so we just display it or the default
-             display_text = st.session_state.get('current_prompt_text', default_custom) + (audio_note if input_type == 'Upload Audio' else "")
+             display_text = st.session_state.get('current_prompt_text', default_custom) + audio_or_text_refine_note
              return display_text # Return directly
 
         else:
@@ -737,7 +746,7 @@ with st.container(border=True):
             refine_options = list(AVAILABLE_MODELS.keys())
             refine_default = st.session_state.get('selected_refinement_model_display_name', DEFAULT_REFINEMENT_MODEL_NAME)
             refine_index = refine_options.index(refine_default) if refine_default in refine_options else 0
-            st.selectbox("Refinement Model:", options=refine_options, key="selected_refinement_model_display_name", index=refine_index, help="Model for audio refinement (Step 2). Used only if audio is uploaded.")
+            st.selectbox("Refinement Model:", options=refine_options, key="selected_refinement_model_display_name", index=refine_index, help="Model for audio refinement (Step 2 for Audio) or text refinement (Step 2 for Expert Meeting Text/PDF).")
 
             notes_options = list(AVAILABLE_MODELS.keys())
             notes_default = st.session_state.get('selected_notes_model_display_name', DEFAULT_NOTES_MODEL_NAME)
@@ -883,12 +892,15 @@ with output_container:
         st.subheader(output_title)
 
         # Transcript previews
+        raw_transcript_label = "View Raw Source Transcript (Step 1 Audio / Original Text/PDF)"
+        refined_transcript_label = "View Refined Source Transcript (Step 2 Audio / Refined Text/PDF)"
+
         if st.session_state.get('raw_transcript'):
-            with st.expander("View Raw Source Transcript (Step 1 Output)"):
-                st.text_area("Raw Transcript", st.session_state.raw_transcript, height=200, disabled=True, key="raw_transcript_view")
+            with st.expander(raw_transcript_label):
+                st.text_area("Raw Transcript/Text", st.session_state.raw_transcript, height=200, disabled=True, key="raw_transcript_view")
         if st.session_state.get('refined_transcript'):
-             with st.expander("View Refined Source Transcript (Step 2 Output)", expanded=True):
-                st.text_area("Refined Transcript", st.session_state.refined_transcript, height=300, disabled=True, key="refined_transcript_view")
+             with st.expander(refined_transcript_label, expanded=True): # Expanded if refinement happened
+                st.text_area("Refined Transcript/Text", st.session_state.refined_transcript, height=300, disabled=True, key="refined_transcript_view")
 
         # Edit and display notes
         st.checkbox("Edit Output", key="edit_notes_enabled")
@@ -925,9 +937,9 @@ with output_container:
         with dl_cols[2]:
             if st.session_state.get('refined_transcript'):
                 refined_fname_base = fname_base.replace(f"_{output_type_label}", "_refined_transcript") if f"_{output_type_label}" in fname_base else f"{fname_base}_refined_transcript"
-                st.download_button(label="⬇️ Refined Tx (.txt)", data=st.session_state.refined_transcript, file_name=f"{refined_fname_base}.txt", mime="text/plain", key='download-refined-txt', use_container_width=True, help="Download the speaker-diarized and corrected source transcript from Step 2 (if audio was processed).")
+                st.download_button(label="⬇️ Refined Tx (.txt)", data=st.session_state.refined_transcript, file_name=f"{refined_fname_base}.txt", mime="text/plain", key='download-refined-txt', use_container_width=True, help="Download the refined source transcript/text (from Step 2 if processed).")
             else:
-                st.button("Refined Tx N/A", disabled=True, use_container_width=True, help="Refined transcript is only available after successful audio processing.")
+                st.button("Refined Tx N/A", disabled=True, use_container_width=True, help="Refined transcript/text is only available after successful audio or text refinement processing.")
 
     elif not st.session_state.get('processing'):
         st.markdown("<p class='initial-prompt'>Configure inputs above and click 'Generate / Enrich Notes' to start.</p>", unsafe_allow_html=True)
@@ -989,12 +1001,10 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
         try:
             # --- 1. Read Inputs and Settings ---
             status.update(label="⚙️ Reading inputs and settings...")
-            # Re-validate inside status (belt-and-suspenders)
             is_valid_process, error_msg_process = validate_inputs()
             if not is_valid_process:
                 raise ValueError(f"Input validation failed just before processing: {error_msg_process}")
 
-            # Get settings from session state
             meeting_type = st.session_state.selected_meeting_type
             expert_meeting_option = st.session_state.expert_meeting_prompt_option
             notes_model_id = AVAILABLE_MODELS[st.session_state.selected_notes_model_display_name]
@@ -1002,24 +1012,15 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
             refinement_model_id = AVAILABLE_MODELS[st.session_state.selected_refinement_model_display_name]
             view_edit_enabled = st.session_state.get('view_edit_prompt_enabled', False)
             edited_prompt_text = st.session_state.current_prompt_text.strip()
-
-            # Determine if an edited prompt should be used
             use_edited_prompt = view_edit_enabled and edited_prompt_text and meeting_type != "Custom" and not is_enrich_mode
-
-            # Get custom prompt if applicable
             custom_prompt_text = edited_prompt_text if meeting_type == "Custom" else None
             if meeting_type == "Custom" and not custom_prompt_text:
                  raise ValueError("Custom prompt is required for 'Custom' meeting type but is empty.")
-
             general_context = st.session_state.get('context_input', "").strip() if st.session_state.get('add_context_enabled') else None
             earnings_mode = st.session_state.get('earnings_call_mode')
             user_existing_notes = st.session_state.get('existing_notes_input', "").strip() if is_enrich_mode else None
             actual_input_type, source_transcript_data, source_audio_file_obj = get_current_input_data()
-
-            if meeting_type == "Earnings Call":
-                earnings_call_topics_text = st.session_state.get("earnings_call_topics", "").strip()
-            else:
-                 earnings_call_topics_text = ""
+            earnings_call_topics_text = st.session_state.get("earnings_call_topics", "").strip() if meeting_type == "Earnings Call" else ""
 
             # --- 2. Initialize AI Models ---
             status.update(label="🧠 Initializing AI models...")
@@ -1027,7 +1028,7 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
             refinement_model = genai.GenerativeModel(refinement_model_id, safety_settings=safety_settings)
             notes_model = genai.GenerativeModel(notes_model_id, safety_settings=safety_settings)
 
-            # --- 3. Process Input Source (Audio handling) ---
+            # --- 3. Process Input Source (Audio / Text Refinement) ---
             final_source_transcript = source_transcript_data
             st.session_state.raw_transcript = None
             st.session_state.refined_transcript = None
@@ -1037,7 +1038,6 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                      raise ValueError("Audio file selected but no file object found.")
                 st.session_state.uploaded_audio_info = source_audio_file_obj
                 status.update(label=f"🔊 Loading source audio file '{source_audio_file_obj.name}'...")
-                # (Audio loading and chunking code...)
                 audio_bytes = source_audio_file_obj.getvalue()
                 file_extension = os.path.splitext(source_audio_file_obj.name)[1].lower().replace('.', '')
                 audio_format = file_extension
@@ -1056,156 +1056,124 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                 num_chunks = len(chunks)
                 status.update(label=f"🔪 Splitting source audio into {num_chunks} chunk(s)...")
 
-                # --- Step 1: Transcription per chunk ---
                 all_transcripts = []
                 processed_audio_chunk_references = []
                 for i, chunk in enumerate(chunks):
-                    # (Chunk processing, upload, transcription loop...)
                     chunk_num = i + 1
                     status.update(label=f"🔄 Processing Source Chunk {chunk_num}/{num_chunks}...")
-                    temp_chunk_path = None
-                    chunk_file_ref = None
+                    temp_chunk_path = None; chunk_file_ref = None
                     try:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_chunk_file:
-                            chunk.export(temp_chunk_file.name, format="wav")
-                            temp_chunk_path = temp_chunk_file.name
-
+                            chunk.export(temp_chunk_file.name, format="wav"); temp_chunk_path = temp_chunk_file.name
                         status.update(label=f"☁️ Uploading Source Chunk {chunk_num}/{num_chunks}...")
                         chunk_display_name = f"chunk_{chunk_num}_of_{num_chunks}_{int(time.time())}_{source_audio_file_obj.name}"
                         chunk_file_ref = genai.upload_file(path=temp_chunk_path, display_name=chunk_display_name)
                         processed_audio_chunk_references.append(chunk_file_ref)
-
                         status.update(label=f"⏳ Waiting for Source Chunk {chunk_num}/{num_chunks} API processing...")
-                        polling_start_time = time.time()
-                        timeout_seconds = 600
+                        polling_start_time = time.time(); timeout_seconds = 600
                         while chunk_file_ref.state.name == "PROCESSING":
-                            if time.time() - polling_start_time > timeout_seconds:
-                                raise TimeoutError(f"Audio processing timed out for chunk {chunk_num} after {timeout_seconds}s.")
-                            time.sleep(10)
-                            chunk_file_ref = genai.get_file(chunk_file_ref.name)
-
-                        if chunk_file_ref.state.name != "ACTIVE":
-                            raise Exception(f"Audio chunk {chunk_num} processing failed. State: {chunk_file_ref.state.name}")
-
+                            if time.time() - polling_start_time > timeout_seconds: raise TimeoutError(f"Audio processing timed out for chunk {chunk_num} after {timeout_seconds}s.")
+                            time.sleep(10); chunk_file_ref = genai.get_file(chunk_file_ref.name)
+                        if chunk_file_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {chunk_num} processing failed. State: {chunk_file_ref.state.name}")
                         status.update(label=f"✍️ Step 1: Transcribing Source Chunk {chunk_num}/{num_chunks}...")
                         t_prompt = "Transcribe the audio accurately. Output only the raw transcript text."
-                        t_response = transcription_model.generate_content(
-                            [t_prompt, chunk_file_ref],
-                            generation_config=transcription_gen_config, safety_settings=safety_settings
-                        )
-
-                        if t_response and hasattr(t_response, 'text') and t_response.text.strip():
-                            all_transcripts.append(t_response.text.strip())
-                        elif hasattr(t_response, 'prompt_feedback') and t_response.prompt_feedback.block_reason:
-                            raise Exception(f"Transcription blocked for chunk {chunk_num}: {t_response.prompt_feedback.block_reason}")
-                        else:
-                            st.warning(f"⚠️ Source Transcription for chunk {chunk_num} returned empty. Skipping.", icon="🤔")
-                            all_transcripts.append("")
-
-                    except Exception as chunk_err:
-                        raise Exception(f"❌ Error processing source audio chunk {chunk_num}: {chunk_err}") from chunk_err
+                        t_response = transcription_model.generate_content([t_prompt, chunk_file_ref], generation_config=transcription_gen_config, safety_settings=safety_settings)
+                        if t_response and hasattr(t_response, 'text') and t_response.text.strip(): all_transcripts.append(t_response.text.strip())
+                        elif hasattr(t_response, 'prompt_feedback') and t_response.prompt_feedback.block_reason: raise Exception(f"Transcription blocked for chunk {chunk_num}: {t_response.prompt_feedback.block_reason}")
+                        else: st.warning(f"⚠️ Source Transcription for chunk {chunk_num} returned empty. Skipping.", icon="🤔"); all_transcripts.append("")
+                    except Exception as chunk_err: raise Exception(f"❌ Error processing source audio chunk {chunk_num}: {chunk_err}") from chunk_err
                     finally:
                         if temp_chunk_path and os.path.exists(temp_chunk_path):
                             try: os.remove(temp_chunk_path)
                             except OSError as remove_err: st.warning(f"Could not remove temp chunk file {temp_chunk_path}: {remove_err}")
-
-                # Combine transcripts
                 status.update(label="🧩 Combining source chunk transcripts...")
                 st.session_state.raw_transcript = "\n\n".join(all_transcripts).strip()
-
-                # --- DEBUG PRINTS After Step 1 ---
-                print("-" * 20 + " DEBUG: After Step 1 " + "-" * 20)
-                print(f"Type of st.session_state.raw_transcript: {type(st.session_state.raw_transcript)}")
-                raw_transcript_content = st.session_state.raw_transcript
-                if raw_transcript_content:
-                    print(f"Raw transcript length: {len(raw_transcript_content)}")
-                    print(f"Raw transcript snippet (first 300 chars): {raw_transcript_content[:300]}")
-                    print(f"Raw transcript is considered True in Python: {bool(raw_transcript_content)}")
-                else:
-                     print("Raw transcript is EMPTY or None")
-                print("-" * 55)
-                # --- END DEBUG PRINTS ---
-
                 final_source_transcript = st.session_state.raw_transcript
                 status.update(label="✅ Step 1: Full Source Transcription Complete!")
 
-                # --- Step 2: Refinement (with Debug prints) ---
-                print(f"\n>>> DEBUG: Checking condition 'if final_source_transcript:'")
-                print(f"    Value of final_source_transcript is None: {final_source_transcript is None}")
-                if isinstance(final_source_transcript, str):
-                    print(f"    Value of final_source_transcript (str) length: {len(final_source_transcript)}")
-                    print(f"    Condition evaluates to: {bool(final_source_transcript)}")
-                else:
-                    print(f"    Value of final_source_transcript type: {type(final_source_transcript)}")
-                    print(f"    Condition evaluates to: {bool(final_source_transcript)}")
-
-                if final_source_transcript: # Check if transcription yielded something non-empty
-                    print(">>> DEBUG: Condition TRUE. Entering Step 2 Refinement block.")
+                # --- Step 2: Audio Refinement ---
+                if final_source_transcript and isinstance(final_source_transcript, str) and final_source_transcript.strip():
                     try:
-                        status.update(label=f"🧹 Step 2: Refining source transcript using {st.session_state.selected_refinement_model_display_name}...")
-                        if not isinstance(st.session_state.raw_transcript, str):
-                             print(f"!!! WARNING: st.session_state.raw_transcript is NOT a string before creating refinement prompt. Type: {type(st.session_state.raw_transcript)}")
-                             current_raw_transcript_for_prompt = str(st.session_state.raw_transcript)
-                        else:
-                             current_raw_transcript_for_prompt = st.session_state.raw_transcript
-
-                        refinement_prompt = f"""Please refine the following raw audio transcript:
-
-                        **Raw Transcript:**
-                        ```
-                        {current_raw_transcript_for_prompt}
-                        ```
-
+                        status.update(label=f"🧹 Step 2: Refining audio transcript using {st.session_state.selected_refinement_model_display_name}...")
+                        audio_refinement_prompt = f"""Please refine the following raw audio transcript:
+                        **Raw Transcript:**\n```\n{st.session_state.raw_transcript}\n```
                         **Instructions:**
                         1.  **Identify Speakers:** Assign consistent labels (e.g., Speaker 1, Speaker 2, Interviewer, Expert Name if identifiable). Place the label on a new line before the speaker's turn (e.g., `Speaker 1:`). If you cannot distinguish speakers reliably, use a single label like 'SPEAKER'.
                         2.  **Translate to English:** Convert any substantial non-English speech found within the transcript to English, ensuring it fits naturally within the conversation. Preserve original names or technical terms if translation is uncertain.
                         3.  **Correct Errors & Improve Readability:** Fix obvious spelling mistakes and grammatical errors. Use the overall conversation context to correct potentially misheard words or phrases where confident. Preserve technical terms or names if unsure. Remove excessive filler words (like 'um', 'uh', 'like') only if they severely hinder readability, but retain the natural conversational flow. Do not paraphrase or summarize.
                         4.  **Format:** Ensure clear separation between speaker turns using the speaker labels followed by a colon and a newline. Use standard paragraph breaks for longer turns if appropriate.
                         5.  **Output:** Provide *only* the refined, speaker-diarized, translated (where applicable), and corrected transcript text. Do not add any introduction, summary, or commentary before or after the transcript itself.
-
-                        **Additional Context (Optional - use for understanding terms, names, etc.):**
-                        {general_context if general_context else "None provided."}
-
-                        **Refined Transcript:**
+                        **Additional Context (Optional - use for understanding terms, names, etc.):**\n{general_context if general_context else "None provided."}\n\n**Refined Transcript:**
                         """
-                        print(">>> DEBUG: Refinement prompt created. Calling generate_content...")
-                        r_response = refinement_model.generate_content(
-                            refinement_prompt,
-                            generation_config=refinement_gen_config, safety_settings=safety_settings
-                        )
-                        print(">>> DEBUG: Refinement generate_content call returned.")
-
+                        r_response = refinement_model.generate_content(audio_refinement_prompt, generation_config=refinement_gen_config, safety_settings=safety_settings)
                         if r_response and hasattr(r_response, 'text') and r_response.text and r_response.text.strip():
-                            print(">>> DEBUG: Refinement response received and has text content.")
                             st.session_state.refined_transcript = r_response.text.strip()
-                            final_source_transcript = st.session_state.refined_transcript # Update for Step 3
-                            status.update(label="🧹 Step 2: Source Refinement complete!")
-                            print(f">>> DEBUG: Refined transcript length: {len(st.session_state.refined_transcript)}")
+                            final_source_transcript = st.session_state.refined_transcript
+                            status.update(label="🧹 Step 2: Audio Refinement complete!")
                         elif hasattr(r_response, 'prompt_feedback') and r_response.prompt_feedback.block_reason:
-                            print(f">>> DEBUG: Refinement BLOCKED. Reason: {r_response.prompt_feedback.block_reason}")
-                            st.warning(f"⚠️ Source Refinement blocked: {r_response.prompt_feedback.block_reason}. Using raw transcript for notes.", icon="⚠️")
-                            status.update(label="⚠️ Source Refinement blocked. Proceeding with raw transcript.")
+                            st.warning(f"⚠️ Audio Refinement blocked: {r_response.prompt_feedback.block_reason}. Using raw transcript for notes.", icon="⚠️")
+                            status.update(label="⚠️ Audio Refinement blocked. Proceeding with raw transcript.")
                         else:
-                            print(">>> DEBUG: Refinement response was empty or had no text.")
-                            st.warning("🤔 Source Refinement step returned empty response. Using raw transcript for notes.", icon="⚠️")
-                            status.update(label="⚠️ Source Refinement failed. Proceeding with raw transcript.")
+                            st.warning("🤔 Audio Refinement step returned empty response. Using raw transcript for notes.", icon="⚠️")
+                            status.update(label="⚠️ Audio Refinement failed. Proceeding with raw transcript.")
                     except Exception as refine_err:
-                         print(f">>> DEBUG: EXCEPTION during Step 2 Refinement: {refine_err}")
-                         st.warning(f"❌ Error during Step 2 (Source Refinement): {refine_err}. Using raw transcript for notes.", icon="⚠️")
-                         status.update(label="⚠️ Source Refinement error. Proceeding with raw transcript.")
+                         st.warning(f"❌ Error during Step 2 (Audio Refinement): {refine_err}. Using raw transcript for notes.", icon="⚠️")
+                         status.update(label="⚠️ Audio Refinement error. Proceeding with raw transcript.")
                 else:
-                    print(">>> DEBUG: Condition FALSE. SKIPPING Step 2 Refinement block.")
-                    status.update(label="⚠️ Skipping Source Refinement (Step 2) as raw transcript is empty or invalid.")
-            # End of Audio Processing Block
+                    status.update(label="⚠️ Skipping Audio Refinement (Step 2) as raw transcript is empty or invalid.")
+            
+            elif meeting_type == "Expert Meeting" and actual_input_type in ["Paste Text", "Upload PDF"]:
+                if final_source_transcript and isinstance(final_source_transcript, str) and final_source_transcript.strip():
+                    st.session_state.raw_transcript = final_source_transcript # Store original text
+                    try:
+                        status.update(label=f"🧹 Step 2: Refining text input for Expert Meeting using {st.session_state.selected_refinement_model_display_name}...")
+                        text_refinement_prompt = f"""Please refine the following meeting transcript text which may be unstructured or semi-structured:
+                        **Original Transcript Text:**\n```\n{st.session_state.raw_transcript}\n```
+                        **Instructions for Refinement:**
+                        1.  **Structure and Formatting:**
+                            *   If clear Question/Answer patterns exist or can be inferred, attempt to structure the text with clear "Q:" and "A:" prefixes or similar demarcations.
+                            *   If speaker changes are evident (e.g., "Interviewer:", "Expert:"), make sure they are clearly marked on new lines. If not present, do not invent them.
+                            *   Improve paragraphing and sentence segmentation for better readability. Break down very long, run-on sentences.
+                        2.  **Clarity and Conciseness:**
+                            *   Correct obvious spelling mistakes and grammatical errors.
+                            *   Remove redundant filler words (e.g., "you know", "sort of") if they significantly clutter the text, but maintain the natural flow and meaning. Do not over-edit to the point of altering meaning.
+                            *   Clarify ambiguous phrasing where the context allows, without introducing new information.
+                        3.  **Content Preservation:**
+                            *   **Crucially, do not summarize, paraphrase extensively, or remove factual content.** The goal is to clean and structure the existing text, not to shorten it by omitting details.
+                            *   Preserve all specific data, names, technical terms, and figures.
+                        4.  **Output:** Provide *only* the refined transcript text. Do not add any introduction, summary, or commentary before or after the refined text itself.
+                        **Additional Context (Optional - use for understanding terms, names, etc.):**\n{general_context if general_context else "None provided."}\n\n**Refined Transcript Text:**
+                        """
+                        r_response = refinement_model.generate_content(text_refinement_prompt, generation_config=refinement_gen_config, safety_settings=safety_settings)
+                        if r_response and hasattr(r_response, 'text') and r_response.text and r_response.text.strip():
+                            st.session_state.refined_transcript = r_response.text.strip()
+                            final_source_transcript = st.session_state.refined_transcript
+                            status.update(label="🧹 Step 2: Text input refinement complete!")
+                        elif hasattr(r_response, 'prompt_feedback') and r_response.prompt_feedback.block_reason:
+                            st.warning(f"⚠️ Text input refinement blocked: {r_response.prompt_feedback.block_reason}. Using original text for notes.", icon="⚠️")
+                            status.update(label="⚠️ Text input refinement blocked. Proceeding with original text.")
+                        else:
+                            st.warning("🤔 Text input refinement step returned empty response. Using original text for notes.", icon="⚠️")
+                            status.update(label="⚠️ Text input refinement failed. Proceeding with original text.")
+                    except Exception as refine_err:
+                         st.warning(f"❌ Error during Step 2 (Text Refinement): {refine_err}. Using original text for notes.", icon="⚠️")
+                         status.update(label="⚠️ Text refinement error. Proceeding with original text.")
+                else: # No text from PDF/Paste to refine
+                    if actual_input_type in ["Paste Text", "Upload PDF"]: # Only set raw_transcript if it was from text/pdf
+                        st.session_state.raw_transcript = final_source_transcript # Could be None or empty
+                    status.update(label="⚠️ Skipping Text Refinement (Step 2) as input text is empty or invalid.")
+            else: # For other meeting types with text/PDF, or if no refinement happened
+                if actual_input_type in ["Paste Text", "Upload PDF"]:
+                     st.session_state.raw_transcript = final_source_transcript # Store the original input as "raw"
 
             # --- 4. Prepare Final Prompt for Notes/Enrichment ---
-            if not final_source_transcript:
-                 raise ValueError("No source transcript available (from text, PDF, or audio processing) to generate or enrich notes.")
+            if not final_source_transcript or not isinstance(final_source_transcript, str) or not final_source_transcript.strip():
+                 raise ValueError("No source transcript available (from text, PDF, or after processing) to generate or enrich notes.")
 
             status.update(label=f"📝 Preparing final prompt for {operation_desc}...")
             final_api_prompt = None
             api_payload_parts = []
-            prompt_template_base_text = None # Store the base template text if needed
+            prompt_template_base_text = None
             gen_config_to_use = main_gen_config
 
             format_kwargs = {
@@ -1213,24 +1181,21 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                 'context_section': f"\n**ADDITIONAL CONTEXT (Use for understanding):**\n{general_context}\n---" if general_context else ""
             }
 
-            # Determine which prompt to use based on priority
             if meeting_type == "Custom":
                 prompt_template_base_text = custom_prompt_text
                 final_api_prompt = format_prompt_safe(prompt_template_base_text, **format_kwargs)
                 api_payload_parts = [final_api_prompt]
                 status.update(label=f"📝 Using user's Custom prompt...")
-
-            elif is_enrich_mode: # Enrichment mode
+            elif is_enrich_mode:
                 prompt_template_base_text = PROMPTS["Earnings Call"]["Enrich Existing Notes"]
                 gen_config_to_use = enrichment_gen_config
-                # Format topic instructions for enrichment focus
                 topic_instructions = ""
                 if earnings_call_topics_text:
                     formatted_topics = [f"- {line.strip()}" for line in earnings_call_topics_text.split('\n') if line.strip()]
                     topic_list_str = "\n".join(formatted_topics)
                     topic_instructions = (f"Focus enrichment primarily on details related to the following user-specified topic structure:\n{topic_list_str}\n\n"
                                         f"Also incorporate any other highly significant financial or strategic points found in the transcript, potentially under an 'Other Key Points' section if they don't fit the provided structure.")
-                else: # No specific topics provided
+                else:
                     topic_instructions = (f"Since no specific topics were provided, identify the logical main themes in the transcript (e.g., Financials, Strategy, Outlook, Q&A) and enrich the user's existing notes based on significant information related to those themes.\n"
                                           f"Include any other highly significant points under an 'Other Key Points' section if relevant.")
                 format_kwargs["topic_instructions"] = topic_instructions
@@ -1239,68 +1204,48 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                 final_api_prompt = format_prompt_safe(prompt_template_base_text, **format_kwargs)
                 api_payload_parts = [final_api_prompt]
                 status.update(label=f"📝 Using standard Enrich prompt...")
-
-            elif use_edited_prompt: # Edit enabled and text area has content
-                 prompt_template_base_text = edited_prompt_text # Use the edited text as the template
-                 # Re-generate and add topic instructions if it's Generate New Notes Earnings Call
+            elif use_edited_prompt:
+                 prompt_template_base_text = edited_prompt_text
                  if meeting_type == "Earnings Call" and earnings_mode == "Generate New Notes":
-                     topic_instructions = "" # Calculate as before
+                     topic_instructions = ""
                      if earnings_call_topics_text:
-                         formatted_topics = []
-                         for line in earnings_call_topics_text.split('\n'):
-                             trimmed_line = line.strip()
-                             if trimmed_line and not trimmed_line.startswith(('-', '*', '#')): formatted_topics.append(f"- **{trimmed_line.strip(':')}**")
-                             elif trimmed_line: formatted_topics.append(trimmed_line)
-                         topic_list_str = "\n".join(formatted_topics)
+                         formatted_topics = [f"- **{line.strip().strip(':').strip()}**" for line in earnings_call_topics_text.split('\n') if line.strip() and not line.strip().startswith(('-', '*', '#'))] + [line.strip() for line in earnings_call_topics_text.split('\n') if line.strip().startswith(('-', '*', '#'))]
+                         topic_list_str = "\n".join(sorted(list(set(formatted_topics)))) # Basic sort & unique
                          topic_instructions = (f"Structure the main body of the notes under the following user-specified headings EXACTLY as provided:\n{topic_list_str}\n\n"
                                                f"- **Other Key Points** (Use this MANDATORY heading for important info NOT covered by the topics above)\n\n"
                                                f"Place all relevant details under the most appropriate heading. If a specific user topic isn't discussed in the transcript, state 'Not discussed' under that heading.")
-                     else: # No topics provided
+                     else:
                          topic_instructions = (f"Since no specific topics were provided, first identify the logical main themes discussed in the call (e.g., Financial Highlights, Segment Performance, Strategic Initiatives, Outlook/Guidance, Q&A Key Points). Use these themes as **bold headings**.\n"
                                                f"Include a final mandatory section:\n- **Other Key Points** (Use this heading for any important information that doesn't fit neatly into the main themes you identified)\n\n"
                                                f"Place all relevant details under the most appropriate heading.")
                      format_kwargs["topic_instructions"] = topic_instructions
-                 # Format the *edited* prompt text
                  final_api_prompt = format_prompt_safe(prompt_template_base_text, **format_kwargs)
                  api_payload_parts = [final_api_prompt]
                  status.update(label=f"📝 Using edited prompt for {operation_desc}...")
-
-            else: # Standard path (Not Custom, Not Enrich, Not Edited)
+            else:
                  if meeting_type == "Expert Meeting":
-                    if expert_meeting_option == "Option 1: Existing (Detailed & Strict)":
-                        prompt_template_base_text = PROMPTS["Expert Meeting"]["Option 1: Existing (Detailed & Strict)"]
-                    else: # Option 2 and 3 use Option 2 template
-                        prompt_template_base_text = PROMPTS["Expert Meeting"]["Option 2: Less Verbose (Default)"]
-                 elif meeting_type == "Earnings Call": # Must be Generate New Notes mode here
+                    if expert_meeting_option == "Option 1: Existing (Detailed & Strict)": prompt_template_base_text = PROMPTS["Expert Meeting"]["Option 1: Existing (Detailed & Strict)"]
+                    else: prompt_template_base_text = PROMPTS["Expert Meeting"]["Option 2: Less Verbose (Default)"]
+                 elif meeting_type == "Earnings Call":
                      prompt_template_base_text = PROMPTS["Earnings Call"]["Generate New Notes"]
                      gen_config_to_use = main_gen_config
-                     # Format topic instructions
-                     topic_instructions = "" # Calculate as before
+                     topic_instructions = ""
                      if earnings_call_topics_text:
-                         formatted_topics = []
-                         for line in earnings_call_topics_text.split('\n'):
-                             trimmed_line = line.strip()
-                             if trimmed_line and not trimmed_line.startswith(('-', '*', '#')): formatted_topics.append(f"- **{trimmed_line.strip(':')}**")
-                             elif trimmed_line: formatted_topics.append(trimmed_line)
-                         topic_list_str = "\n".join(formatted_topics)
+                         formatted_topics = [f"- **{line.strip().strip(':').strip()}**" for line in earnings_call_topics_text.split('\n') if line.strip() and not line.strip().startswith(('-', '*', '#'))] + [line.strip() for line in earnings_call_topics_text.split('\n') if line.strip().startswith(('-', '*', '#'))]
+                         topic_list_str = "\n".join(sorted(list(set(formatted_topics))))
                          topic_instructions = (f"Structure the main body of the notes under the following user-specified headings EXACTLY as provided:\n{topic_list_str}\n\n"
                                                f"- **Other Key Points** (Use this MANDATORY heading for important info NOT covered by the topics above)\n\n"
                                                f"Place all relevant details under the most appropriate heading. If a specific user topic isn't discussed in the transcript, state 'Not discussed' under that heading.")
-                     else: # No topics provided
+                     else:
                          topic_instructions = (f"Since no specific topics were provided, first identify the logical main themes discussed in the call (e.g., Financial Highlights, Segment Performance, Strategic Initiatives, Outlook/Guidance, Q&A Key Points). Use these themes as **bold headings**.\n"
                                                f"Include a final mandatory section:\n- **Other Key Points** (Use this heading for any important information that doesn't fit neatly into the main themes you identified)\n\n"
                                                f"Place all relevant details under the most appropriate heading.")
                      format_kwargs["topic_instructions"] = topic_instructions
-                 else:
-                     raise ValueError(f"Unhandled meeting type '{meeting_type}' in standard prompt selection logic.")
-
-                 if not prompt_template_base_text:
-                     raise ValueError(f"Could not find standard prompt template (Meeting: {meeting_type}, Option/Mode: {expert_meeting_option if meeting_type=='Expert Meeting' else earnings_mode}).")
-
+                 else: raise ValueError(f"Unhandled meeting type '{meeting_type}' in standard prompt selection logic.")
+                 if not prompt_template_base_text: raise ValueError(f"Could not find standard prompt template (Meeting: {meeting_type}, Option/Mode: {expert_meeting_option if meeting_type=='Expert Meeting' else earnings_mode}).")
                  final_api_prompt = format_prompt_safe(prompt_template_base_text, **format_kwargs)
                  api_payload_parts = [final_api_prompt]
                  status.update(label=f"📝 Using standard prompt for {operation_desc}...")
-
 
             if not final_api_prompt or not api_payload_parts:
                 raise ValueError("Failed to prepare the final prompt for the API call.")
@@ -1308,28 +1253,14 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
             # --- 5. Execute API Call (Notes/Enrichment) ---
             try:
                 status.update(label=f"✨ Step 3: {operation_desc} using {st.session_state.selected_notes_model_display_name}...")
-                # Optional Debug: Print final prompt before sending
-                # print("-" * 20 + " FINAL PROMPT TO API " + "-" * 20)
-                # print(final_api_prompt)
-                # print("-" * 60)
-
-                response = notes_model.generate_content(
-                    api_payload_parts,
-                    generation_config=gen_config_to_use,
-                    safety_settings=safety_settings
-                )
+                response = notes_model.generate_content(api_payload_parts, generation_config=gen_config_to_use, safety_settings=safety_settings)
 
                 # --- 6. Process Response & Handle Summary Step ---
                 generated_content = None
                 if response and hasattr(response, 'text') and response.text and response.text.strip():
                     generated_content = response.text.strip()
                     status.update(label=f"✅ Initial {operation_desc} successful!")
-
-                    # Check if Expert Meeting Option 3 (Summary step) is needed
-                    is_expert_summary_step = (meeting_type == "Expert Meeting" and
-                                              expert_meeting_option == "Option 3: Option 2 + Executive Summary" and
-                                              not use_edited_prompt) # Don't summarize if prompt was edited
-
+                    is_expert_summary_step = (meeting_type == "Expert Meeting" and expert_meeting_option == "Option 3: Option 2 + Executive Summary" and not use_edited_prompt)
                     if is_expert_summary_step:
                         status.update(label=f"✨ Step 3b: Generating Executive Summary...")
                         summary_prompt_template = PROMPTS["Expert Meeting"].get(EXPERT_MEETING_SUMMARY_PROMPT_KEY)
@@ -1341,11 +1272,7 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                             summary_kwargs = {'generated_notes': generated_content}
                             summary_prompt = format_prompt_safe(summary_prompt_template, **summary_kwargs)
                             try:
-                                summary_response = notes_model.generate_content(
-                                    summary_prompt,
-                                    generation_config=summary_gen_config,
-                                    safety_settings=safety_settings
-                                )
+                                summary_response = notes_model.generate_content(summary_prompt, generation_config=summary_gen_config, safety_settings=safety_settings)
                                 if summary_response and hasattr(summary_response, 'text') and summary_response.text.strip():
                                     summary_text = summary_response.text.strip()
                                     st.session_state.generated_notes = f"{generated_content}\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{summary_text}"
@@ -1363,54 +1290,44 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                         st.session_state.generated_notes = generated_content
                         status.update(label=f"✅ {operation_desc} completed successfully!", state="complete")
 
-                    # --- 7. Post-generation Steps ---
                     if st.session_state.generated_notes:
-                        st.session_state.edited_notes_text = st.session_state.generated_notes # Populate editor
-                        add_to_history(st.session_state.generated_notes) # Add to history
-
+                        st.session_state.edited_notes_text = st.session_state.generated_notes
+                        add_to_history(st.session_state.generated_notes)
                         status.update(label="💡 Suggesting filename...")
                         fname_label = meeting_type.replace(" ","_")
                         if is_enrich_mode: fname_label = "Enriched_Earnings_Call"
                         suggested_fname = generate_suggested_filename(st.session_state.generated_notes, fname_label)
                         st.session_state.suggested_filename = suggested_fname
-
-                # Handle API errors/blocks for the main notes/enrichment call
                 elif response and hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
                     st.session_state.error_message = f"⚠️ {operation_desc} was blocked by the API. Reason: {response.prompt_feedback.block_reason}. Please modify inputs or prompt if applicable."
                     status.update(label=f"❌ Blocked: {response.prompt_feedback.block_reason}", state="error")
                 elif response is not None:
                     st.session_state.error_message = f"🤔 The AI returned an empty response during {operation_desc}. Try adjusting the input or model."
                     status.update(label="❌ Error: AI returned empty response.", state="error")
-                else: # No response object at all
+                else:
                     st.session_state.error_message = f"😥 The {operation_desc} API call failed (No response received). Check connection or API status."
                     status.update(label="❌ Error: API call failed (No response).", state="error")
-
             except Exception as api_call_err:
                  st.session_state.error_message = f"❌ Error during Step 3 ({operation_desc} API Call): {api_call_err}"
                  status.update(label=f"❌ Error during API call: {api_call_err}", state="error")
-
         except Exception as e:
              st.session_state.error_message = f"❌ Processing Error: {e}"
              status.update(label=f"❌ Error: {e}", state="error")
-
         finally:
-            # --- 8. Cleanup ---
-            st.session_state.processing = False # Mark processing as finished regardless of outcome
+            st.session_state.processing = False
             if processed_audio_chunk_references:
                  st.toast(f"☁️ Performing final cleanup of {len(processed_audio_chunk_references)} cloud audio chunk(s)...", icon="🗑️")
-                 refs_to_delete = list(processed_audio_chunk_references)
+                 refs_to_delete = list(processed_audio_chunk_references) # Iterate over a copy
                  for file_ref in refs_to_delete:
                     try:
                         if file_ref and hasattr(file_ref, 'name'):
                            genai.delete_file(file_ref.name)
-                           processed_audio_chunk_references.remove(file_ref)
-                        else:
-                            st.warning(f"Skipping cleanup for invalid file reference: {file_ref}", icon="⚠️")
-                    except Exception as final_cleanup_error:
-                        st.warning(f"Final cloud audio chunk cleanup failed for {getattr(file_ref, 'name', 'Unknown File')}: {final_cleanup_error}", icon="⚠️")
-                 st.session_state.processed_audio_chunk_references = []
-            st.rerun() # Rerun one last time to update UI
-
+                           if file_ref in processed_audio_chunk_references: # Check if still present before removing
+                               processed_audio_chunk_references.remove(file_ref)
+                        else: st.warning(f"Skipping cleanup for invalid file reference: {file_ref}", icon="⚠️")
+                    except Exception as final_cleanup_error: st.warning(f"Final cloud audio chunk cleanup failed for {getattr(file_ref, 'name', 'Unknown File')}: {final_cleanup_error}", icon="⚠️")
+                 st.session_state.processed_audio_chunk_references = [] # Ensure it's cleared
+            st.rerun()
 
 # --- Footer ---
 st.divider()
