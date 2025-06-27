@@ -95,7 +95,7 @@ st.markdown("""
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
     "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro", "Gemini 2.0 Flash (Fast & Versatile)": "gemini-2.0-flash-lite", "Gemini 2.5 Flash (Fast & Versatile)": "gemini-2.5-flash-preview-05-20",
-    "Gemini 2.5 Pro (paid)": "gemini-2.5-pro-preview-06-05", # Placeholder, might need actual model ID
+    "Gemini 2.5 Pro (paid)": "gemini-2.5-pro-preview-05-06", # Placeholder, might need actual model ID
 }
 # Ensure default models exist in the available list
 DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro (paid)"
