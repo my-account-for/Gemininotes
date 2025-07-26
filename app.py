@@ -183,23 +183,43 @@ Follow this specific structure EXACTLY:
 Generate detailed, factual notes from the provided meeting transcript.
 Follow this specific structure EXACTLY:
 
-**Structure:**
-- **Opening overview or Expert background (Optional):** If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple, direct language. DO NOT summarize.
-- **Q&A format:** Structure the main body STRICTLY in Question/Answer format.
-	- **Questions:** Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).
-	- **Answers:** Use bullet points directly below the question.
-		- Each bullet point should convey specific factual information using clear, complete sentences.
-		- **Strive for natural sentence flow. While focusing on distinct facts, combine closely related details or sequential points into a single sentence where it enhances readability and avoids excessive choppiness, without adding interpretation or summarization.**
-		- Capture ALL specifics (data, names, examples, $, %, etc.).
-		- DO NOT use sub-bullets or section headers within answers.
-		- **DO NOT add interpretations, summaries, conclusions, or action items not explicitly stated in the transcript.**
+Structure:
 
-**Additional Instructions:**
-- Accuracy is paramount. Capture ALL facts precisely.
-- **Write clearly and concisely, avoiding unnecessary words. Favor informative sentences over overly simplistic ones.**
-- Include ONLY information present in the transcript. DO NOT add external information.
-- If a section (like Opening Overview) isn't present, OMIT it.
----
+Opening overview or Expert background (Optional):
+If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
+Capture ALL details (names, dates, numbers, etc.). Use simple, direct language. DO NOT omit or paraphrase any factual elements. DO NOT summarize.
+
+Q&A format: Structure the main body STRICTLY in Question/Answer format.
+
+Questions: Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).
+
+Answers: Use bullet points directly below the question.
+
+Each bullet point should convey specific factual information using clear, complete sentences.
+
+DO NOT skip, combine, condense, or generalize facts. Every distinct factual point—name, example, data, step, or statement—must be captured in full.
+
+Strive for natural sentence flow. While focusing on distinct facts, combine only closely related or consecutive points into a single sentence IF it enhances readability AND does not reduce factual detail.
+
+Capture ALL specifics (data, names, examples, $, %, etc.).
+
+DO NOT use sub-bullets or section headers within answers.
+
+DO NOT add interpretations, summaries, reworded conclusions, or inferred action items not explicitly stated in the transcript.
+
+Additional Instructions:
+
+Accuracy is paramount. Capture ALL facts precisely.
+
+Do not exclude any speaker’s contributions, even if they seem minor or repetitive.
+
+Be meticulous. Err on the side of including all stated facts, even if they appear redundant or obvious.
+
+Write clearly and concisely, avoiding unnecessary words. Favor informative sentences over overly simplistic ones.
+
+Include ONLY information present in the transcript. DO NOT add external information.
+
+If a section (like Opening Overview) isn't present, OMIT it.
 **MEETING TRANSCRIPT:**
 {transcript}
 ---
