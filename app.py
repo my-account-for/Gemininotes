@@ -13,7 +13,6 @@ import re
 from pydub import AudioSegment
 from pydub.utils import make_chunks
 import copy
-from streamlit_extras.app_logo import add_logo
 from streamlit_copy_to_clipboard import st_copy_to_clipboard as copy_button
 # --- Page Configuration ---
 st.set_page_config(
