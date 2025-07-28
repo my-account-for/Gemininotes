@@ -757,7 +757,7 @@ with st.container(border=True):
             refine_options = list(AVAILABLE_MODELS.keys())
             refine_default = st.session_state.get('selected_refinement_model_display_name', DEFAULT_REFINEMENT_MODEL_NAME)
             refine_index = refine_options.index(refine_default) if refine_default in refine_options else 0
-            st.selectbox("Refinement Model:", options=refine_options, key="selected_refinement_model_display_name", index=refine_index, help="Model for audio refinement (Step 2). Used only if audio is uploaded.")
+            st.selectbox("Refinement Model:", options=refine_options, key="selected_refinement_model_display_name", index=refine_index, help="Model for transcript refinement (Step 2). Runs for all audio inputs, and for text/PDF inputs for Expert Meetings.")
 
             notes_options = list(AVAILABLE_MODELS.keys())
             notes_default = st.session_state.get('selected_notes_model_display_name', DEFAULT_NOTES_MODEL_NAME)
@@ -1047,9 +1047,10 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
             refinement_model = genai.GenerativeModel(refinement_model_id, safety_settings=safety_settings)
             notes_model = genai.GenerativeModel(notes_model_id, safety_settings=safety_settings)
 
-            # --- 3. Process Input Source (Audio handling) ---
+            # --- 3. Process Input Source (Transcript Acquisition) ---
             final_source_transcript = source_transcript_data
-            st.session_state.raw_transcript = None
+            # Set raw_transcript for all text-based inputs initially. Audio will overwrite it.
+            st.session_state.raw_transcript = source_transcript_data
             st.session_state.refined_transcript = None
 
             if actual_input_type == "Upload Audio":
@@ -1132,91 +1133,61 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                 # Combine transcripts
                 status.update(label="🧩 Combining source chunk transcripts...")
                 st.session_state.raw_transcript = "\n\n".join(all_transcripts).strip()
-
-                # --- DEBUG PRINTS After Step 1 ---
-                print("-" * 20 + " DEBUG: After Step 1 " + "-" * 20)
-                print(f"Type of st.session_state.raw_transcript: {type(st.session_state.raw_transcript)}")
-                raw_transcript_content = st.session_state.raw_transcript
-                if raw_transcript_content:
-                    print(f"Raw transcript length: {len(raw_transcript_content)}")
-                    print(f"Raw transcript snippet (first 300 chars): {raw_transcript_content[:300]}")
-                    print(f"Raw transcript is considered True in Python: {bool(raw_transcript_content)}")
-                else:
-                     print("Raw transcript is EMPTY or None")
-                print("-" * 55)
-                # --- END DEBUG PRINTS ---
-
                 final_source_transcript = st.session_state.raw_transcript
                 status.update(label="✅ Step 1: Full Source Transcription Complete!")
+            
+            # --- Step 2: Transcript Refinement (Conditional) ---
+            # This block now runs for ANY input type if conditions are met.
+            # It runs for all Audio inputs, and for Text/PDF inputs ONLY for "Expert Meeting".
+            should_refine = (actual_input_type == "Upload Audio") or \
+                            (meeting_type == "Expert Meeting" and actual_input_type in ["Paste Text", "Upload PDF"])
 
-                # --- Step 2: Refinement (with Debug prints) ---
-                print(f"\n>>> DEBUG: Checking condition 'if final_source_transcript:'")
-                print(f"    Value of final_source_transcript is None: {final_source_transcript is None}")
-                if isinstance(final_source_transcript, str):
-                    print(f"    Value of final_source_transcript (str) length: {len(final_source_transcript)}")
-                    print(f"    Condition evaluates to: {bool(final_source_transcript)}")
-                else:
-                    print(f"    Value of final_source_transcript type: {type(final_source_transcript)}")
-                    print(f"    Condition evaluates to: {bool(final_source_transcript)}")
+            if final_source_transcript and should_refine:
+                try:
+                    status.update(label=f"🧹 Step 2: Refining transcript using {st.session_state.selected_refinement_model_display_name}...")
+                    # Ensure the transcript passed to the prompt is a string
+                    current_raw_transcript_for_prompt = str(st.session_state.raw_transcript) if st.session_state.raw_transcript is not None else ""
 
-                if final_source_transcript: # Check if transcription yielded something non-empty
-                    print(">>> DEBUG: Condition TRUE. Entering Step 2 Refinement block.")
-                    try:
-                        status.update(label=f"🧹 Step 2: Refining source transcript using {st.session_state.selected_refinement_model_display_name}...")
-                        if not isinstance(st.session_state.raw_transcript, str):
-                             print(f"!!! WARNING: st.session_state.raw_transcript is NOT a string before creating refinement prompt. Type: {type(st.session_state.raw_transcript)}")
-                             current_raw_transcript_for_prompt = str(st.session_state.raw_transcript)
-                        else:
-                             current_raw_transcript_for_prompt = st.session_state.raw_transcript
+                    refinement_prompt = f"""Please refine the following raw audio transcript:
 
-                        refinement_prompt = f"""Please refine the following raw audio transcript:
+                    **Raw Transcript:**
+                    ```
+                    {current_raw_transcript_for_prompt}
+                    ```
 
-                        **Raw Transcript:**
-                        ```
-                        {current_raw_transcript_for_prompt}
-                        ```
+                    **Instructions:**
+                    1.  **Identify Speakers:** Assign consistent labels (e.g., Speaker 1, Speaker 2, Interviewer, Expert Name if identifiable). Place the label on a new line before the speaker's turn (e.g., `Speaker 1:`). If you cannot distinguish speakers reliably, use a single label like 'SPEAKER'.
+                    2.  **Translate to English:** Convert any substantial non-English speech found within the transcript to English, ensuring it fits naturally within the conversation. Preserve original names or technical terms if translation is uncertain.
+                    3.  **Correct Errors & Improve Readability:** Fix obvious spelling mistakes and grammatical errors. Use the overall conversation context to correct potentially misheard words or phrases where confident. Preserve technical terms or names if unsure. Remove excessive filler words (like 'um', 'uh', 'like') only if they severely hinder readability, but retain the natural conversational flow. Do not paraphrase or summarize.
+                    4.  **Format:** Ensure clear separation between speaker turns using the speaker labels followed by a colon and a newline. Use standard paragraph breaks for longer turns if appropriate.
+                    5.  **Output:** Provide *only* the refined, speaker-diarized, translated (where applicable), and corrected transcript text. Do not add any introduction, summary, or commentary before or after the transcript itself.
 
-                        **Instructions:**
-                        1.  **Identify Speakers:** Assign consistent labels (e.g., Speaker 1, Speaker 2, Interviewer, Expert Name if identifiable). Place the label on a new line before the speaker's turn (e.g., `Speaker 1:`). If you cannot distinguish speakers reliably, use a single label like 'SPEAKER'.
-                        2.  **Translate to English:** Convert any substantial non-English speech found within the transcript to English, ensuring it fits naturally within the conversation. Preserve original names or technical terms if translation is uncertain.
-                        3.  **Correct Errors & Improve Readability:** Fix obvious spelling mistakes and grammatical errors. Use the overall conversation context to correct potentially misheard words or phrases where confident. Preserve technical terms or names if unsure. Remove excessive filler words (like 'um', 'uh', 'like') only if they severely hinder readability, but retain the natural conversational flow. Do not paraphrase or summarize.
-                        4.  **Format:** Ensure clear separation between speaker turns using the speaker labels followed by a colon and a newline. Use standard paragraph breaks for longer turns if appropriate.
-                        5.  **Output:** Provide *only* the refined, speaker-diarized, translated (where applicable), and corrected transcript text. Do not add any introduction, summary, or commentary before or after the transcript itself.
+                    **Additional Context (Optional - use for understanding terms, names, etc.):**
+                    {general_context if general_context else "None provided."}
 
-                        **Additional Context (Optional - use for understanding terms, names, etc.):**
-                        {general_context if general_context else "None provided."}
+                    **Refined Transcript:**
+                    """
+                    r_response = refinement_model.generate_content(
+                        refinement_prompt,
+                        generation_config=refinement_gen_config, safety_settings=safety_settings
+                    )
 
-                        **Refined Transcript:**
-                        """
-                        print(">>> DEBUG: Refinement prompt created. Calling generate_content...")
-                        r_response = refinement_model.generate_content(
-                            refinement_prompt,
-                            generation_config=refinement_gen_config, safety_settings=safety_settings
-                        )
-                        print(">>> DEBUG: Refinement generate_content call returned.")
-
-                        if r_response and hasattr(r_response, 'text') and r_response.text and r_response.text.strip():
-                            print(">>> DEBUG: Refinement response received and has text content.")
-                            st.session_state.refined_transcript = r_response.text.strip()
-                            final_source_transcript = st.session_state.refined_transcript # Update for Step 3
-                            status.update(label="🧹 Step 2: Source Refinement complete!")
-                            print(f">>> DEBUG: Refined transcript length: {len(st.session_state.refined_transcript)}")
-                        elif hasattr(r_response, 'prompt_feedback') and r_response.prompt_feedback.block_reason:
-                            print(f">>> DEBUG: Refinement BLOCKED. Reason: {r_response.prompt_feedback.block_reason}")
-                            st.warning(f"⚠️ Source Refinement blocked: {r_response.prompt_feedback.block_reason}. Using raw transcript for notes.", icon="⚠️")
-                            status.update(label="⚠️ Source Refinement blocked. Proceeding with raw transcript.")
-                        else:
-                            print(">>> DEBUG: Refinement response was empty or had no text.")
-                            st.warning("🤔 Source Refinement step returned empty response. Using raw transcript for notes.", icon="⚠️")
-                            status.update(label="⚠️ Source Refinement failed. Proceeding with raw transcript.")
-                    except Exception as refine_err:
-                         print(f">>> DEBUG: EXCEPTION during Step 2 Refinement: {refine_err}")
-                         st.warning(f"❌ Error during Step 2 (Source Refinement): {refine_err}. Using raw transcript for notes.", icon="⚠️")
-                         status.update(label="⚠️ Source Refinement error. Proceeding with raw transcript.")
-                else:
-                    print(">>> DEBUG: Condition FALSE. SKIPPING Step 2 Refinement block.")
-                    status.update(label="⚠️ Skipping Source Refinement (Step 2) as raw transcript is empty or invalid.")
-            # End of Audio Processing Block
+                    if r_response and hasattr(r_response, 'text') and r_response.text and r_response.text.strip():
+                        st.session_state.refined_transcript = r_response.text.strip()
+                        final_source_transcript = st.session_state.refined_transcript # Update for Step 3
+                        status.update(label="🧹 Step 2: Source Refinement complete!")
+                    elif hasattr(r_response, 'prompt_feedback') and r_response.prompt_feedback.block_reason:
+                        st.warning(f"⚠️ Source Refinement blocked: {r_response.prompt_feedback.block_reason}. Using raw transcript for notes.", icon="⚠️")
+                        status.update(label="⚠️ Source Refinement blocked. Proceeding with raw transcript.")
+                    else:
+                        st.warning("🤔 Source Refinement step returned empty response. Using raw transcript for notes.", icon="⚠️")
+                        status.update(label="⚠️ Source Refinement failed. Proceeding with raw transcript.")
+                except Exception as refine_err:
+                     st.warning(f"❌ Error during Step 2 (Source Refinement): {refine_err}. Using raw transcript for notes.", icon="⚠️")
+                     status.update(label="⚠️ Source Refinement error. Proceeding with raw transcript.")
+            elif final_source_transcript:
+                # This case handles when there's a transcript but refinement isn't needed (e.g., Earnings Call from PDF).
+                status.update(label="➡️ Skipping refinement (not required for this input/meeting type).")
 
             # --- 4. Prepare Final Prompt for Notes/Enrichment ---
             if not final_source_transcript:
