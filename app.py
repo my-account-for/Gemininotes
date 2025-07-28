@@ -679,7 +679,7 @@ if st.session_state.get('processing'):
                 audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=audio_format)
                 chunks = make_chunks(audio, 50 * 60 * 1000)
                 
-                # --- FIX IS HERE: Initialize the list before the loop ---
+                # --- CORRECTED: Initialize the list before the loop ---
                 all_transcripts = []
                 
                 for i, chunk in enumerate(chunks):
@@ -747,7 +747,14 @@ if st.session_state.get('processing'):
             # Step 3: Final Processing (Note Generation)
             status.update(label=f"📝 Step 3: Generating Notes...")
             final_api_prompt = get_prompt_display_text(for_display_only=True)
-            final_api_prompt = format_prompt_safe(final_api_prompt, transcript=final_source_transcript)
+            # This logic needs to be complete for all cases
+            expert_meeting_option = st.session_state.expert_meeting_prompt_option
+            earnings_call_topics_text = st.session_state.get('earnings_call_topics', "")
+            topic_instructions = ""
+            if earnings_call_topics_text:
+                formatted_topics = [f"- **{line.strip().strip(':')}**" if line.strip() and not line.strip().startswith(('-', '*', '#')) else line.strip() for line in earnings_call_topics_text.split('\n')]
+                topic_instructions = f"Structure notes under:\n" + "\n".join(formatted_topics) + "\n\n- **Other Key Points** (MANDATORY)"
+            final_api_prompt = format_prompt_safe(final_api_prompt, transcript=final_source_transcript, topic_instructions=topic_instructions)
             
             response = notes_model.generate_content(final_api_prompt, generation_config=main_gen_config)
             if not (response and hasattr(response, 'text') and response.text.strip()):
