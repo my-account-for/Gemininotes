@@ -13,7 +13,6 @@ import re
 from pydub import AudioSegment
 from pydub.utils import make_chunks
 import copy
-from streamlit_extras.copy_button import copy_button # CORRECT: Import for the copy button
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -688,12 +687,8 @@ with output_container:
 
         notes_content_to_use = st.session_state.edited_notes_text if st.session_state.edit_notes_enabled else st.session_state.generated_notes
         
-        # --- CORRECTED: Copy Button and Edit Toggle ---
-        col_out_1, col_out_2 = st.columns([1, 4])
-        with col_out_1:
-             copy_button(notes_content_to_use, "📋 Copy Notes")
-        with col_out_2:
-             st.checkbox("Edit Output", key="edit_notes_enabled", help="Toggle to manually edit the generated notes below.")
+        # --- REMOVED: Copy Button. Only Edit Toggle remains. ---
+        st.checkbox("Edit Output", key="edit_notes_enabled", help="Toggle to manually edit the generated notes below.")
 
         if st.session_state.get('edit_notes_enabled'):
             st.text_area("Editable Output:", value=notes_content_to_use, key="edited_notes_text", height=400, label_visibility="collapsed")
