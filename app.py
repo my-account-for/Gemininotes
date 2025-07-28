@@ -148,13 +148,19 @@ try:
     enrichment_gen_config = {"temperature": 0.4, "top_p": 1.0, "top_k": 32, "response_mime_type": "text/plain"}
     transcription_gen_config = {"temperature": 0.1, "response_mime_type": "text/plain"}
     refinement_gen_config = {"temperature": 0.3, "response_mime_type": "text/plain"}
+    
+    # Standard safety settings for most calls
     safety_settings = [{"category": c, "threshold": "BLOCK_MEDIUM_AND_ABOVE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
+    
+    # --- NEW: More relaxed safety settings specifically for the refinement step ---
+    safety_settings_relaxed = [{"category": c, "threshold": "BLOCK_ONLY_HIGH"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
+
 except Exception as e:
     st.error(f"### 💥 Error Configuring Google AI Client: {e}", icon="🚨")
     st.stop()
 
 
-# --- Prompts Definitions (RESTORED TO YOUR ORIGINAL VERSION) ---
+# --- Prompts Definitions (Your Original Prompts) ---
 PROMPTS = {
     "Expert Meeting": {
          "Option 1: Existing (Detailed & Strict)": """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.
@@ -369,7 +375,7 @@ default_state = {
 for key, value in default_state.items():
     if key not in st.session_state: st.session_state[key] = value
 
-# --- Helper Functions ---
+# --- Helper Functions (unchanged from original) ---
 def extract_text_from_pdf(pdf_file_stream):
     try:
         pdf_file_stream.seek(0)
@@ -798,12 +804,12 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
             general_context = st.session_state.get('context_input', "").strip() if st.session_state.add_context_enabled else None
             actual_input_type, source_transcript_data, source_audio_file_obj = get_current_input_data()
             
-            # Get Speaker Names from UI
             speaker_1_name = st.session_state.get('speaker_1_name', '').strip()
             speaker_2_name = st.session_state.get('speaker_2_name', '').strip()
 
             status.update(label="🧠 Initializing AI models...")
-            refinement_model = genai.GenerativeModel(refinement_model_id, safety_settings=safety_settings)
+            # --- UPDATED: Use relaxed settings for the refinement model ---
+            refinement_model = genai.GenerativeModel(refinement_model_id, safety_settings=safety_settings_relaxed)
             notes_model = genai.GenerativeModel(notes_model_id, safety_settings=safety_settings)
 
             status.update(label="✍️ Acquiring source transcript...")
@@ -846,14 +852,14 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                             chunk_file_ref = genai.get_file(chunk_file_ref.name)
                         if chunk_file_ref.state.name != "ACTIVE":
                             raise Exception(f"Audio chunk {chunk_num} failed. State: {chunk_file_ref.state.name}")
-                        t_response = transcription_model.generate_content(["Transcribe accurately.", chunk_file_ref], generation_config=transcription_gen_config)
+                        t_response = transcription_model.generate_content(["Transcribe accurately.", chunk_file_ref], generation_config=transcription_gen_config, safety_settings=safety_settings)
                         all_transcripts.append(t_response.text.strip() if t_response and hasattr(t_response, 'text') else "")
                 
                 st.session_state.raw_transcript = "\n\n".join(all_transcripts).strip()
                 final_source_transcript = st.session_state.raw_transcript
                 status.update(label="✅ Step 1: Full Source Transcription Complete!")
 
-            # Step 2: Transcript Refinement (with Speaker Name Logic)
+            # Step 2: Transcript Refinement
             should_refine = (actual_input_type == "Upload Audio") or \
                             (meeting_type == "Expert Meeting" and actual_input_type in ["Paste Text", "Upload PDF"])
 
@@ -884,7 +890,8 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
 
                 **Refined Transcript:**
                 """
-                r_response = refinement_model.generate_content(refinement_prompt, generation_config=refinement_gen_config, safety_settings=safety_settings)
+                # This call now uses the relaxed safety settings
+                r_response = refinement_model.generate_content(refinement_prompt, generation_config=refinement_gen_config)
 
                 if r_response and hasattr(r_response, 'text') and r_response.text.strip():
                     st.session_state.refined_transcript = r_response.text.strip()
@@ -906,7 +913,8 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
             response = notes_model.generate_content(final_api_prompt, generation_config=main_gen_config, safety_settings=safety_settings)
 
             if not (response and hasattr(response, 'text') and response.text.strip()):
-                raise Exception(f"{operation_desc} failed or returned empty. Block Reason: {getattr(response.prompt_feedback, 'block_reason', 'N/A')}")
+                reason = "Blocked" if hasattr(response, 'prompt_feedback') else "Empty Response"
+                raise Exception(f"{operation_desc} failed ({reason}).")
             
             generated_content = response.text.strip()
             
