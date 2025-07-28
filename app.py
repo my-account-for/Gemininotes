@@ -677,7 +677,7 @@ if st.session_state.get('processing'):
                 audio_format = os.path.splitext(source_audio_file_obj.name)[1].lower().replace('.', '')
                 if audio_format == 'm4a': audio_format = 'mp4'
                 audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=audio_format)
-                chunks = make_chunks(audio, 50 * 60 * 1000)
+                chunks = make_chunks(audio, 5 * 60 * 1000)
                 
                 # --- CORRECTED: Initialize the list before the loop ---
                 all_transcripts = []
