@@ -138,6 +138,7 @@ try:
     main_gen_config = {"temperature": 0.5, "top_p": 1.0, "top_k": 32, "response_mime_type": "text/plain"}
     summary_gen_config = {"temperature": 0.6, "top_p": 1.0, "top_k": 32, "response_mime_type": "text/plain"}
     refinement_gen_config = {"temperature": 0.2, "response_mime_type": "text/plain"}
+    transcription_gen_config = {"temperature": 0.1, "response_mime_type": "text/plain"}
     
     safety_settings = [{"category": c, "threshold": "BLOCK_MEDIUM_AND_ABOVE"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
     safety_settings_relaxed = [{"category": c, "threshold": "BLOCK_ONLY_HIGH"} for c in ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"]]
@@ -643,8 +644,13 @@ if generate_button:
     st.rerun()
 
 if st.session_state.get('processing'):
-    with st.spinner("Processing... This may take a moment."):
+    processed_audio_chunk_references = []
+    is_enrich_mode = st.session_state.selected_meeting_type == "Earnings Call" and st.session_state.earnings_call_mode == "Enrich Existing Notes"
+    operation_desc = "Enriching Notes" if is_enrich_mode else "Generating Notes"
+
+    with st.status(f"🚀 {operation_desc} in progress...", expanded=True) as status:
         try:
+            status.update(label="⚙️ Validating inputs...")
             is_valid_process, error_msg_process = validate_inputs()
             if not is_valid_process: raise ValueError(f"Input validation failed: {error_msg_process}")
             
@@ -652,53 +658,94 @@ if st.session_state.get('processing'):
             notes_model_id = AVAILABLE_MODELS[st.session_state.selected_notes_model_display_name]
             refinement_model_id = AVAILABLE_MODELS[st.session_state.selected_refinement_model_display_name]
             transcription_model_id = AVAILABLE_MODELS[st.session_state.selected_transcription_model_display_name]
-            actual_input_type, source_transcript_data, _ = get_current_input_data()
+            actual_input_type, source_transcript_data, source_audio_file_obj = get_current_input_data()
             speaker_1_name = st.session_state.get('speaker_1_name', '').strip()
             speaker_2_name = st.session_state.get('speaker_2_name', '').strip()
 
+            status.update(label="🧠 Initializing AI models...")
             refinement_model = genai.GenerativeModel(refinement_model_id, safety_settings=safety_settings_relaxed)
             notes_model = genai.GenerativeModel(notes_model_id, safety_settings=safety_settings)
             transcription_model = genai.GenerativeModel(transcription_model_id, safety_settings=safety_settings_relaxed)
 
             transcript_to_refine = None
+            
+            # Step 1: Get Text from Source
             if actual_input_type == "Upload Audio":
-                # ... (Full audio transcription loop)
+                status.update(label="🎤 Step 1: Transcribing Audio...")
+                if source_audio_file_obj is None: raise ValueError("Audio file not found.")
+                audio_bytes = source_audio_file_obj.getvalue()
+                audio_format = os.path.splitext(source_audio_file_obj.name)[1].lower().replace('.', '')
+                if audio_format == 'm4a': audio_format = 'mp4'
+                audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=audio_format)
+                chunks = make_chunks(audio, 50 * 60 * 1000)
+                
+                # --- FIX IS HERE: Initialize the list before the loop ---
+                all_transcripts = []
+                
+                for i, chunk in enumerate(chunks):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_chunk_file:
+                        chunk.export(temp_chunk_file.name, format="wav")
+                        chunk_file_ref = genai.upload_file(path=temp_chunk_file.name)
+                        processed_audio_chunk_references.append(chunk_file_ref)
+                        while chunk_file_ref.state.name == "PROCESSING": time.sleep(5)
+                        chunk_file_ref = genai.get_file(chunk_file_ref.name)
+                        if chunk_file_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk processing failed.")
+                        t_response = transcription_model.generate_content(["Transcribe this audio.", chunk_file_ref], generation_config=transcription_gen_config)
+                        all_transcripts.append(t_response.text.strip() if t_response and hasattr(t_response, 'text') else "")
+                
                 st.session_state.raw_transcript = "\n\n".join(all_transcripts).strip()
                 if not st.session_state.raw_transcript:
-                    raise ValueError("Audio transcription failed or produced no text.")
+                    raise ValueError("Audio transcription failed or produced no text. The audio may be silent or was blocked.")
                 transcript_to_refine = st.session_state.raw_transcript
-            else:
+                status.update(label="✅ Step 1: Transcription Complete!")
+            else: # Text or PDF input
+                status.update(label="📄 Step 1: Loading Text...")
                 st.session_state.raw_transcript = source_transcript_data
                 transcript_to_refine = source_transcript_data
+                status.update(label="✅ Step 1: Text Loaded!")
 
             final_source_transcript = transcript_to_refine
             st.session_state.refined_transcript = None
 
+            # Step 2: Refinement (Conditional)
             should_refine = (actual_input_type == "Upload Audio") or (meeting_type == "Expert Meeting")
             if transcript_to_refine and should_refine:
-                speaker_instructions = "Assign generic labels (e.g., Speaker 1, Speaker 2)."
+                status.update(label=f"🧹 Step 2: Refining Transcript...")
+                speaker_instructions = "Assign consistent generic labels (e.g., Speaker 1, Speaker 2)."
                 if speaker_1_name and speaker_2_name:
-                    speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these as labels."
+                    speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these names as labels."
                 elif speaker_1_name or speaker_2_name:
-                    speaker_instructions = f"One speaker is '{speaker_1_name or speaker_2_name}'. Use this as a label."
+                    speaker_instructions = f"One speaker is '{speaker_1_name or speaker_2_name}'. Use this name as a label."
+                
+                refinement_prompt = f"""You are an AI assistant that cleans up and formats transcripts. Refine the following source transcript.
 
-                refinement_prompt = f"""Refine the following transcript.
                 **Instructions:**
-                1.  **Identify and Label Speakers:** {speaker_instructions}
-                2.  **Correct & Clarify:** Fix spelling, grammar, or transcription artifacts.
-                3.  **Improve Readability:** Ensure clean separation between turns. Do not summarize.
-                4.  **Output ONLY the refined transcript.**
-                **Source Transcript:**\n{transcript_to_refine}"""
+                1.  **Identify and Label Speakers:** {speaker_instructions} Ensure each speaker's turn starts on a new line with their label (e.g., `Speaker 1:`).
+                2.  **Correct & Clarify:** Fix obvious spelling mistakes, grammatical errors, or transcription artifacts (if any).
+                3.  **Improve Readability:** Ensure clean separation between speaker turns and use standard paragraph formatting. Do not summarize or change the meaning.
+                4.  **Output ONLY the refined transcript text.**
+
+                **Source Transcript:**
+                ```
+                {transcript_to_refine}
+                ```
+
+                **Refined Transcript:**
+                """
                 
                 r_response = refinement_model.generate_content(refinement_prompt, generation_config=refinement_gen_config)
                 if r_response and hasattr(r_response, 'text') and r_response.text.strip():
                     st.session_state.refined_transcript = r_response.text.strip()
                     final_source_transcript = st.session_state.refined_transcript
+                    status.update(label="✅ Step 2: Refinement Complete!")
                 else:
-                    st.warning("⚠️ Refinement failed; using original transcript.")
-
-            if not final_source_transcript: raise ValueError("No transcript available.")
+                    st.warning("⚠️ Refinement step failed; using original transcript for notes.", icon="⚠️")
+                    status.update(label="⚠️ Step 2: Refinement failed. Proceeding with original transcript.")
             
+            if not final_source_transcript: raise ValueError("No source transcript available.")
+            
+            # Step 3: Final Processing (Note Generation)
+            status.update(label=f"📝 Step 3: Generating Notes...")
             final_api_prompt = get_prompt_display_text(for_display_only=True)
             final_api_prompt = format_prompt_safe(final_api_prompt, transcript=final_source_transcript)
             
@@ -709,6 +756,7 @@ if st.session_state.get('processing'):
             generated_content = response.text.strip()
             
             if meeting_type == "Expert Meeting" and st.session_state.expert_meeting_prompt_option == "Option 3: Option 2 + Executive Summary":
+                status.update(label="📄 Step 3b: Generating Executive Summary...")
                 summary_prompt = format_prompt_safe(PROMPTS["Expert Meeting"][EXPERT_MEETING_SUMMARY_PROMPT_KEY], generated_notes=generated_content)
                 summary_response = notes_model.generate_content(summary_prompt, generation_config=summary_gen_config)
                 if summary_response and hasattr(summary_response, 'text') and summary_response.text.strip():
@@ -722,11 +770,18 @@ if st.session_state.get('processing'):
             st.session_state.edited_notes_text = st.session_state.generated_notes
             add_to_history(st.session_state.generated_notes)
             st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type)
+            status.update(label="✅ Success!", state="complete")
 
         except Exception as e:
             st.session_state.error_message = f"❌ Processing Error: {e}"
+            status.update(label=f"❌ Error: {e}", state="error")
         finally:
             st.session_state.processing = False
+            if processed_audio_chunk_references:
+                st.toast(f"☁️ Cleaning up {len(processed_audio_chunk_references)} cloud audio chunk(s)...", icon="🗑️")
+                for file_ref in processed_audio_chunk_references:
+                    try: genai.delete_file(file_ref.name)
+                    except Exception as cleanup_error: st.warning(f"Cleanup failed for {file_ref.name}: {cleanup_error}")
             st.rerun()
 
 # --- Footer ---
