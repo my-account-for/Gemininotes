@@ -154,23 +154,23 @@ except Exception as e:
     st.stop()
 
 
-# --- Prompts Definitions (with Notion Formatting) ---
+# --- Prompts Definitions (RESTORED TO YOUR ORIGINAL VERSION) ---
 PROMPTS = {
     "Expert Meeting": {
-        "Option 1: Existing (Detailed & Strict)": """You are an expert meeting note-taker analyzing a transcript for an investment firm. Your final output must be formatted for Notion.
+         "Option 1: Existing (Detailed & Strict)": """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.
 Generate detailed, factual notes from the provided meeting transcript.
 Follow this specific structure EXACTLY:
 
 **Structure:**
-- **Opening overview or Expert background (Optional):** If present, include this FIRST as standard bullet points.
-- **Q&A format (Notion Toggle List):** Structure the main body as a Notion-style toggle list.
-  - **Question (Toggle Header):** Format each question as a toggle header. Example: `> **Q: What is the market outlook?**`
-  - **Answer (Inside Toggle):** The answer must be indented under the question toggle. Use standard bullet points (`- `) for the answer. Each bullet MUST be a complete sentence representing one single, distinct factual point. Capture ALL specifics (data, names, examples, $, %, etc.). DO NOT use sub-bullets.
+- **Opening overview or Expert background (Optional):** If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple language. DO NOT summarize.
+- **Q&A format:** Structure the main body STRICTLY in Question/Answer format.
+  - **Questions:** Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).
+  - **Answers:** Use bullet points directly below the question. **Each bullet MUST be a complete sentence representing one single, distinct factual point.** Capture ALL specifics (data, names, examples, $, %, etc.). DO NOT use sub-bullets or section headers within answers. **DO NOT add interpretations, summaries, conclusions, or action items not explicitly stated in the transcript.**
 
 **Additional Instructions:**
 - Accuracy is paramount. Capture ALL facts precisely.
-- Adhere strictly to one fact per bullet point.
-- Include ONLY information present in the transcript. DO NOT add interpretations, summaries, or conclusions not explicitly stated.
+- Be clear and concise, adhering strictly to one fact per bullet point.
+- Include ONLY information present in the transcript. DO NOT add external information.
 - If a section (like Opening Overview) isn't present, OMIT it.
 ---
 **MEETING TRANSCRIPT:**
@@ -178,53 +178,80 @@ Follow this specific structure EXACTLY:
 ---
 {context_section}
 ---
-**GENERATED NOTES (Notion Toggle Format - Strict):**
+**GENERATED NOTES (Q&A Format - Strict):**
 """,
-        "Option 2: Less Verbose (Default)": """You are an expert meeting note-taker analyzing a transcript for an investment firm. Your final output must be formatted for Notion.
+        "Option 2: Less Verbose (Default)": """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.
 Generate detailed, factual notes from the provided meeting transcript.
 Follow this specific structure EXACTLY:
 
-**Structure:**
-- **Opening overview or Expert background (Optional):** If present, include this FIRST as standard bullet points.
-- **Q&A format (Notion Toggle List):** Structure the main body as a Notion-style toggle list.
-  - **Question (Toggle Header):** Format each question as a toggle header. Example: `> **Q: What is the market outlook?**`
-  - **Answer (Inside Toggle):** The answer must be indented under the question toggle. Use standard bullet points (`- `) for the answer. Each bullet should convey specific factual information using clear, complete sentences. While focusing on distinct facts, you can combine closely related or consecutive points into a single sentence IF it enhances readability AND does not reduce factual detail.
+Structure:
 
-**Additional Instructions:**
-- Capture ALL specifics (data, names, examples, $, %, etc.).
-- Do not add interpretations, summaries, or action items not explicitly stated.
-- Include ONLY information present in the transcript.
----
+Opening overview or Expert background (Optional):
+If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
+Capture ALL details (names, dates, numbers, etc.). Use simple, direct language. DO NOT omit or paraphrase any factual elements. DO NOT summarize.
+
+Q&A format: Structure the main body STRICTLY in Question/Answer format.
+
+Questions: Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly (e.g., 'Q:' or bold).
+
+Answers: Use bullet points directly below the question.
+
+Each bullet point should convey specific factual information using clear, complete sentences.
+
+DO NOT skip, combine, condense, or generalize facts. Every distinct factual point—name, example, data, step, or statement—must be captured in full.
+
+Strive for natural sentence flow. While focusing on distinct facts, combine only closely related or consecutive points into a single sentence IF it enhances readability AND does not reduce factual detail.
+
+Capture ALL specifics (data, names, examples, $, %, etc.).
+
+DO NOT use sub-bullets or section headers within answers.
+
+DO NOT add interpretations, summaries, reworded conclusions, or inferred action items not explicitly stated in the transcript.
+
+Additional Instructions:
+
+Accuracy is paramount. Capture ALL facts precisely.
+
+Do not exclude any speaker’s contributions, even if they seem minor or repetitive.
+
+Be meticulous. Err on the side of including all stated facts, even if they appear redundant or obvious.
+
+Write clearly and concisely, avoiding unnecessary words. Favor informative sentences over overly simplistic ones.
+
+Include ONLY information present in the transcript. DO NOT add external information.
+
+If a section (like Opening Overview) isn't present, OMIT it.
 **MEETING TRANSCRIPT:**
 {transcript}
 ---
 {context_section}
 ---
-**GENERATED NOTES (Notion Toggle Format - Concise):**
+**GENERATED NOTES (Q&A Format - Concise):**
 """,
-        "Summary Prompt (for Option 3)": """IMPORTANT: Enclose the entire final executive summary in a single Notion-style 'light bulb' callout block (using the `> 💡` syntax at the start of the block).
+        "Summary Prompt (for Option 3)": """Based ONLY on the detailed 'GENERATED NOTES (Q&A Format - Concise)' provided below, create a concise executive summary highlighting the most significant insights, findings, or critical points discussed.
 
-Based ONLY on the detailed 'GENERATED NOTES' provided below, create a concise executive summary highlighting the most significant insights, findings, or critical points discussed.
-
-**Format (Inside the Callout Block):**
+**Format:**
 1.  Identify the main themes or key topics discussed in the notes (e.g., **GenAI Impact**, **Vendor Landscape**, **Genpact Specifics**). Create a clear, concise heading for each theme using bold text.
 2.  Under each heading, use primary bullet points (`- `) to list the most significant insights, findings, or critical points related to that theme.
-3.  Each bullet point should represent a single, distinct key takeaway. DO NOT use indented sub-bullets.
+3.  **Crucially: Each bullet point should represent a single, distinct key takeaway or significant piece of information.** DO NOT use indented sub-bullets or nested lists. If a point has multiple important facets, break them down into separate primary bullet points under the same theme heading.
+4.  Focus on synthesizing the key takeaways from the detailed Q&A points. These bullets should represent crucial insights. **DO NOT list minor details or repeat verbatim points from the Q&A.**
 
 **Instructions:**
 - Aim for a total summary length of approximately 500-1000 words.
-- Maintain an objective and professional tone.
-- Do not introduce any information or conclusions not explicitly supported by the GENERATED NOTES provided below.
+- Maintain an objective and professional tone, reflecting the expert's views accurately.
+- Ensure the summary accurately reflects the content and emphasis of the detailed notes it is based on.
+- **Do not introduce any information, conclusions, or opinions not explicitly supported by the GENERATED NOTES provided below.**
+- **DO NOT hallucinate or invent details.**
 
 ---
 **GENERATED NOTES (Input for Summary):**
 {generated_notes}
 ---
 
-**EXECUTIVE SUMMARY (Notion Callout Format):**
+**EXECUTIVE SUMMARY:**
 """
     },
-    "Earnings Call": { # Kept as standard markdown as toggles might be less readable here
+    "Earnings Call": {
         "Generate New Notes": """You are an expert AI assistant creating DETAILED yet CONCISE notes from an earnings call transcript for an investment firm.
 Output MUST be comprehensive, factual notes, capturing all critical financial and strategic information with **crisp language**.
 
@@ -524,7 +551,11 @@ def generate_suggested_filename(notes_content, meeting_type):
         filename_model = genai.GenerativeModel("gemini-1.5-flash", safety_settings=safety_settings)
         today_date = datetime.now().strftime("%Y%m%d")
         mt_cleaned = meeting_type.replace(" ", "_").lower()
-        notes_preview = notes_content.split("\n\n---\n\n> 💡", 1)[0] if "> 💡" in notes_content else notes_content
+        summary_marker = "\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n"
+        if summary_marker in notes_content:
+            notes_preview = notes_content.split(summary_marker)[0]
+        else:
+            notes_preview = notes_content
         filename_prompt = (f"Suggest a concise filename (max 5 words, use underscores_not_spaces). Start with {today_date}_{mt_cleaned}. Base on key topics/names from these notes. Output ONLY the filename string (e.g., {today_date}_{mt_cleaned}_topic.txt). NOTES:\n{notes_preview[:1000]}")
         response = filename_model.generate_content(filename_prompt, generation_config=filename_gen_config, safety_settings=safety_settings)
         if response and hasattr(response, 'text') and response.text:
@@ -565,7 +596,7 @@ def restore_note_from_history(index):
 
 # --- Streamlit App UI ---
 st.title("✨ SynthNotes AI")
-st.markdown("Instantly transform meeting recordings into structured, Notion-ready notes.")
+st.markdown("Instantly transform meeting recordings into structured, factual notes.")
 
 # --- Settings Container ---
 with st.container(border=True):
@@ -578,7 +609,7 @@ with st.container(border=True):
             st.radio("Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type", horizontal=True,
                      on_change=lambda: st.session_state.update(current_prompt_text="", view_edit_prompt_enabled=False))
 
-            # NEW: Speaker Name Inputs
+            # Speaker Name Inputs
             st.text_input("Speaker 1 Name (Optional):", key="speaker_1_name", placeholder="e.g., John Doe - Expert")
             st.text_input("Speaker 2 Name (Optional):", key="speaker_2_name", placeholder="e.g., Jane Smith - Analyst")
 
@@ -597,7 +628,7 @@ with st.container(border=True):
     if st.session_state.get('selected_meeting_type') == "Expert Meeting":
          st.radio(
             "Expert Meeting Note Style:", options=EXPERT_MEETING_OPTIONS, key="expert_meeting_prompt_option",
-            help="Choose output format. All options generate Notion-friendly toggle lists.", horizontal=True,
+            help="Choose the output format for the expert meeting notes.", horizontal=True,
             on_change=lambda: st.session_state.update(current_prompt_text="", view_edit_prompt_enabled=False)
         )
     elif st.session_state.get('selected_meeting_type') == "Earnings Call":
@@ -687,13 +718,11 @@ with output_container:
 
         notes_content_to_use = st.session_state.edited_notes_text if st.session_state.edit_notes_enabled else st.session_state.generated_notes
         
-        # --- REMOVED: Copy Button. Only Edit Toggle remains. ---
         st.checkbox("Edit Output", key="edit_notes_enabled", help="Toggle to manually edit the generated notes below.")
 
         if st.session_state.get('edit_notes_enabled'):
             st.text_area("Editable Output:", value=notes_content_to_use, key="edited_notes_text", height=400, label_visibility="collapsed")
         else:
-            # The markdown renderer in Streamlit won't show toggles/callouts perfectly, but the raw text will be correct for Notion
             st.markdown(notes_content_to_use)
 
         st.markdown("---")
@@ -769,7 +798,7 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
             general_context = st.session_state.get('context_input', "").strip() if st.session_state.add_context_enabled else None
             actual_input_type, source_transcript_data, source_audio_file_obj = get_current_input_data()
             
-            # --- Get Speaker Names from UI ---
+            # Get Speaker Names from UI
             speaker_1_name = st.session_state.get('speaker_1_name', '').strip()
             speaker_2_name = st.session_state.get('speaker_2_name', '').strip()
 
@@ -824,7 +853,7 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                 final_source_transcript = st.session_state.raw_transcript
                 status.update(label="✅ Step 1: Full Source Transcription Complete!")
 
-            # --- Step 2: Transcript Refinement (with Speaker Name Logic) ---
+            # Step 2: Transcript Refinement (with Speaker Name Logic)
             should_refine = (actual_input_type == "Upload Audio") or \
                             (meeting_type == "Expert Meeting" and actual_input_type in ["Paste Text", "Upload PDF"])
 
@@ -868,9 +897,8 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
             if not final_source_transcript:
                  raise ValueError("No source transcript available to generate notes.")
                  
-            # --- Step 3: Prepare and Execute Final Prompt ---
+            # Step 3: Prepare and Execute Final Prompt
             status.update(label=f"📝 Preparing final prompt for {operation_desc}...")
-            # This unified logic reuses the display function to build the correct prompt
             final_api_prompt = get_prompt_display_text(for_display_only=True)
             final_api_prompt = format_prompt_safe(final_api_prompt, transcript=final_source_transcript, context_section=f"\n**ADDITIONAL CONTEXT:**\n{general_context}\n---" if general_context else "")
             
@@ -888,8 +916,7 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                 summary_prompt = format_prompt_safe(PROMPTS["Expert Meeting"][EXPERT_MEETING_SUMMARY_PROMPT_KEY], generated_notes=generated_content)
                 summary_response = notes_model.generate_content(summary_prompt, generation_config=summary_gen_config, safety_settings=safety_settings)
                 if summary_response and hasattr(summary_response, 'text') and summary_response.text.strip():
-                    # The prompt asks for Notion format, so we just append it
-                    st.session_state.generated_notes = f"{generated_content}\n\n---\n\n{summary_response.text.strip()}"
+                    st.session_state.generated_notes = f"{generated_content}\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{summary_response.text.strip()}"
                 else:
                     st.warning("⚠️ Summary generation failed. Providing detailed notes only.", icon="⚠️")
                     st.session_state.generated_notes = generated_content
