@@ -691,7 +691,7 @@ with output_container:
         # --- NEW: Copy Button and Edit Toggle ---
         col_out_1, col_out_2 = st.columns([1, 4])
         with col_out_1:
-             copy_button(notes_content_to_use, "📋 Copy Notes")
+             copy_button(text=notes_content_to_use, label="📋 Copy Notes")
         with col_out_2:
              st.checkbox("Edit Output", key="edit_notes_enabled", help="Toggle to manually edit the generated notes below.")
 
