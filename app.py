@@ -13,7 +13,8 @@ import re
 from pydub import AudioSegment
 from pydub.utils import make_chunks
 import copy
-from streamlit_copy_to_clipboard import st_copy_to_clipboard as copy_button
+from streamlit_extras.copy_button import copy_button # CORRECT: Import for the copy button
+
 # --- Page Configuration ---
 st.set_page_config(
     page_title="SynthNotes AI ✨", page_icon="✨", layout="wide", initial_sidebar_state="collapsed"
@@ -524,7 +525,7 @@ def generate_suggested_filename(notes_content, meeting_type):
         filename_model = genai.GenerativeModel("gemini-1.5-flash", safety_settings=safety_settings)
         today_date = datetime.now().strftime("%Y%m%d")
         mt_cleaned = meeting_type.replace(" ", "_").lower()
-        notes_preview = notes_content.split("\n\n---\n\n> 💡 **EXECUTIVE SUMMARY:**\n\n", 1)[0] if "> 💡" in notes_content else notes_content
+        notes_preview = notes_content.split("\n\n---\n\n> 💡", 1)[0] if "> 💡" in notes_content else notes_content
         filename_prompt = (f"Suggest a concise filename (max 5 words, use underscores_not_spaces). Start with {today_date}_{mt_cleaned}. Base on key topics/names from these notes. Output ONLY the filename string (e.g., {today_date}_{mt_cleaned}_topic.txt). NOTES:\n{notes_preview[:1000]}")
         response = filename_model.generate_content(filename_prompt, generation_config=filename_gen_config, safety_settings=safety_settings)
         if response and hasattr(response, 'text') and response.text:
@@ -687,10 +688,10 @@ with output_container:
 
         notes_content_to_use = st.session_state.edited_notes_text if st.session_state.edit_notes_enabled else st.session_state.generated_notes
         
-        # --- NEW: Copy Button and Edit Toggle ---
+        # --- CORRECTED: Copy Button and Edit Toggle ---
         col_out_1, col_out_2 = st.columns([1, 4])
         with col_out_1:
-             copy_button(text=notes_content_to_use, label="📋 Copy Notes")
+             copy_button(notes_content_to_use, "📋 Copy Notes")
         with col_out_2:
              st.checkbox("Edit Output", key="edit_notes_enabled", help="Toggle to manually edit the generated notes below.")
 
@@ -794,7 +795,14 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                 status.update(label=f"🔊 Loading source audio '{source_audio_file_obj.name}'...")
                 audio_bytes, file_extension = source_audio_file_obj.getvalue(), os.path.splitext(source_audio_file_obj.name)[1].lower().replace('.', '')
                 audio_format = 'mp4' if file_extension == 'm4a' else file_extension
-                audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=audio_format)
+                
+                try:
+                    audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=audio_format)
+                except Exception as audio_load_err:
+                     if "ffmpeg" in str(audio_load_err).lower():
+                         raise ValueError(f"❌ **Error:** Could not load audio. `ffmpeg` might be missing on the server. Ensure `ffmpeg` is in your packages.txt file. (Original error: {audio_load_err})")
+                     else:
+                         raise ValueError(f"❌ Could not load audio file. Ensure it is valid. Error: {audio_load_err}")
 
                 chunks = make_chunks(audio, 50 * 60 * 1000)
                 status.update(label=f"🔪 Splitting audio into {len(chunks)} chunk(s)...")
@@ -867,7 +875,8 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                  
             # --- Step 3: Prepare and Execute Final Prompt ---
             status.update(label=f"📝 Preparing final prompt for {operation_desc}...")
-            final_api_prompt = get_prompt_display_text(for_display_only=True) # Re-use display logic for processing
+            # This unified logic reuses the display function to build the correct prompt
+            final_api_prompt = get_prompt_display_text(for_display_only=True)
             final_api_prompt = format_prompt_safe(final_api_prompt, transcript=final_source_transcript, context_section=f"\n**ADDITIONAL CONTEXT:**\n{general_context}\n---" if general_context else "")
             
             status.update(label=f"✨ Step 3: {operation_desc}...")
@@ -884,6 +893,7 @@ if st.session_state.get('processing') and not st.session_state.get('generating_f
                 summary_prompt = format_prompt_safe(PROMPTS["Expert Meeting"][EXPERT_MEETING_SUMMARY_PROMPT_KEY], generated_notes=generated_content)
                 summary_response = notes_model.generate_content(summary_prompt, generation_config=summary_gen_config, safety_settings=safety_settings)
                 if summary_response and hasattr(summary_response, 'text') and summary_response.text.strip():
+                    # The prompt asks for Notion format, so we just append it
                     st.session_state.generated_notes = f"{generated_content}\n\n---\n\n{summary_response.text.strip()}"
                 else:
                     st.warning("⚠️ Summary generation failed. Providing detailed notes only.", icon="⚠️")
