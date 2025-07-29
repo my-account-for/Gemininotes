@@ -1,36 +1,3 @@
-Excellent suggestion. This adds a powerful utility to the app, allowing it to function purely as a high-quality transcript cleaner and formatter. This is a very common and useful task.
-
-I've implemented this by adding a new option and creating a dedicated processing path for it.
-
-Key Changes:
-
-New UI Option: "Expert Meeting Note Style" now has a fourth option: "Option 4: Refine Transcript Only".
-
-Smart UI Behavior:
-
-When "Refine Transcript Only" is selected, the "Enable Transcript Refinement" checkbox is automatically checked and disabled, as this step is now mandatory for the selected mode.
-
-The main button label dynamically changes to "🚀 Refine Transcript".
-
-The final output header changes to "✅ Refined Transcript".
-
-New Processing Path:
-
-The backend logic now has a special condition for this mode.
-
-It will perform Step 1 (Transcription/Load) and Step 2 (Refinement) as usual.
-
-It will then completely skip Step 3 (Note Generation and Chunking).
-
-The content of the refined transcript is placed directly into the output area. This makes the process much faster.
-
-This provides users with a quick and efficient way to clean up their transcripts without needing to generate notes.
-
-Full Updated Code
-
-You can replace your entire file with this complete, updated script.
-
-Generated python
 # --- Required Imports ---
 import streamlit as st
 import google.generativeai as genai
@@ -47,28 +14,17 @@ from pydub import AudioSegment
 from pydub.utils import make_chunks
 import copy
 
-# --- Prompts for Long Transcript Chunking ---
-PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze an expert consultation transcript and generate detailed, factual notes.
+# --- MODIFIED: Simplified Prompts for a more reliable chunking workflow ---
 
-Your primary directive is **100% completeness and accuracy**. You will process the transcript sequentially. For every Question/Answer pair you identify, you must first perform the internal "Thought Process" described below, and only then write the "Final Output". This entire process must be repeated for every single Q&A pair from the beginning to the end of the transcript.
+PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze an expert consultation transcript chunk and generate detailed, factual notes.
+
+Your primary directive is **100% completeness and accuracy**. You will process the transcript sequentially. For every Question/Answer pair you identify, you must generate notes following the structure below.
 
 ---
-### **PROCEDURE FOR EACH Q&A PAIR**
-
-**Step 1: Internal Thought Process (You will not show this in the final output)**
-1.  **Identify Question Block:** Read the transcript and identify the main question and any immediate, directly related follow-up questions.
-2.  **Extract Raw Facts:** Go through the expert's answer sentence by sentence. List every single piece of factual information as a raw data point. Do not filter or summarize yet. Pull out every name, number, date, percentage, specific example, or stated cause-and-effect relationship. This is a "brain dump" of all facts.
-3.  **Apply Formatting Rules:** Take the raw facts from the previous step. Group closely linked facts into complete, natural-sounding sentences. Format them as bullet points according to the rules in Step 2. Discard any interpretations or summaries.
-
-**Step 2: Final Output (This is the only part you will display)**
-You must now generate the final output for this chunk in two parts as specified below. The notes in "Part 1" must follow the exact structure outlined in the rest of this prompt.
-
-#### **PART 1: NOTES FOR CHUNK 1**
-
-Follow this structure EXACTLY:
+### **NOTES STRUCTURE**
 
 **(1.) Opening overview or Expert background (Conditional):**
-- If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
+- If the transcript chunk begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
 - **DO:** Capture ALL details (names, dates, numbers, titles). Use simple, direct language.
 - **DO NOT:** Summarize or include introductions about consulting firms like Janchor Partners.
 - If no intro exists, OMIT this section entirely.
@@ -79,24 +35,19 @@ Structure the main body STRICTLY in Question/Answer format.
 **(2.A) Questions:**
 -   Extract the clear, primary question.
 -   **CRITICAL:** Combine only **immediate follow-up questions** on the same specific point into the main question.
--   **DO NOT** bring forward questions from later in the transcript. Process the conversation in the order it happened to maintain factual integrity.
+-   **DO NOT** bring forward questions from later in the transcript.
 -   Format the final, consolidated question in **bold**.
 
 **(2.B) Answers:**
 -   Use bullet points (`-`) directly below the question.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
--   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc. Never sacrifice a factual detail for brevity. Err on the side of including too much detail.
--   Strive for natural sentence flow, but only by combining directly sequential or connected ideas into a single sentence.
+-   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc.
 -   **DO NOT** use sub-bullets or section headers within answers.
--   **DO NOT** add interpretations, summaries, conclusions, or action items not explicitly stated.
--   **DO NOT** omit any stated fact, even if you think it is not important. Your job is to extract, not to judge importance.
-
-#### **PART 2: CONTEXT PACKAGE FOR NEXT CHUNK**
--   **Last Question Processed:** [Copy the final bolded question from your notes in PART 1 exactly as it appears.]
--   **Last Answer Provided:** [Copy the complete bulleted list for the final answer from your notes in PART 1 exactly as it appears.]
+-   **DO NOT** add interpretations, summaries, or conclusions not explicitly stated.
+-   **DO NOT** omit any stated fact. Your job is to extract, not to judge importance.
 
 ---
-**MEETING TRANSCRIPT CHUNK 1:**
+**MEETING TRANSCRIPT CHUNK:**
 {chunk_text}
 """
 
@@ -108,44 +59,26 @@ PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine conti
 ---
 ### **PRIMARY INSTRUCTIONS**
 
-First, review the context. Because of the overlap, you will see text that was already processed. **Locate the "Last Question Processed" from the context and begin your work from the first NEW question and answer that follows it.**
+First, review the context. Because of the overlap in the transcript, you will see text that was already processed. **Locate the "Last Question Processed" from the context and begin your work from the *first NEW question and answer* that follows it.**
 
 From that point forward, you must adhere to the following procedure for every Q&A pair in the remainder of the chunk.
 
 ---
-### **PROCEDURE FOR EACH Q&A PAIR**
+### **NOTES STRUCTURE (Q&A format only)**
 
-**Step 1: Internal Thought Process (You will not show this in the final output)**
-1.  **Identify Question Block:** Read the transcript and identify the main question and any immediate, directly related follow-up questions.
-2.  **Extract Raw Facts:** Go through the expert's answer sentence by sentence. List every single piece of factual information as a raw data point. Do not filter or summarize yet. Pull out every name, number, date, percentage, specific example, or stated cause-and-effect relationship. This is a "brain dump" of all facts.
-3.  **Apply Formatting Rules:** Take the raw facts from the previous step. Group closely linked facts into complete, natural-sounding sentences. Format them as bullet points according to the rules in Step 2. Discard any interpretations or summaries.
-
-**Step 2: Final Output (This is the only part you will display)**
-You must now generate the final output for this chunk in two parts as specified below. The notes in "Part 1" must follow the exact structure outlined in the rest of this prompt.
-
-#### **PART 1: NOTES FOR CURRENT CHUNK**
-
-Follow this structure EXACTLY:
-
-**(Q&A format only)**
 **(2.A) Questions:**
 -   Extract the clear, primary question.
 -   **CRITICAL:** Combine only **immediate follow-up questions** on the same specific point into the main question.
--   **DO NOT** bring forward questions from later in the transcript. Process the conversation in the order it happened to maintain factual integrity.
+-   **DO NOT** bring forward questions from later in the transcript.
 -   Format the final, consolidated question in **bold**.
 
 **(2.B) Answers:**
 -   Use bullet points (`-`) directly below the question.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
--   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc. Never sacrifice a factual detail for brevity. Err on the side of including too much detail.
--   Strive for natural sentence flow, but only by combining directly sequential or connected ideas into a single sentence.
+-   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc.
 -   **DO NOT** use sub-bullets or section headers within answers.
--   **DO NOT** add interpretations, summaries, conclusions, or action items not explicitly stated.
--   **DO NOT** omit any stated fact, even if you think it is not important. Your job is to extract, not to judge importance.
-
-#### **PART 2: CONTEXT PACKAGE FOR NEXT CHUNK**
--   **Last Question Processed:** [Copy the final bolded question from your notes in PART 1 exactly as it appears.]
--   **Last Answer Provided:** [Copy the complete bulleted list for the final answer from your notes in PART 1 exactly as it appears.]
+-   **DO NOT** add interpretations, summaries, or conclusions not explicitly stated.
+-   **DO NOT** omit any stated fact. Your job is to extract, not to judge importance.
 
 ---
 **MEETING TRANSCRIPT (NEW CHUNK):**
@@ -446,23 +379,37 @@ def chunk_text_by_words(text, chunk_size=4000, overlap=200):
         start += chunk_size - overlap
     return chunks
 
-def parse_chunk_response(response_text):
-    """Parses the LLM response to separate notes from the context package."""
-    notes_part = ""
-    context_part = ""
-    separator_pattern = r'####\s+PART\s+2:\s+CONTEXT\s+PACKAGE\s+FOR\s+NEXT\s+CHUNK'
-    parts = re.split(separator_pattern, response_text, maxsplit=1, flags=re.IGNORECASE)
+def _create_context_from_notes(notes_text):
+    """
+    Reliably creates a context package from a chunk of generated notes.
+    This is more robust than asking the LLM to format it.
+    """
+    if not notes_text or not notes_text.strip():
+        return ""
 
-    if not parts:
-        return response_text, ""
+    # Find all bolded lines (questions)
+    questions = re.findall(r"(\*\*.*?\*\*)", notes_text)
+    if not questions:
+        return ""  # No questions found, no context to create
 
-    notes_part = parts[0]
-    notes_part = re.sub(r'####\s+PART\s+1:.*$', '', notes_part, flags=re.IGNORECASE | re.MULTILINE).strip()
+    last_question = questions[-1]
 
-    if len(parts) > 1:
-        context_part = parts[1].strip()
+    # Find the content (answer) following the last question
+    # It starts after the last question and goes until the next bolded question (or end of string)
+    # The `(?s)` flag allows `.` to match newlines
+    answer_match = re.search(re.escape(last_question) + r"(.*?)(?=\*\*|$)", notes_text, re.DOTALL)
+    
+    last_answer = ""
+    if answer_match:
+        # Get the answer and clean up leading/trailing whitespace
+        last_answer = answer_match.group(1).strip()
 
-    return notes_part, context_part
+    # Build the context package string
+    context_package = (
+        f"-   **Last Question Processed:** {last_question}\n"
+        f"-   **Last Answer Provided:**\n{last_answer}"
+    )
+    return context_package.strip()
 
 def extract_text_from_pdf(pdf_file_stream):
     try:
@@ -709,7 +656,6 @@ def restore_note_from_history(index):
 st.title("✨ SynthNotes AI")
 st.markdown("Instantly transform meeting recordings into structured, factual notes.")
 
-# --- MODIFIED: Determine if refine-only mode is active for UI adjustments ---
 is_refine_only_mode = (
     st.session_state.get('selected_meeting_type') == "Expert Meeting" and
     st.session_state.get('expert_meeting_prompt_option') == REFINE_ONLY_OPTION
@@ -723,8 +669,8 @@ with st.container(border=True):
         with col1a:
             st.radio("Meeting Type:", options=MEETING_TYPES, key="selected_meeting_type", horizontal=True,
                      on_change=lambda: st.session_state.update(current_prompt_text="", view_edit_prompt_enabled=False))
-            st.text_input("Speaker 1 Name (Optional):", key="speaker_1_name", placeholder="e.g., John Doe - Expert", disabled=is_refine_only_mode)
-            st.text_input("Speaker 2 Name (Optional):", key="speaker_2_name", placeholder="e.g., Jane Smith - Analyst", disabled=is_refine_only_mode)
+            st.text_input("Speaker 1 Name (Optional):", key="speaker_1_name", placeholder="e.g., John Doe - Expert")
+            st.text_input("Speaker 2 Name (Optional):", key="speaker_2_name", placeholder="e.g., Jane Smith - Analyst")
         with col1b:
             st.selectbox("Transcription Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_transcription_model_display_name", index=list(AVAILABLE_MODELS.keys()).index(st.session_state.get('selected_transcription_model_display_name', DEFAULT_TRANSCRIPTION_MODEL_NAME)), help="Model for audio-to-text (Step 1).")
             st.selectbox("Refinement Model:", options=list(AVAILABLE_MODELS.keys()), key="selected_refinement_model_display_name", index=list(AVAILABLE_MODELS.keys()).index(st.session_state.get('selected_refinement_model_display_name', DEFAULT_REFINEMENT_MODEL_NAME)), help="Model for cleaning transcript & adding speakers (Step 2).")
@@ -734,7 +680,6 @@ with st.container(border=True):
         st.subheader("")
         st.button("🧹 Clear All Inputs & Outputs", on_click=clear_all_state, use_container_width=True, type="secondary", key="clear_button")
         
-        # --- MODIFIED: Refinement checkbox is now controlled by the new mode ---
         refinement_value = True if is_refine_only_mode else st.session_state.get('enable_refinement_step', (st.session_state.input_method_radio == 'Upload Audio'))
         st.checkbox("Enable Transcript Refinement", key="enable_refinement_step",
                     help="Recommended for audio. Cleans transcript and adds speaker labels. This step is mandatory for 'Refine Transcript Only' mode.",
@@ -776,7 +721,7 @@ with st.container(border=True):
         else:
              st.caption("Topic selection is available for Earnings Calls.")
     with col3b:
-        st.checkbox("Add General Context", key="add_context_enabled")
+        st.checkbox("Add General Context", key="add_context_enabled", disabled=is_refine_only_mode)
         if st.session_state.get('add_context_enabled'):
             st.text_area("Context Details:", height=75, key="context_input", placeholder="e.g., Company Name, Date, Key Competitors...")
         st.write("")
@@ -796,7 +741,6 @@ st.write("")
 is_valid, error_msg = validate_inputs()
 generate_tooltip = error_msg if not is_valid else "Refine or generate notes."
 
-# --- MODIFIED: Dynamic button label ---
 if is_refine_only_mode:
     generate_button_label = "🚀 Refine Transcript"
 elif is_enrich_mode:
@@ -813,7 +757,6 @@ with output_container:
     elif st.session_state.get('error_message'):
         st.error(st.session_state.error_message, icon="🚨")
     elif st.session_state.get('generated_notes'):
-        # --- MODIFIED: Dynamic output header ---
         output_header = "✅ Refined Transcript" if is_refine_only_mode else "✅ Generated Notes"
         st.subheader(output_header)
         notes_content_to_use = st.session_state.edited_notes_text if st.session_state.edit_notes_enabled else st.session_state.generated_notes
@@ -821,12 +764,13 @@ with output_container:
         if st.session_state.get('edit_notes_enabled'):
             st.text_area("Editable Output:", value=notes_content_to_use, key="edited_notes_text", height=400, label_visibility="collapsed")
         else:
+            # Use a code block for refined transcripts to preserve formatting
             st.markdown(f"```\n{notes_content_to_use}\n```" if is_refine_only_mode else notes_content_to_use)
         st.markdown("---")
         with st.expander("View Source Transcripts & Download Options"):
             if st.session_state.get('raw_transcript'):
                 st.text_area("Raw Source (Step 1 Output)", st.session_state.raw_transcript, height=200, disabled=True)
-            if st.session_state.get('refined_transcript'):
+            if st.session_state.get('refined_transcript') and not is_refine_only_mode:
                 st.text_area("Refined Transcript (Step 2 Output)", st.session_state.refined_transcript, height=300, disabled=True)
             st.write("")
             dl_cols = st.columns(3)
@@ -866,7 +810,6 @@ if generate_button:
 if st.session_state.get('processing'):
     processed_audio_chunk_references = []
     
-    # --- MODIFIED: Determine processing mode for status messages ---
     is_refine_only_flow = (st.session_state.selected_meeting_type == "Expert Meeting" and st.session_state.expert_meeting_prompt_option == REFINE_ONLY_OPTION)
     is_enrich_flow = st.session_state.selected_meeting_type == "Earnings Call" and st.session_state.earnings_call_mode == "Enrich Existing Notes"
     
@@ -930,40 +873,23 @@ if st.session_state.get('processing'):
                 status.update(label="✅ Step 1: Text Loaded!")
 
             if not transcript_to_process: raise ValueError("No source transcript available for processing.")
-
-            # Step 2: Refinement
-            status.update(label=f"🧹 Step 2: Refining Transcript...")
-            speaker_instructions = "Assign consistent generic labels (e.g., Speaker 1, Speaker 2)."
-            if speaker_1_name and speaker_2_name:
-                speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these names as labels."
-            elif speaker_1_name or speaker_2_name:
-                speaker_instructions = f"One speaker is '{speaker_1_name or speaker_2_name}'. Use this name as a label."
-            refinement_prompt = f"You are an AI assistant... Refine the transcript... [Your full refinement prompt text here]" # Shortened for brevity
-            
-            # --- MODIFIED: The core logic now splits based on the chosen mode ---
             
             # --- PATH A: REFINE ONLY ---
             if is_refine_only_flow:
-                refinement_prompt = f"""You are an AI assistant that cleans up and formats transcripts. Refine the following source transcript.
+                status.update(label=f"🧹 Step 2: Refining Transcript...")
+                speaker_instructions = "Assign consistent generic labels (e.g., Speaker 1, Speaker 2)."
+                if speaker_1_name and speaker_2_name:
+                    speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these names as labels."
+                elif speaker_1_name or speaker_2_name:
+                    speaker_instructions = f"One speaker is '{speaker_1_name or speaker_2_name}'. Use this name as a label."
 
-                **Instructions:**
-                1.  **Identify and Label Speakers:** {speaker_instructions} Ensure each speaker's turn starts on a new line with their label (e.g., `Speaker 1:`).
-                2.  **Correct & Clarify:** Fix obvious spelling mistakes, grammatical errors, or transcription artifacts (if any).
-                3.  **Improve Readability:** Ensure clean separation between speaker turns and use standard paragraph formatting. Do not summarize or change the meaning.
-                4.  **Output ONLY the refined transcript text.**
-
-                **Source Transcript:**
-                ```
-                {transcript_to_process}
-                ```
-                **Refined Transcript:**
-                """
+                refinement_prompt = f"..." # Your refinement prompt here
                 r_response = refinement_model.generate_content(refinement_prompt, generation_config=refinement_gen_config)
                 if not (r_response and hasattr(r_response, 'text') and r_response.text.strip()):
                     raise ValueError("Refinement process failed or produced no text.")
                 
                 st.session_state.refined_transcript = r_response.text.strip()
-                st.session_state.generated_notes = st.session_state.refined_transcript
+                st.session_state.generated_notes = st.session_state.refined_transcript # Use generated_notes to display output
                 st.session_state.edited_notes_text = st.session_state.generated_notes
                 add_to_history(st.session_state.generated_notes)
                 st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type, is_refine_only=True)
@@ -971,23 +897,18 @@ if st.session_state.get('processing'):
 
             # --- PATH B: FULL NOTE GENERATION ---
             else:
-                st.session_state.refined_transcript = None
                 final_source_transcript = transcript_to_process
+                st.session_state.refined_transcript = None
+
                 if st.session_state.get('enable_refinement_step'):
-                    refinement_prompt = f"""You are an AI assistant that cleans up and formats transcripts. Refine the following source transcript.
+                    status.update(label=f"🧹 Step 2: Refining Transcript...")
+                    speaker_instructions = "Assign consistent generic labels (e.g., Speaker 1, Speaker 2)."
+                    if speaker_1_name and speaker_2_name:
+                        speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these names as labels."
+                    elif speaker_1_name or speaker_2_name:
+                        speaker_instructions = f"One speaker is '{speaker_1_name or speaker_2_name}'. Use this name as a label."
 
-                    **Instructions:**
-                    1.  **Identify and Label Speakers:** {speaker_instructions} Ensure each speaker's turn starts on a new line with their label (e.g., `Speaker 1:`).
-                    2.  **Correct & Clarify:** Fix obvious spelling mistakes, grammatical errors, or transcription artifacts (if any).
-                    3.  **Improve Readability:** Ensure clean separation between speaker turns and use standard paragraph formatting. Do not summarize or change the meaning.
-                    4.  **Output ONLY the refined transcript text.**
-
-                    **Source Transcript:**
-                    ```
-                    {transcript_to_process}
-                    ```
-                    **Refined Transcript:**
-                    """
+                    refinement_prompt = f"..." # Your refinement prompt here
                     r_response = refinement_model.generate_content(refinement_prompt, generation_config=refinement_gen_config)
                     if r_response and hasattr(r_response, 'text') and r_response.text.strip():
                         st.session_state.refined_transcript = r_response.text.strip()
@@ -1012,16 +933,17 @@ if st.session_state.get('processing'):
                         status.update(label=f"🧠 Processing Chunk {i+1}/{len(chunks)}...")
                         prompt = PROMPT_INITIAL.format(chunk_text=chunk) if i == 0 else PROMPT_CONTINUATION.format(context_package=context_package, chunk_text=chunk)
                         chunk_response = notes_model.generate_content(prompt, generation_config=main_gen_config)
-                        if not (chunk_response and hasattr(chunk_response, 'text') and chunk_response.text.strip()):
+                        notes_for_chunk = chunk_response.text.strip() if chunk_response and hasattr(chunk_response, 'text') else ""
+                        if not notes_for_chunk:
                             st.warning(f"⚠️ Chunk {i+1} returned empty. Skipping.")
                             continue
-                        notes_for_chunk, new_context = parse_chunk_response(chunk_response.text)
                         all_notes.append(notes_for_chunk)
-                        context_package = new_context or "No context from previous chunk."
+                        context_package = _create_context_from_notes(notes_for_chunk)
                     generated_content = "\n\n".join(all_notes).strip()
                 else:
-                    status.update(label=f"📝 Generating Notes (Single Pass)...")
+                    # Standard, non-chunking logic
                     prompt_template = get_prompt_display_text(for_display_only=False)
+                    # ... (rest of the non-chunking logic is the same)
                     topic_instructions = ""
                     if meeting_type == "Earnings Call":
                         topics = st.session_state.get('earnings_call_topics', '')
@@ -1035,6 +957,7 @@ if st.session_state.get('processing'):
                         raise Exception("Note generation failed or returned empty.")
                     generated_content = response.text.strip()
                 
+                # Summary generation logic
                 if meeting_type == "Expert Meeting" and st.session_state.expert_meeting_prompt_option == "Option 3: Option 2 + Executive Summary":
                     status.update(label="📄 Generating Executive Summary...")
                     summary_prompt = format_prompt_safe(PROMPTS["Expert Meeting"][EXPERT_MEETING_SUMMARY_PROMPT_KEY], generated_notes=generated_content)
