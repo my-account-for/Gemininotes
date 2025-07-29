@@ -14,6 +14,112 @@ from pydub import AudioSegment
 from pydub.utils import make_chunks
 import copy
 
+# --- Prompts for Long Transcript Chunking ---
+PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze an expert consultation transcript and generate detailed, factual notes.
+
+Your primary directive is **100% completeness and accuracy**. You will process the transcript sequentially. For every Question/Answer pair you identify, you must first perform the internal "Thought Process" described below, and only then write the "Final Output". This entire process must be repeated for every single Q&A pair from the beginning to the end of the transcript.
+
+---
+### **PROCEDURE FOR EACH Q&A PAIR**
+
+**Step 1: Internal Thought Process (You will not show this in the final output)**
+1.  **Identify Question Block:** Read the transcript and identify the main question and any immediate, directly related follow-up questions.
+2.  **Extract Raw Facts:** Go through the expert's answer sentence by sentence. List every single piece of factual information as a raw data point. Do not filter or summarize yet. Pull out every name, number, date, percentage, specific example, or stated cause-and-effect relationship. This is a "brain dump" of all facts.
+3.  **Apply Formatting Rules:** Take the raw facts from the previous step. Group closely linked facts into complete, natural-sounding sentences. Format them as bullet points according to the rules in Step 2. Discard any interpretations or summaries.
+
+**Step 2: Final Output (This is the only part you will display)**
+You must now generate the final output for this chunk in two parts as specified below. The notes in "Part 1" must follow the exact structure outlined in the rest of this prompt.
+
+#### **PART 1: NOTES FOR CHUNK 1**
+
+Follow this structure EXACTLY:
+
+**(1.) Opening overview or Expert background (Conditional):**
+- If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
+- **DO:** Capture ALL details (names, dates, numbers, titles). Use simple, direct language.
+- **DO NOT:** Summarize or include introductions about consulting firms like Janchor Partners.
+- If no intro exists, OMIT this section entirely.
+
+**(2.) Q&A format:**
+Structure the main body STRICTLY in Question/Answer format.
+
+**(2.A) Questions:**
+-   Extract the clear, primary question.
+-   **CRITICAL:** Combine only **immediate follow-up questions** on the same specific point into the main question.
+-   **DO NOT** bring forward questions from later in the transcript. Process the conversation in the order it happened to maintain factual integrity.
+-   Format the final, consolidated question in **bold**.
+
+**(2.B) Answers:**
+-   Use bullet points (`-`) directly below the question.
+-   Each bullet point must convey specific factual information in a clear, complete sentence.
+-   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc. Never sacrifice a factual detail for brevity. Err on the side of including too much detail.
+-   Strive for natural sentence flow, but only by combining directly sequential or connected ideas into a single sentence.
+-   **DO NOT** use sub-bullets or section headers within answers.
+-   **DO NOT** add interpretations, summaries, conclusions, or action items not explicitly stated.
+-   **DO NOT** omit any stated fact, even if you think it is not important. Your job is to extract, not to judge importance.
+
+#### **PART 2: CONTEXT PACKAGE FOR NEXT CHUNK**
+-   **Last Question Processed:** [Copy the final bolded question from your notes in PART 1 exactly as it appears.]
+-   **Last Answer Provided:** [Copy the complete bulleted list for the final answer from your notes in PART 1 exactly as it appears.]
+
+---
+**MEETING TRANSCRIPT CHUNK 1:**
+{chunk_text}
+"""
+
+PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task. Your goal is to process the new transcript chunk provided below, using the context from the previous chunk to ensure perfect continuity.
+
+### **CONTEXT FROM PREVIOUS CHUNK**
+{context_package}
+
+---
+### **PRIMARY INSTRUCTIONS**
+
+First, review the context. Because of the overlap, you will see text that was already processed. **Locate the "Last Question Processed" from the context and begin your work from the first NEW question and answer that follows it.**
+
+From that point forward, you must adhere to the following procedure for every Q&A pair in the remainder of the chunk.
+
+---
+### **PROCEDURE FOR EACH Q&A PAIR**
+
+**Step 1: Internal Thought Process (You will not show this in the final output)**
+1.  **Identify Question Block:** Read the transcript and identify the main question and any immediate, directly related follow-up questions.
+2.  **Extract Raw Facts:** Go through the expert's answer sentence by sentence. List every single piece of factual information as a raw data point. Do not filter or summarize yet. Pull out every name, number, date, percentage, specific example, or stated cause-and-effect relationship. This is a "brain dump" of all facts.
+3.  **Apply Formatting Rules:** Take the raw facts from the previous step. Group closely linked facts into complete, natural-sounding sentences. Format them as bullet points according to the rules in Step 2. Discard any interpretations or summaries.
+
+**Step 2: Final Output (This is the only part you will display)**
+You must now generate the final output for this chunk in two parts as specified below. The notes in "Part 1" must follow the exact structure outlined in the rest of this prompt.
+
+#### **PART 1: NOTES FOR CURRENT CHUNK**
+
+Follow this structure EXACTLY:
+
+**(Q&A format only)**
+**(2.A) Questions:**
+-   Extract the clear, primary question.
+-   **CRITICAL:** Combine only **immediate follow-up questions** on the same specific point into the main question.
+-   **DO NOT** bring forward questions from later in the transcript. Process the conversation in the order it happened to maintain factual integrity.
+-   Format the final, consolidated question in **bold**.
+
+**(2.B) Answers:**
+-   Use bullet points (`-`) directly below the question.
+-   Each bullet point must convey specific factual information in a clear, complete sentence.
+-   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc. Never sacrifice a factual detail for brevity. Err on the side of including too much detail.
+-   Strive for natural sentence flow, but only by combining directly sequential or connected ideas into a single sentence.
+-   **DO NOT** use sub-bullets or section headers within answers.
+-   **DO NOT** add interpretations, summaries, conclusions, or action items not explicitly stated.
+-   **DO NOT** omit any stated fact, even if you think it is not important. Your job is to extract, not to judge importance.
+
+#### **PART 2: CONTEXT PACKAGE FOR NEXT CHUNK**
+-   **Last Question Processed:** [Copy the final bolded question from your notes in PART 1 exactly as it appears.]
+-   **Last Answer Provided:** [Copy the complete bulleted list for the final answer from your notes in PART 1 exactly as it appears.]
+
+---
+**MEETING TRANSCRIPT (NEW CHUNK):**
+{chunk_text}
+"""
+
+
 # --- Page Configuration ---
 st.set_page_config(
     page_title="SynthNotes AI ✨", page_icon="✨", layout="wide", initial_sidebar_state="collapsed"
@@ -287,6 +393,41 @@ for key, value in default_state.items():
     if key not in st.session_state: st.session_state[key] = value
 
 # --- Helper Functions ---
+def chunk_text_by_words(text, chunk_size=4000, overlap=200):
+    """Splits text into overlapping chunks based on word count."""
+    words = text.split()
+    if len(words) <= chunk_size:
+        return [text]
+
+    chunks = []
+    start = 0
+    while start < len(words):
+        end = start + chunk_size
+        chunk_words = words[start:end]
+        chunks.append(" ".join(chunk_words))
+        if end >= len(words):
+            break
+        start += chunk_size - overlap
+    return chunks
+
+def parse_chunk_response(response_text):
+    """Parses the LLM response to separate notes from the context package."""
+    notes_part = ""
+    context_part = ""
+    separator_pattern = r'####\s+PART\s+2:\s+CONTEXT\s+PACKAGE\s+FOR\s+NEXT\s+CHUNK'
+    parts = re.split(separator_pattern, response_text, maxsplit=1, flags=re.IGNORECASE)
+
+    if not parts:
+        return response_text, ""
+
+    notes_part = parts[0]
+    notes_part = re.sub(r'####\s+PART\s+1:.*$', '', notes_part, flags=re.IGNORECASE | re.MULTILINE).strip()
+
+    if len(parts) > 1:
+        context_part = parts[1].strip()
+
+    return notes_part, context_part
+
 def extract_text_from_pdf(pdf_file_stream):
     try:
         pdf_file_stream.seek(0)
@@ -679,7 +820,6 @@ if st.session_state.get('processing'):
                 audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=audio_format)
                 chunks = make_chunks(audio, 5 * 60 * 1000)
                 
-                # --- CORRECTED: Initialize the list before the loop ---
                 all_transcripts = []
                 
                 for i, chunk in enumerate(chunks):
@@ -746,21 +886,78 @@ if st.session_state.get('processing'):
             
             # Step 3: Final Processing (Note Generation)
             status.update(label=f"📝 Step 3: Generating Notes...")
-            final_api_prompt = get_prompt_display_text(for_display_only=True)
-            # This logic needs to be complete for all cases
-            expert_meeting_option = st.session_state.expert_meeting_prompt_option
-            earnings_call_topics_text = st.session_state.get('earnings_call_topics', "")
-            topic_instructions = ""
-            if earnings_call_topics_text:
-                formatted_topics = [f"- **{line.strip().strip(':')}**" if line.strip() and not line.strip().startswith(('-', '*', '#')) else line.strip() for line in earnings_call_topics_text.split('\n')]
-                topic_instructions = f"Structure notes under:\n" + "\n".join(formatted_topics) + "\n\n- **Other Key Points** (MANDATORY)"
-            final_api_prompt = format_prompt_safe(final_api_prompt, transcript=final_source_transcript, topic_instructions=topic_instructions)
+
+            word_count = len(final_source_transcript.split())
+            CHUNK_THRESHOLD = 3800 
+            use_chunking = (meeting_type == "Expert Meeting" and word_count > CHUNK_THRESHOLD)
             
-            response = notes_model.generate_content(final_api_prompt, generation_config=main_gen_config)
-            if not (response and hasattr(response, 'text') and response.text.strip()):
-                raise Exception("Note generation failed or returned empty.")
+            generated_content = ""
+
+            if use_chunking:
+                status.update(label=f"📝 Long transcript detected ({word_count} words). Activating chunking protocol.")
+                chunks = chunk_text_by_words(final_source_transcript, chunk_size=4000, overlap=200)
+                
+                all_notes = []
+                context_package = ""
+                num_chunks = len(chunks)
+
+                for i, chunk in enumerate(chunks):
+                    status.update(label=f"🧠 Processing Chunk {i+1}/{num_chunks}...")
+                    
+                    if i == 0:
+                        prompt_to_use = PROMPT_INITIAL.format(chunk_text=chunk)
+                    else:
+                        prompt_to_use = PROMPT_CONTINUATION.format(context_package=context_package, chunk_text=chunk)
+                        
+                    chunk_response = notes_model.generate_content(prompt_to_use, generation_config=main_gen_config)
+                    
+                    if not (chunk_response and hasattr(chunk_response, 'text') and chunk_response.text.strip()):
+                        st.warning(f"⚠️ Chunk {i+1} returned an empty response. Skipping.")
+                        continue
+                        
+                    notes_for_chunk, new_context_package = parse_chunk_response(chunk_response.text)
+                    all_notes.append(notes_for_chunk)
+                    
+                    if new_context_package:
+                        context_package = new_context_package
+                    else:
+                        context_package = "No context from previous chunk."
+                        if i < num_chunks -1:
+                             st.info(f"Chunk {i+1} did not return a context package. The next chunk will start fresh.", icon="ℹ️")
+
+                generated_content = "\n\n".join(all_notes).strip()
             
-            generated_content = response.text.strip()
+            else: # Original logic for non-chunked or other meeting types
+                if use_chunking: #This condition is never met here, it's just for clarity
+                    status.update(label=f"📝 Generating Notes (Chunked Mode)...")
+                else:
+                    status.update(label=f"📝 Generating Notes (Single Pass)...")
+                
+                final_api_prompt = get_prompt_display_text(for_display_only=True)
+                
+                expert_meeting_option = st.session_state.expert_meeting_prompt_option
+                earnings_call_topics_text = st.session_state.get('earnings_call_topics', "")
+                topic_instructions = ""
+                if earnings_call_topics_text:
+                    formatted_topics = [f"- **{line.strip().strip(':')}**" if line.strip() and not line.strip().startswith(('-', '*', '#')) else line.strip() for line in earnings_call_topics_text.split('\n')]
+                    topic_instructions = f"Structure notes under:\n" + "\n".join(formatted_topics) + "\n\n- **Other Key Points** (MANDATORY)"
+                
+                context_section = f"**CONTEXT:**\n{st.session_state.get('context_input', '')}" if st.session_state.get('add_context_enabled') and st.session_state.get('context_input') else ""
+                
+                final_api_prompt = format_prompt_safe(
+                    final_api_prompt, 
+                    transcript=final_source_transcript, 
+                    topic_instructions=topic_instructions,
+                    existing_notes=st.session_state.get('existing_notes_input', ''),
+                    context_section=context_section,
+                    user_custom_prompt=st.session_state.get('current_prompt_text', '')
+                )
+                
+                response = notes_model.generate_content(final_api_prompt, generation_config=main_gen_config)
+                if not (response and hasattr(response, 'text') and response.text.strip()):
+                    raise Exception("Note generation failed or returned empty.")
+                
+                generated_content = response.text.strip()
             
             if meeting_type == "Expert Meeting" and st.session_state.expert_meeting_prompt_option == "Option 3: Option 2 + Executive Summary":
                 status.update(label="📄 Step 3b: Generating Executive Summary...")
