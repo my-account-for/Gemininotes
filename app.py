@@ -20,28 +20,52 @@ import copy
 EXPERT_MEETING_CHUNK_BASE = """### **NOTES STRUCTURE**
 
 (1.) Opening overview or Expert background (Optional):
-- If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple, direct language. DO NOT summarize.
-- Please omit any introduction around Janchor Partners and focus on expert background or overview
 
-(2.) Q&A format: Structure the main body STRICTLY in Question/Answer format.
-(2.A) Questions: Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly in bold. Combine follow up questions if any. Also you can bring forward any future questions on the topic to keep everything more structurally easy to follow.
-(2.B) Answers: Use bullet points directly below the question.
-- Each bullet point should convey specific factual information using clear, complete sentences.
-- Strive for natural sentence flow. While focusing on distinct facts, combine closely related details or sequential points into a single sentence where it enhances readability and avoids excessive choppiness, without adding interpretation or summarization.
-- Capture ALL specifics (data, names, examples, $, %, etc.). Please focus on capturing all points even if you think it is not important. 
-- DO NOT use sub-bullets or section headers within answers.
-- DO NOT add interpretations, summaries, conclusions, or action items not explicitly stated in the transcript.
-- Capture ALL specifics: data, names, examples, monetary values, percentages, etc.
-- Strive for natural sentence flow, but **never sacrifice factual detail for brevity.
-- Please combine follow up questions and answer with the main question
-- Pls ensure you capture all information, data, example. Very important not to miss any point.  
+If the transcript begins with an overview, agenda, or expert introduction, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple, direct language. DO NOT summarize.
+
+Please omit any introduction around Janchor Partners and focus only on the expert’s background or the overview.
+
+(2.) Q&A Format: Structure the main body STRICTLY in Question/Answer format.
+
+(2.A) Questions:
+
+Extract clear questions from the transcript.
+
+Rephrase slightly ONLY for clarity when needed.
+
+Format each question clearly in bold.
+
+Combine follow-up questions with their main question so they appear together as a single grouped question.
+
+When possible, bring forward related future questions on the same topic so the Q&A is easy to follow and minimizes back-and-forth repetition.
+
+(2.B) Answers:
+
+Place answers directly below the corresponding question in bullet points.
+
+Each bullet should convey a specific factual detail in a complete, natural-sounding sentence.
+
+Combine closely related or sequential details into a single sentence where it improves flow, but never omit any detail.
+
+Capture all specifics: data, names, examples, monetary values, percentages, timelines, etc.
+
+DO NOT use sub-bullets or section headers within answers.
+
+DO NOT add summaries, interpretations, conclusions, or action items that are not explicitly stated.
+
+Maintain clarity while ensuring completeness and precision of the information.
 
 Additional Instructions:
-- Accuracy is paramount. Capture ALL facts precisely.
-- Prioritize Completeness: Your main goal is to capture ALL stated information. Err on the side of including too much detail rather than too little. Do not omit any factual statement, no matter how minor it seems.
-- Write clearly and concisely, avoiding unnecessary words. Favor informative sentences over overly simplistic ones.**
-- Include ONLY information present in the transcript. DO NOT add external information.
-- If a section (like Opening Overview) isn't present, OMIT it."""
+
+Accuracy is paramount. Capture every factual detail exactly as stated.
+
+Completeness over brevity: Always include all details, even if minor. Err on the side of too much detail rather than too little.
+
+Use clear, concise, and natural language, avoiding unnecessary filler.
+
+Include ONLY what is present in the transcript. DO NOT add external context.
+
+If a section (like Opening Overview) isn’t present, simply OMIT it."""
 
 
 # --- Prompts for Long Transcript Chunking (Now as Wrappers) ---
