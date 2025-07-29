@@ -14,8 +14,7 @@ from pydub import AudioSegment
 from pydub.utils import make_chunks
 import copy
 
-# --- MODIFIED: Simplified Prompts for a more reliable chunking workflow ---
-
+# --- Prompts for Long Transcript Chunking ---
 PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze an expert consultation transcript chunk and generate detailed, factual notes.
 
 Your primary directive is **100% completeness and accuracy**. You will process the transcript sequentially. For every Question/Answer pair you identify, you must generate notes following the structure below.
@@ -220,7 +219,7 @@ except Exception as e:
     st.stop()
 
 
-# --- Prompts Definitions (IMPROVED FOR COMPLETENESS) ---
+# --- Prompts Definitions ---
 PROMPTS = {
     "Expert Meeting": {
         "Option 1: Existing (Detailed & Strict)": """You are an expert meeting note-taker. Your primary goal is COMPLETE and ACCURATE information capture. Do not summarize or omit details.
@@ -340,7 +339,6 @@ Your goal is to identify significant financial, strategic, or forward-looking de
     },
     "Custom": "{user_custom_prompt}\n\n--- TRANSCRIPT START ---\n{transcript}\n--- TRANSCRIPT END ---\n{context_section}"
 }
-# --- MODIFIED: Added new option constant
 REFINE_ONLY_OPTION = "Option 4: Refine Transcript Only"
 EXPERT_MEETING_OPTIONS = [ "Option 1: Existing (Detailed & Strict)", "Option 2: Less Verbose (Default)", "Option 3: Option 2 + Executive Summary", REFINE_ONLY_OPTION ]
 DEFAULT_EXPERT_MEETING_OPTION = EXPERT_MEETING_OPTIONS[1]
@@ -363,11 +361,9 @@ for key, value in default_state.items():
 
 # --- Helper Functions ---
 def chunk_text_by_words(text, chunk_size=4000, overlap=200):
-    """Splits text into overlapping chunks based on word count."""
     words = text.split()
     if len(words) <= chunk_size:
         return [text]
-
     chunks = []
     start = 0
     while start < len(words):
@@ -380,31 +376,16 @@ def chunk_text_by_words(text, chunk_size=4000, overlap=200):
     return chunks
 
 def _create_context_from_notes(notes_text):
-    """
-    Reliably creates a context package from a chunk of generated notes.
-    This is more robust than asking the LLM to format it.
-    """
     if not notes_text or not notes_text.strip():
         return ""
-
-    # Find all bolded lines (questions)
     questions = re.findall(r"(\*\*.*?\*\*)", notes_text)
     if not questions:
-        return ""  # No questions found, no context to create
-
+        return "" 
     last_question = questions[-1]
-
-    # Find the content (answer) following the last question
-    # It starts after the last question and goes until the next bolded question (or end of string)
-    # The `(?s)` flag allows `.` to match newlines
     answer_match = re.search(re.escape(last_question) + r"(.*?)(?=\*\*|$)", notes_text, re.DOTALL)
-    
     last_answer = ""
     if answer_match:
-        # Get the answer and clean up leading/trailing whitespace
         last_answer = answer_match.group(1).strip()
-
-    # Build the context package string
     context_package = (
         f"-   **Last Question Processed:** {last_question}\n"
         f"-   **Last Answer Provided:**\n{last_answer}"
@@ -466,8 +447,7 @@ def create_docx(text):
 
 def get_current_input_data():
     input_type = st.session_state.input_method_radio
-    transcript = None
-    audio_file = None
+    transcript, audio_file = None, None
     if input_type == "Paste Text":
         transcript = st.session_state.text_input.strip()
     elif input_type == "Upload PDF":
@@ -520,7 +500,6 @@ def handle_edit_toggle():
 def get_prompt_display_text(for_display_only=False):
     meeting_type = st.session_state.get('selected_meeting_type', DEFAULT_MEETING_TYPE)
     
-    # Early exit for "Refine Only" mode as it doesn't use a main prompt
     if meeting_type == "Expert Meeting" and st.session_state.get('expert_meeting_prompt_option') == REFINE_ONLY_OPTION:
         return "# Refine Transcript Only mode is active.\nThis mode does not use a final note-generation prompt. It will only perform transcription and refinement."
 
@@ -562,7 +541,6 @@ def get_prompt_display_text(for_display_only=False):
              st.error(f"Internal Error: Invalid meeting type '{meeting_type}' for prompt preview.")
              return "Error generating prompt preview."
         
-        # Add note about refinement status for non-custom types
         if st.session_state.get('enable_refinement_step'):
              refinement_note = "# NOTE: This prompt will be used with the *refined* transcript from Step 2.\n\n"
              display_text = refinement_note + display_text
@@ -573,7 +551,6 @@ def get_prompt_display_text(for_display_only=False):
     return display_text
 
 def clear_all_state():
-    """Resets most session state variables to their defaults."""
     st.session_state.selected_meeting_type = DEFAULT_MEETING_TYPE
     st.session_state.selected_notes_model_display_name = DEFAULT_NOTES_MODEL_NAME
     st.session_state.selected_transcription_model_display_name = DEFAULT_TRANSCRIPTION_MODEL_NAME
@@ -764,7 +741,6 @@ with output_container:
         if st.session_state.get('edit_notes_enabled'):
             st.text_area("Editable Output:", value=notes_content_to_use, key="edited_notes_text", height=400, label_visibility="collapsed")
         else:
-            # Use a code block for refined transcripts to preserve formatting
             st.markdown(f"```\n{notes_content_to_use}\n```" if is_refine_only_mode else notes_content_to_use)
         st.markdown("---")
         with st.expander("View Source Transcripts & Download Options"):
@@ -882,14 +858,27 @@ if st.session_state.get('processing'):
                     speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these names as labels."
                 elif speaker_1_name or speaker_2_name:
                     speaker_instructions = f"One speaker is '{speaker_1_name or speaker_2_name}'. Use this name as a label."
+                
+                refinement_prompt = f"""You are an AI assistant that cleans up and formats transcripts. Refine the following source transcript.
 
-                refinement_prompt = f"..." # Your refinement prompt here
+                **Instructions:**
+                1.  **Identify and Label Speakers:** {speaker_instructions} Ensure each speaker's turn starts on a new line with their label (e.g., `Speaker 1:`).
+                2.  **Correct & Clarify:** Fix obvious spelling mistakes, grammatical errors, or transcription artifacts (if any).
+                3.  **Improve Readability:** Ensure clean separation between speaker turns and use standard paragraph formatting. Do not summarize or change the meaning.
+                4.  **Output ONLY the refined transcript text.**
+
+                **Source Transcript:**
+                ```
+                {transcript_to_process}
+                ```
+                **Refined Transcript:**
+                """
                 r_response = refinement_model.generate_content(refinement_prompt, generation_config=refinement_gen_config)
                 if not (r_response and hasattr(r_response, 'text') and r_response.text.strip()):
-                    raise ValueError("Refinement process failed or produced no text.")
+                    raise ValueError(f"Refinement process failed or produced no text. Model response: {r_response.text if r_response else 'No response'}")
                 
                 st.session_state.refined_transcript = r_response.text.strip()
-                st.session_state.generated_notes = st.session_state.refined_transcript # Use generated_notes to display output
+                st.session_state.generated_notes = st.session_state.refined_transcript
                 st.session_state.edited_notes_text = st.session_state.generated_notes
                 add_to_history(st.session_state.generated_notes)
                 st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type, is_refine_only=True)
@@ -908,7 +897,20 @@ if st.session_state.get('processing'):
                     elif speaker_1_name or speaker_2_name:
                         speaker_instructions = f"One speaker is '{speaker_1_name or speaker_2_name}'. Use this name as a label."
 
-                    refinement_prompt = f"..." # Your refinement prompt here
+                    refinement_prompt = f"""You are an AI assistant that cleans up and formats transcripts. Refine the following source transcript.
+
+                    **Instructions:**
+                    1.  **Identify and Label Speakers:** {speaker_instructions} Ensure each speaker's turn starts on a new line with their label (e.g., `Speaker 1:`).
+                    2.  **Correct & Clarify:** Fix obvious spelling mistakes, grammatical errors, or transcription artifacts (if any).
+                    3.  **Improve Readability:** Ensure clean separation between speaker turns and use standard paragraph formatting. Do not summarize or change the meaning.
+                    4.  **Output ONLY the refined transcript text.**
+
+                    **Source Transcript:**
+                    ```
+                    {transcript_to_process}
+                    ```
+                    **Refined Transcript:**
+                    """
                     r_response = refinement_model.generate_content(refinement_prompt, generation_config=refinement_gen_config)
                     if r_response and hasattr(r_response, 'text') and r_response.text.strip():
                         st.session_state.refined_transcript = r_response.text.strip()
@@ -941,9 +943,7 @@ if st.session_state.get('processing'):
                         context_package = _create_context_from_notes(notes_for_chunk)
                     generated_content = "\n\n".join(all_notes).strip()
                 else:
-                    # Standard, non-chunking logic
                     prompt_template = get_prompt_display_text(for_display_only=False)
-                    # ... (rest of the non-chunking logic is the same)
                     topic_instructions = ""
                     if meeting_type == "Earnings Call":
                         topics = st.session_state.get('earnings_call_topics', '')
@@ -954,10 +954,9 @@ if st.session_state.get('processing'):
                     final_prompt = format_prompt_safe(prompt_template, transcript=final_source_transcript, topic_instructions=topic_instructions, existing_notes=st.session_state.get('existing_notes_input', ''), context_section=context, user_custom_prompt=st.session_state.get('current_prompt_text', ''))
                     response = notes_model.generate_content(final_prompt, generation_config=main_gen_config)
                     if not (response and hasattr(response, 'text') and response.text.strip()):
-                        raise Exception("Note generation failed or returned empty.")
+                        raise Exception(f"Note generation failed or returned empty. Model response: {response.text if response else 'No response'}")
                     generated_content = response.text.strip()
                 
-                # Summary generation logic
                 if meeting_type == "Expert Meeting" and st.session_state.expert_meeting_prompt_option == "Option 3: Option 2 + Executive Summary":
                     status.update(label="📄 Generating Executive Summary...")
                     summary_prompt = format_prompt_safe(PROMPTS["Expert Meeting"][EXPERT_MEETING_SUMMARY_PROMPT_KEY], generated_notes=generated_content)
