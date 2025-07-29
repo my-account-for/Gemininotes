@@ -19,34 +19,34 @@ import copy
 # When a user edits the prompt for an "Expert Meeting", they will be editing this content.
 EXPERT_MEETING_CHUNK_BASE = """### **NOTES STRUCTURE**
 
-**(1.) Opening overview or Expert background (Conditional):**
-- If the transcript chunk begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
-- **DO:** Capture ALL details (names, dates, numbers, titles). Use simple, direct language.
-- **DO NOT:** Summarize or include introductions about consulting firms like Janchor Partners.
-- If no intro exists, OMIT this section entirely.
+(1.) Opening overview or Expert background (Optional):
+- If the transcript begins with an overview, agenda, or expert intro, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple, direct language. DO NOT summarize.
+- Please omit any introduction around Janchor Partners and focus on expert background or overview
 
-**(2.) Q&A format:**
-Structure the main body STRICTLY in Question/Answer format.
+(2.) Q&A format: Structure the main body STRICTLY in Question/Answer format.
+(2.A) Questions: Extract clear questions. Rephrase slightly ONLY for clarity if needed. Format clearly in bold. Combine follow up questions if any. Also you can bring forward any future questions on the topic to keep everything more structurally easy to follow.
+(2.B) Answers: Use bullet points directly below the question.
+- Each bullet point should convey specific factual information using clear, complete sentences.
+- Strive for natural sentence flow. While focusing on distinct facts, combine closely related details or sequential points into a single sentence where it enhances readability and avoids excessive choppiness, without adding interpretation or summarization.
+- Capture ALL specifics (data, names, examples, $, %, etc.). Please focus on capturing all points even if you think it is not important. 
+- DO NOT use sub-bullets or section headers within answers.
+- DO NOT add interpretations, summaries, conclusions, or action items not explicitly stated in the transcript.
+- Capture ALL specifics: data, names, examples, monetary values, percentages, etc.
+- Strive for natural sentence flow, but **never sacrifice factual detail for brevity.
+- Please combine follow up questions and answer with the main question
+- Pls ensure you capture all information, data, example. Very important not to miss any point.  
 
-**(2.A) Questions:**
--   Extract the clear, primary question.
--   **CRITICAL:** Combine only **immediate follow-up questions** on the same specific point into the main question.
--   **DO NOT** bring forward questions from later in the transcript.
--   Format the final, consolidated question in **bold**.
-
-**(2.B) Answers:**
--   Use bullet points (`-`) directly below the question.
--   Each bullet point must convey specific factual information in a clear, complete sentence.
--   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc.
--   **DO NOT** use sub-bullets or section headers within answers.
--   **DO NOT** add interpretations, summaries, or conclusions not explicitly stated.
--   **DO NOT** omit any stated fact. Your job is to extract, not to judge importance."""
+Additional Instructions:
+- Accuracy is paramount. Capture ALL facts precisely.
+- Prioritize Completeness: Your main goal is to capture ALL stated information. Err on the side of including too much detail rather than too little. Do not omit any factual statement, no matter how minor it seems.
+- Write clearly and concisely, avoiding unnecessary words. Favor informative sentences over overly simplistic ones.**
+- Include ONLY information present in the transcript. DO NOT add external information.
+- If a section (like Opening Overview) isn't present, OMIT it."""
 
 
 # --- Prompts for Long Transcript Chunking (Now as Wrappers) ---
-PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze an expert consultation transcript chunk and generate detailed, factual notes.
-
-Your primary directive is **100% completeness and accuracy**. You will process the transcript sequentially. For every Question/Answer pair you identify, you must generate notes following the structure below.
+PROMPT_INITIAL = """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.
+Generate detailed, factual notes from the provided meeting transcript. You will process the transcript sequentially. For every Question/Answer pair you identify, you must generate notes following the structure below.
 
 ---
 {base_instructions}
@@ -55,7 +55,7 @@ Your primary directive is **100% completeness and accuracy**. You will process t
 {chunk_text}
 """
 
-PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task. Your goal is to process the new transcript chunk provided below, using the context from the previous chunk to ensure perfect continuity.
+PROMPT_CONTINUATION = """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting. continuing a note-taking task. Your goal is to process the new transcript chunk provided below, using the context from the previous chunk to ensure perfect continuity.
 
 ### **CONTEXT FROM PREVIOUS CHUNK**
 {context_package}
@@ -151,18 +151,15 @@ st.markdown("""
 
 # --- Define Available Models & Meeting Types ---
 AVAILABLE_MODELS = {
-    "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
-    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
-    "Gemini 2.0 Flash (Fast & Versatile)": "gemini-2.0-flash-lite",
-    "Gemini 2.5 Flash (Fast & Versatile)": "gemini-2.5-flash",
-    "Gemini 2.5 Pro (paid)": "gemini-2.5-pro",
-    "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "gemini-2.5-pro",
+    "Gemini 2.0 Flash": "gemini-2.0-flash-lite",
+    "Gemini 2.5 Flash": "gemini-2.5-flash", "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
 }
-DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro (paid)"
-if DEFAULT_NOTES_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_NOTES_MODEL_NAME = "Gemini 1.5 Pro (Complex Reasoning)"
-DEFAULT_TRANSCRIPTION_MODEL_NAME = "Gemini 2.5 Flash (Fast & Versatile)"
+DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro"
+if DEFAULT_NOTES_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro"
+DEFAULT_TRANSCRIPTION_MODEL_NAME = "Gemini 2.5 Flash"
 if DEFAULT_TRANSCRIPTION_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_TRANSCRIPTION_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
-DEFAULT_REFINEMENT_MODEL_NAME = "Gemini 2.5 Flash (Fast & Versatile)"
+DEFAULT_REFINEMENT_MODEL_NAME = "Gemini 2.5 Flash Lite"
 if DEFAULT_REFINEMENT_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_REFINEMENT_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 DEFAULT_MEETING_TYPE = MEETING_TYPES[0]
