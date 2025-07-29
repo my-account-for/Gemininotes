@@ -222,53 +222,7 @@ except Exception as e:
 # --- Prompts Definitions ---
 PROMPTS = {
     "Expert Meeting": {
-        "Option 1: Existing (Detailed & Strict)": """You are an expert meeting note-taker. Your primary goal is COMPLETE and ACCURATE information capture. Do not summarize or omit details.
-Generate factual notes from the provided transcript, following this structure EXACTLY:
-
-**Structure:**
-- **Opening overview or Expert background (Optional):** If present, capture ALL details as bullet points. Do not paraphrase or shorten.
-- **Q&A format:** Structure the main body STRICTLY in Question/Answer format.
-  - **Questions:** Extract the question. Rephrase only for absolute clarity. Format as 'Q:' or bold.
-  - **Answers:** Use bullet points under the question.
-    - **CRITICAL:** Each bullet point MUST represent a single, distinct factual point. **Do not combine, condense, or paraphrase multiple facts into a single bullet.** If a speaker makes three separate points, you MUST create three separate bullets.
-    - Capture ALL specifics: data, names, examples, monetary values, percentages, etc.
-
-**Mandatory Instructions:**
-- **Prioritize Completeness:** Your main goal is to capture ALL stated information. Err on the side of including too much detail rather than too little.
-- **No Summarization:** Do not summarize answers or combine points. Your role is to extract and structure, not to interpret.
-- **Fact-Based Only:** Include ONLY information explicitly present in the transcript.
----
-**MEETING TRANSCRIPT:**
-{transcript}
----
-{context_section}
----
-**GENERATED NOTES (Q&A Format - Strict & Detailed):**
-""",
-        "Option 2: Less Verbose (Default)": """You are an expert meeting note-taker. Your primary goal is COMPLETE and ACCURATE information capture. Do not summarize or omit details.
-Generate factual notes from the provided transcript, following this structure EXACTLY:
-
-**Structure:**
-- **Opening overview or Expert background (Optional):** If present, capture ALL details as bullet points. Do not paraphrase or shorten.
-- **Q&A format:** Structure the main body STRICTLY in Question/Answer format.
-  - **Questions:** Extract the question. Rephrase only for absolute clarity. Format as 'Q:' or bold.
-  - **Answers:** Use bullet points under the question.
-    - **CRITICAL:** Each bullet point MUST represent a single, distinct factual point. **Do not combine, condense, or paraphrase multiple facts into a single bullet.** If a speaker makes three separate points, you MUST create three separate bullets.
-    - Capture ALL specifics: data, names, examples, monetary values, percentages, etc.
-    - Strive for natural sentence flow, but **never sacrifice factual detail for brevity.**
-
-**Mandatory Instructions:**
-- **Prioritize Completeness:** Your main goal is to capture ALL stated information. Err on the side of including too much detail rather than too little. Do not omit any factual statement, no matter how minor it seems.
-- **No Summarization:** Do not summarize answers or combine points. Your role is to extract and structure, not to interpret.
-- **Fact-Based Only:** Include ONLY information explicitly present in the transcript.
----
-**MEETING TRANSCRIPT:**
-{transcript}
----
-{context_section}
----
-**GENERATED NOTES (Q&A Format - Complete & Detailed):**
-""",
+        "Expert Meeting Chunking Base": EXPERT_MEETING_CHUNK_BASE,
         "Summary Prompt (for Option 3)": """Based ONLY on the detailed 'GENERATED NOTES' provided below, create a concise executive summary highlighting the MOST significant insights, findings, or critical points.
 
 **Format:**
@@ -428,7 +382,7 @@ def format_prompt_safe(prompt_template, **kwargs):
     try:
         placeholders = re.findall(r"\{([^}]+)\}", formatted_prompt)
         for key in placeholders:
-            value = kwargs.get(key, f"[DEBUG: MISSING_PLACEHOLDER_{key}]")
+            value = kwargs.get(key, f"")
             str_value = str(value) if value is not None else ""
             formatted_prompt = formatted_prompt.replace("{" + key + "}", str_value)
         return formatted_prompt
@@ -457,7 +411,6 @@ def get_current_input_data():
                 transcript = extract_text_from_pdf(io.BytesIO(pdf_file.getvalue()))
             except Exception as e:
                 st.session_state.error_message = f"Error processing PDF: {e}"
-                transcript = None
     elif input_type == "Upload Audio":
         audio_file = st.session_state.audio_uploader
     return input_type, transcript, audio_file
@@ -482,15 +435,11 @@ def validate_inputs():
         if st.session_state.get('earnings_call_mode') == "Enrich Existing Notes":
             if not st.session_state.get('existing_notes_input',"").strip():
                 return False, "Please provide your existing notes for enrichment."
-        if view_edit_enabled and custom_prompt:
-            if "{transcript}" not in custom_prompt:
-                 return False, "Edited prompt is missing the required {transcript} placeholder."
-            if "{topic_instructions}" not in custom_prompt and meeting_type == "Earnings Call" and st.session_state.get('earnings_call_mode') == "Generate New Notes":
-                 return False, "Edited Earnings Call prompt is missing {topic_instructions}."
+        if view_edit_enabled and custom_prompt and "{transcript}" not in custom_prompt:
+            return False, "Edited prompt is missing the required {transcript} placeholder."
     elif meeting_type == "Expert Meeting":
-         if view_edit_enabled and custom_prompt:
-            if "{transcript}" not in custom_prompt:
-                return False, "Edited Expert Meeting prompt is missing {transcript}."
+         if view_edit_enabled and custom_prompt and not re.search(r'Q&A|Question/Answer', custom_prompt, re.IGNORECASE):
+            return False, "Edited Expert Meeting prompt should contain instructions for Q&A formatting."
     return True, ""
 
 def handle_edit_toggle():
@@ -501,54 +450,27 @@ def get_prompt_display_text(for_display_only=False):
     meeting_type = st.session_state.get('selected_meeting_type', DEFAULT_MEETING_TYPE)
     
     if meeting_type == "Expert Meeting" and st.session_state.get('expert_meeting_prompt_option') == REFINE_ONLY_OPTION:
-        return "# Refine Transcript Only mode is active.\nThis mode does not use a final note-generation prompt. It will only perform transcription and refinement."
+        return "# Refine Transcript Only mode is active.\nThis mode does not use a final note-generation prompt."
 
-    if not for_display_only and st.session_state.get('view_edit_prompt_enabled', False) and meeting_type != "Custom" and st.session_state.get('current_prompt_text', "").strip():
+    # For Expert Meeting, the editable prompt is always the chunking base.
+    if meeting_type == "Expert Meeting":
+        base_prompt = PROMPTS["Expert Meeting"]["Expert Meeting Chunking Base"]
+        if for_display_only:
+            return base_prompt
+        # If the user has edited text, use that. Otherwise, use the default base.
+        return st.session_state.current_prompt_text or base_prompt
+
+    # Handle other meeting types (they don't use the unified chunking base)
+    if not for_display_only and st.session_state.get('view_edit_prompt_enabled', False) and st.session_state.get('current_prompt_text', "").strip():
         return st.session_state.current_prompt_text
-    
-    display_text, temp_context = "", st.session_state.get('context_input',"").strip() if st.session_state.get('add_context_enabled') else None
-    input_type, transcript_placeholder = st.session_state.get('input_method_radio', 'Paste Text'), "{transcript}"
-    context_placeholder_section = f"\n**ADDITIONAL CONTEXT (Use for understanding):**\n{temp_context}\n---" if temp_context else ""
-    format_kwargs, prompt_template_to_display = {'transcript': transcript_placeholder, 'context_section': context_placeholder_section}, None
-    
-    try:
-        if meeting_type == "Expert Meeting":
-            expert_option = st.session_state.get('expert_meeting_prompt_option', DEFAULT_EXPERT_MEETING_OPTION)
-            prompt_key = "Option 1: Existing (Detailed & Strict)" if expert_option == "Option 1: Existing (Detailed & Strict)" else "Option 2: Less Verbose (Default)"
-            prompt_template_to_display = PROMPTS["Expert Meeting"][prompt_key]
-            if prompt_template_to_display:
-                 display_text = format_prompt_safe(prompt_template_to_display, **format_kwargs)
-                 if expert_option == "Option 3: Option 2 + Executive Summary":
-                     summary_prompt_preview = PROMPTS["Expert Meeting"].get(EXPERT_MEETING_SUMMARY_PROMPT_KEY, "Summary prompt not found.").split("---")[0]
-                     display_text += f"\n\n# NOTE: Option 3 includes an additional Executive Summary step using a separate prompt:\n'''\n{summary_prompt_preview.strip()}\n'''"
-            else: display_text = "# Error: Could not find prompt template for Expert Meeting display."
-        elif meeting_type == "Earnings Call":
-             prompt_template_to_display = PROMPTS["Earnings Call"]["Generate New Notes"]
-             earnings_call_topics_text = st.session_state.get('earnings_call_topics', "")
-             topic_instructions = ""
-             if earnings_call_topics_text and earnings_call_topics_text.strip():
-                 formatted_topics = [f"- **{line.strip().strip(':')}**" if line.strip() and not line.strip().startswith(('-', '*', '#')) else line.strip() for line in earnings_call_topics_text.split('\n')]
-                 topic_instructions = f"Structure notes under:\n" + "\n".join(formatted_topics) + "\n\n- **Other Key Points** (MANDATORY)"
-             else: topic_instructions = "Identify logical main themes (e.g., Financials, Outlook) and use them as bold headings. Include a final mandatory section: - **Other Key Points**."
-             format_kwargs["topic_instructions"] = topic_instructions
-             display_text = format_prompt_safe(prompt_template_to_display, **format_kwargs)
-        elif meeting_type == "Custom":
-             audio_note = "\n# NOTE: For audio, your custom prompt will receive a *refined transcript*." if st.session_state.get('enable_refinement_step') else ""
-             default_custom = "# Enter your custom prompt... Use {transcript} and {context_section}."
-             display_text = st.session_state.get('current_prompt_text', default_custom) + audio_note
-             return display_text
-        else:
-             st.error(f"Internal Error: Invalid meeting type '{meeting_type}' for prompt preview.")
-             return "Error generating prompt preview."
-        
-        if st.session_state.get('enable_refinement_step'):
-             refinement_note = "# NOTE: This prompt will be used with the *refined* transcript from Step 2.\n\n"
-             display_text = refinement_note + display_text
 
-    except Exception as e:
-         st.error(f"Error generating prompt preview: {e}")
-         display_text = f"# Error generating preview: {e}"
-    return display_text
+    prompt_template = ""
+    if meeting_type == "Earnings Call":
+        prompt_template = PROMPTS["Earnings Call"]["Generate New Notes"]
+    elif meeting_type == "Custom":
+        prompt_template = st.session_state.get('current_prompt_text', PROMPTS["Custom"])
+    
+    return prompt_template
 
 def clear_all_state():
     st.session_state.selected_meeting_type = DEFAULT_MEETING_TYPE
@@ -789,12 +711,9 @@ if st.session_state.get('processing'):
     is_refine_only_flow = (st.session_state.selected_meeting_type == "Expert Meeting" and st.session_state.expert_meeting_prompt_option == REFINE_ONLY_OPTION)
     is_enrich_flow = st.session_state.selected_meeting_type == "Earnings Call" and st.session_state.earnings_call_mode == "Enrich Existing Notes"
     
-    if is_refine_only_flow:
-        operation_desc = "Refining Transcript"
-    elif is_enrich_flow:
-        operation_desc = "Enriching Notes"
-    else:
-        operation_desc = "Generating Notes"
+    operation_desc = "Generating Notes"
+    if is_refine_only_flow: operation_desc = "Refining Transcript"
+    elif is_enrich_flow: operation_desc = "Enriching Notes"
 
     with st.status(f"🚀 {operation_desc} in progress...", expanded=True) as status:
         try:
@@ -852,27 +771,14 @@ if st.session_state.get('processing'):
             
             # --- PATH A: REFINE ONLY ---
             if is_refine_only_flow:
-                status.update(label=f"🧹 Step 2: Refining Transcript...")
+                status.update(label=f"🧹 Step 2: Refining Transcript (Fast Mode)...")
                 speaker_instructions = "Assign consistent generic labels (e.g., Speaker 1, Speaker 2)."
                 if speaker_1_name and speaker_2_name:
                     speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these names as labels."
                 elif speaker_1_name or speaker_2_name:
                     speaker_instructions = f"One speaker is '{speaker_1_name or speaker_2_name}'. Use this name as a label."
                 
-                refinement_prompt = f"""You are an AI assistant that cleans up and formats transcripts. Refine the following source transcript.
-
-                **Instructions:**
-                1.  **Identify and Label Speakers:** {speaker_instructions} Ensure each speaker's turn starts on a new line with their label (e.g., `Speaker 1:`).
-                2.  **Correct & Clarify:** Fix obvious spelling mistakes, grammatical errors, or transcription artifacts (if any).
-                3.  **Improve Readability:** Ensure clean separation between speaker turns and use standard paragraph formatting. Do not summarize or change the meaning.
-                4.  **Output ONLY the refined transcript text.**
-
-                **Source Transcript:**
-                ```
-                {transcript_to_process}
-                ```
-                **Refined Transcript:**
-                """
+                refinement_prompt = format_prompt_safe(REFINEMENT_PROMPT_FAST, speaker_instructions=speaker_instructions, transcript_to_process=transcript_to_process)
                 r_response = refinement_model.generate_content(refinement_prompt, generation_config=refinement_gen_config)
                 if not (r_response and hasattr(r_response, 'text') and r_response.text.strip()):
                     raise ValueError(f"Refinement process failed or produced no text. Model response: {r_response.text if r_response else 'No response'}")
@@ -890,27 +796,14 @@ if st.session_state.get('processing'):
                 st.session_state.refined_transcript = None
 
                 if st.session_state.get('enable_refinement_step'):
-                    status.update(label=f"🧹 Step 2: Refining Transcript...")
+                    status.update(label=f"🧹 Step 2: Refining Transcript (Fast Mode)...")
                     speaker_instructions = "Assign consistent generic labels (e.g., Speaker 1, Speaker 2)."
                     if speaker_1_name and speaker_2_name:
                         speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these names as labels."
                     elif speaker_1_name or speaker_2_name:
                         speaker_instructions = f"One speaker is '{speaker_1_name or speaker_2_name}'. Use this name as a label."
 
-                    refinement_prompt = f"""You are an AI assistant that cleans up and formats transcripts. Refine the following source transcript.
-
-                    **Instructions:**
-                    1.  **Identify and Label Speakers:** {speaker_instructions} Ensure each speaker's turn starts on a new line with their label (e.g., `Speaker 1:`).
-                    2.  **Correct & Clarify:** Fix obvious spelling mistakes, grammatical errors, or transcription artifacts (if any).
-                    3.  **Improve Readability:** Ensure clean separation between speaker turns and use standard paragraph formatting. Do not summarize or change the meaning.
-                    4.  **Output ONLY the refined transcript text.**
-
-                    **Source Transcript:**
-                    ```
-                    {transcript_to_process}
-                    ```
-                    **Refined Transcript:**
-                    """
+                    refinement_prompt = format_prompt_safe(REFINEMENT_PROMPT_FAST, speaker_instructions=speaker_instructions, transcript_to_process=transcript_to_process)
                     r_response = refinement_model.generate_content(refinement_prompt, generation_config=refinement_gen_config)
                     if r_response and hasattr(r_response, 'text') and r_response.text.strip():
                         st.session_state.refined_transcript = r_response.text.strip()
@@ -929,11 +822,21 @@ if st.session_state.get('processing'):
                 generated_content = ""
                 if use_chunking:
                     status.update(label=f"📝 Long transcript detected ({word_count} words). Activating chunking.")
+                    
+                    base_instructions = get_prompt_display_text(for_display_only=False)
+                    if st.session_state.get('view_edit_prompt_enabled'):
+                         st.info("Using user-edited instructions for chunking.", icon="✍️")
+                    
                     chunks = chunk_text_by_words(final_source_transcript, chunk_size=4000, overlap=200)
                     all_notes, context_package = [], ""
                     for i, chunk in enumerate(chunks):
                         status.update(label=f"🧠 Processing Chunk {i+1}/{len(chunks)}...")
-                        prompt = PROMPT_INITIAL.format(chunk_text=chunk) if i == 0 else PROMPT_CONTINUATION.format(context_package=context_package, chunk_text=chunk)
+                        
+                        if i == 0:
+                            prompt = PROMPT_INITIAL.format(base_instructions=base_instructions, chunk_text=chunk)
+                        else:
+                            prompt = PROMPT_CONTINUATION.format(context_package=context_package, base_instructions=base_instructions, chunk_text=chunk)
+                        
                         chunk_response = notes_model.generate_content(prompt, generation_config=main_gen_config)
                         notes_for_chunk = chunk_response.text.strip() if chunk_response and hasattr(chunk_response, 'text') else ""
                         if not notes_for_chunk:
@@ -988,3 +891,4 @@ if st.session_state.get('processing'):
 # --- Footer ---
 st.divider()
 st.caption("Powered by Google Gemini | App by SynthNotes AI")
+
