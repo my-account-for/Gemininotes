@@ -5,3 +5,14 @@ backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F2F6" # Or try "#F8F9FA" for a slightly whiter feel
 textColor = "#0F172A"
 font = "system-ui" # or "-apple-system", "Inter", "Source Sans Pro"
+# .streamlit/config.toml
+
+[theme]
+# NEW (v1.47.0): Increase base font weight for better readability
+baseFontWeight = 500
+
+# NEW (v1.47.0): Make headings bolder to improve visual hierarchy
+headingFontWeights = [700, 700, 700, 700, 700]
+
+# Keep code blocks with a standard weight
+codeFontWeight = 400
