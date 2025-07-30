@@ -19,58 +19,34 @@ import copy
 # When a user edits the prompt for an "Expert Meeting", they will be editing this content.
 EXPERT_MEETING_CHUNK_BASE = """### **NOTES STRUCTURE**
 
-(1.) Opening overview or Expert background (Optional):
+**(1.) Opening overview or Expert background (Conditional):**
+- If the transcript chunk begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
+- **DO:** Capture ALL details (names, dates, numbers, titles). Use simple, direct language.
+- **DO NOT:** Summarize or include introductions about consulting firms like Janchor Partners.
+- If no intro exists, OMIT this section entirely.
 
-If the transcript begins with an overview, agenda, or expert introduction, include it FIRST as bullet points. Capture ALL details (names, dates, numbers, etc.). Use simple, direct language. DO NOT summarize.
+**(2.) Q&A format:**
+Structure the main body STRICTLY in Question/Answer format.
 
-Please omit any introduction around Janchor Partners and focus only on the expert’s background or the overview.
+**(2.A) Questions:**
+-   Extract the clear, primary question.
+-   **CRITICAL:** Combine only **immediate follow-up questions** on the same specific point into the main question.
+-   **DO NOT** bring forward questions from later in the transcript.
+-   Format the final, consolidated question in **bold**.
 
-(2.) Q&A Format: Structure the main body STRICTLY in Question/Answer format.
-
-(2.A) Questions:
-
-Extract clear questions from the transcript.
-
-Rephrase slightly ONLY for clarity when needed.
-
-Format each question clearly in bold.
-
-Combine follow-up questions with their main question so they appear together as a single grouped question.
-
-When possible, bring forward related future questions on the same topic so the Q&A is easy to follow and minimizes back-and-forth repetition.
-
-(2.B) Answers:
-
-Place answers directly below the corresponding question in bullet points.
-
-Each bullet should convey a specific factual detail in a complete, natural-sounding sentence.
-
-Combine closely related or sequential details into a single sentence where it improves flow, but never omit any detail.
-
-Capture all specifics: data, names, examples, monetary values, percentages, timelines, etc.
-
-DO NOT use sub-bullets or section headers within answers.
-
-DO NOT add summaries, interpretations, conclusions, or action items that are not explicitly stated.
-
-Maintain clarity while ensuring completeness and precision of the information.
-
-Additional Instructions:
-
-Accuracy is paramount. Capture every factual detail exactly as stated.
-
-Completeness over brevity: Always include all details, even if minor. Err on the side of too much detail rather than too little.
-
-Use clear, concise, and natural language, avoiding unnecessary filler.
-
-Include ONLY what is present in the transcript. DO NOT add external context.
-
-If a section (like Opening Overview) isn’t present, simply OMIT it."""
+**(2.B) Answers:**
+-   Use bullet points (`-`) directly below the question.
+-   Each bullet point must convey specific factual information in a clear, complete sentence.
+-   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc.
+-   **DO NOT** use sub-bullets or section headers within answers.
+-   **DO NOT** add interpretations, summaries, or conclusions not explicitly stated.
+-   **DO NOT** omit any stated fact. Your job is to extract, not to judge importance."""
 
 
 # --- Prompts for Long Transcript Chunking (Now as Wrappers) ---
-PROMPT_INITIAL = """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting.
-Generate detailed, factual notes from the provided meeting transcript. You will process the transcript sequentially. For every Question/Answer pair you identify, you must generate notes following the structure below.
+PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze an expert consultation transcript chunk and generate detailed, factual notes.
+
+Your primary directive is **100% completeness and accuracy**. You will process the transcript sequentially. For every Question/Answer pair you identify, you must generate notes following the structure below.
 
 ---
 {base_instructions}
@@ -79,7 +55,7 @@ Generate detailed, factual notes from the provided meeting transcript. You will 
 {chunk_text}
 """
 
-PROMPT_CONTINUATION = """You are an expert meeting note-taker analyzing an expert consultation or similar focused meeting. continuing a note-taking task. Your goal is to process the new transcript chunk provided below, using the context from the previous chunk to ensure perfect continuity.
+PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task. Your goal is to process the new transcript chunk provided below, using the context from the previous chunk to ensure perfect continuity.
 
 ### **CONTEXT FROM PREVIOUS CHUNK**
 {context_package}
@@ -175,15 +151,18 @@ st.markdown("""
 
 # --- Define Available Models & Meeting Types ---
 AVAILABLE_MODELS = {
-    "Gemini 2.0 Flash": "gemini-2.0-flash-lite",
-    "Gemini 2.5 Flash": "gemini-2.5-flash", "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
-    "Gemini 2.5 Pro": "gemini-2.5-pro",
+    "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
+    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
+    "Gemini 2.0 Flash (Fast & Versatile)": "gemini-2.0-flash-lite",
+    "Gemini 2.5 Flash (Fast & Versatile)": "gemini-2.5-flash",
+    "Gemini 2.5 Pro (paid)": "gemini-2.5-pro",
+    "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "gemini-2.5-pro",
 }
-DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro"
-if DEFAULT_NOTES_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro"
-DEFAULT_TRANSCRIPTION_MODEL_NAME = "Gemini 2.5 Flash"
+DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro (paid)"
+if DEFAULT_NOTES_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_NOTES_MODEL_NAME = "Gemini 1.5 Pro (Complex Reasoning)"
+DEFAULT_TRANSCRIPTION_MODEL_NAME = "Gemini 2.5 Flash (Fast & Versatile)"
 if DEFAULT_TRANSCRIPTION_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_TRANSCRIPTION_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
-DEFAULT_REFINEMENT_MODEL_NAME = "Gemini 2.5 Flash Lite"
+DEFAULT_REFINEMENT_MODEL_NAME = "Gemini 2.5 Flash (Fast & Versatile)"
 if DEFAULT_REFINEMENT_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_REFINEMENT_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 DEFAULT_MEETING_TYPE = MEETING_TYPES[0]
@@ -475,7 +454,6 @@ def validate_inputs():
                  return False, "Edited prompt is missing the required {transcript} placeholder."
             if "{topic_instructions}" not in custom_prompt and meeting_type == "Earnings Call" and st.session_state.get('earnings_call_mode') == "Generate New Notes":
                  return False, "Edited Earnings Call prompt is missing {topic_instructions}."
-    # No validation needed for expert meeting edits as we now construct the full prompt in the backend
     return True, ""
 
 def handle_edit_toggle():
@@ -706,7 +684,8 @@ if show_prompt_area:
         base_template_text = get_prompt_display_text(for_display_only=True)
         if st.session_state.view_edit_prompt_enabled and not st.session_state.current_prompt_text.strip():
              st.session_state.current_prompt_text = base_template_text
-        st.text_area("Prompt Text:", value=st.session_state.current_prompt_text, key="current_prompt_text", height=350, label_visibility="collapsed")
+        # NEW (v1.47.0): Set a larger height for better editing experience
+        st.text_area("Prompt Text:", value=st.session_state.current_prompt_text, key="current_prompt_text", height=400, label_visibility="collapsed")
 
 st.write("")
 is_valid, error_msg = validate_inputs()
@@ -733,15 +712,18 @@ with output_container:
         notes_content_to_use = st.session_state.edited_notes_text if st.session_state.edit_notes_enabled else st.session_state.generated_notes
         st.checkbox("Edit Output", key="edit_notes_enabled")
         if st.session_state.get('edit_notes_enabled'):
-            st.text_area("Editable Output:", value=notes_content_to_use, key="edited_notes_text", height=400, label_visibility="collapsed")
+            # NEW (v1.47.0): Set a larger height for a better editing experience
+            st.text_area("Editable Output:", value=notes_content_to_use, key="edited_notes_text", height=500, label_visibility="collapsed")
         else:
             st.markdown(f"```\n{notes_content_to_use}\n```" if is_refine_only_mode else notes_content_to_use)
         st.markdown("---")
         with st.expander("View Source Transcripts & Download Options"):
             if st.session_state.get('raw_transcript'):
-                st.text_area("Raw Source (Step 1 Output)", st.session_state.raw_transcript, height=200, disabled=True)
+                # NEW (v1.47.0): Larger height for better readability
+                st.text_area("Raw Source (Step 1 Output)", st.session_state.raw_transcript, height=300, disabled=True)
             if st.session_state.get('refined_transcript') and not is_refine_only_mode:
-                st.text_area("Refined Transcript (Step 2 Output)", st.session_state.refined_transcript, height=300, disabled=True)
+                # NEW (v1.47.0): Larger height for better readability
+                st.text_area("Refined Transcript (Step 2 Output)", st.session_state.refined_transcript, height=400, disabled=True)
             st.write("")
             dl_cols = st.columns(3)
             fname_base = st.session_state.get('suggested_filename', "synthnotes_output")
@@ -789,10 +771,13 @@ if st.session_state.get('processing'):
         operation_desc = "Enriching Notes"
     else:
         operation_desc = "Generating Notes"
+    
+    # NEW (v1.47.0): Start timer for elapsed time display
+    start_time = time.time()
 
     with st.status(f"🚀 {operation_desc} in progress...", expanded=True) as status:
         try:
-            status.update(label="⚙️ Validating inputs...")
+            status.update(label=f"⚙️ Validating inputs... ({time.time() - start_time:.1f}s)")
             is_valid_process, error_msg_process = validate_inputs()
             if not is_valid_process: raise ValueError(f"Input validation failed: {error_msg_process}")
             
@@ -804,7 +789,7 @@ if st.session_state.get('processing'):
             speaker_1_name = st.session_state.get('speaker_1_name', '').strip()
             speaker_2_name = st.session_state.get('speaker_2_name', '').strip()
 
-            status.update(label="🧠 Initializing AI models...")
+            status.update(label=f"🧠 Initializing AI models... ({time.time() - start_time:.1f}s)")
             refinement_model = genai.GenerativeModel(refinement_model_id, safety_settings=safety_settings_relaxed)
             notes_model = genai.GenerativeModel(notes_model_id, safety_settings=safety_settings)
             transcription_model = genai.GenerativeModel(transcription_model_id, safety_settings=safety_settings_relaxed)
@@ -813,7 +798,7 @@ if st.session_state.get('processing'):
             
             # Step 1: Get Text from Source
             if actual_input_type == "Upload Audio":
-                status.update(label="🎤 Step 1: Transcribing Audio...")
+                status.update(label=f"🎤 Step 1: Transcribing Audio... ({time.time() - start_time:.1f}s)")
                 if source_audio_file_obj is None: raise ValueError("Audio file not found.")
                 audio_bytes = source_audio_file_obj.getvalue()
                 audio_format = os.path.splitext(source_audio_file_obj.name)[1].lower().replace('.', '')
@@ -824,29 +809,33 @@ if st.session_state.get('processing'):
                 for i, chunk in enumerate(chunks):
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_chunk_file:
                         chunk.export(temp_chunk_file.name, format="wav")
+                        status.update(label=f"☁️ Uploading chunk {i+1}/{len(chunks)}... ({time.time() - start_time:.1f}s)")
                         chunk_file_ref = genai.upload_file(path=temp_chunk_file.name)
                         processed_audio_chunk_references.append(chunk_file_ref)
-                        while chunk_file_ref.state.name == "PROCESSING": time.sleep(5)
+                        while chunk_file_ref.state.name == "PROCESSING": 
+                            status.update(label=f"⏳ API processing chunk {i+1}... ({time.time() - start_time:.1f}s)")
+                            time.sleep(5)
                         chunk_file_ref = genai.get_file(chunk_file_ref.name)
                         if chunk_file_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk processing failed.")
+                        status.update(label=f"✍️ Transcribing chunk {i+1}/{len(chunks)}... ({time.time() - start_time:.1f}s)")
                         t_response = transcription_model.generate_content(["Transcribe this audio.", chunk_file_ref], generation_config=transcription_gen_config)
                         all_transcripts.append(t_response.text.strip() if t_response and hasattr(t_response, 'text') else "")
                 st.session_state.raw_transcript = "\n\n".join(all_transcripts).strip()
                 if not st.session_state.raw_transcript:
                     raise ValueError("Audio transcription failed or produced no text.")
                 transcript_to_process = st.session_state.raw_transcript
-                status.update(label="✅ Step 1: Transcription Complete!")
+                status.update(label=f"✅ Step 1: Transcription Complete! ({time.time() - start_time:.1f}s)")
             else:
-                status.update(label="📄 Step 1: Loading Text...")
+                status.update(label=f"📄 Step 1: Loading Text... ({time.time() - start_time:.1f}s)")
                 st.session_state.raw_transcript = source_transcript_data
                 transcript_to_process = source_transcript_data
-                status.update(label="✅ Step 1: Text Loaded!")
+                status.update(label=f"✅ Step 1: Text Loaded! ({time.time() - start_time:.1f}s)")
 
             if not transcript_to_process: raise ValueError("No source transcript available for processing.")
             
             # --- PATH A: REFINE ONLY ---
             if is_refine_only_flow:
-                status.update(label=f"🧹 Step 2: Refining Transcript...")
+                status.update(label=f"🧹 Step 2: Refining Transcript... ({time.time() - start_time:.1f}s)")
                 speaker_instructions = "Assign consistent generic labels (e.g., Speaker 1, Speaker 2)."
                 if speaker_1_name and speaker_2_name:
                     speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these names as labels."
@@ -876,7 +865,7 @@ if st.session_state.get('processing'):
                 st.session_state.edited_notes_text = st.session_state.generated_notes
                 add_to_history(st.session_state.generated_notes)
                 st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type, is_refine_only=True)
-                status.update(label="✅ Refinement Complete!", state="complete")
+                status.update(label=f"✅ Refinement Complete! ({time.time() - start_time:.1f}s)", state="complete")
 
             # --- PATH B: FULL NOTE GENERATION ---
             else:
@@ -884,7 +873,7 @@ if st.session_state.get('processing'):
                 st.session_state.refined_transcript = None
 
                 if st.session_state.get('enable_refinement_step'):
-                    status.update(label=f"🧹 Step 2: Refining Transcript...")
+                    status.update(label=f"🧹 Step 2: Refining Transcript... ({time.time() - start_time:.1f}s)")
                     speaker_instructions = "Assign consistent generic labels (e.g., Speaker 1, Speaker 2)."
                     if speaker_1_name and speaker_2_name:
                         speaker_instructions = f"The speakers are '{speaker_1_name}' and '{speaker_2_name}'. Use these names as labels."
@@ -909,18 +898,17 @@ if st.session_state.get('processing'):
                     if r_response and hasattr(r_response, 'text') and r_response.text.strip():
                         st.session_state.refined_transcript = r_response.text.strip()
                         final_source_transcript = st.session_state.refined_transcript
-                        status.update(label="✅ Step 2: Refinement Complete!")
+                        status.update(label=f"✅ Step 2: Refinement Complete! ({time.time() - start_time:.1f}s)")
                     else:
-                        status.update(label="⚠️ Step 2: Refinement failed. Proceeding with original transcript.")
+                        status.update(label=f"⚠️ Step 2: Refinement failed. Proceeding with original transcript. ({time.time() - start_time:.1f}s)")
                 else:
-                    status.update(label="⏭️ Step 2: Refinement skipped by user.")
+                    status.update(label=f"⏭️ Step 2: Refinement skipped by user. ({time.time() - start_time:.1f}s)")
 
-                status.update(label=f"📝 Step 3: Generating Notes...")
+                status.update(label=f"📝 Step 3: Generating Notes... ({time.time() - start_time:.1f}s)")
                 generated_content = ""
                 
                 # --- UNIFIED PROMPT LOGIC ---
                 if meeting_type == "Expert Meeting":
-                    # 1. Determine which base instructions to use: user's edit or the default.
                     if st.session_state.get('view_edit_prompt_enabled', False) and st.session_state.get('current_prompt_text', "").strip():
                         base_instructions = st.session_state.current_prompt_text
                     else:
@@ -931,11 +919,11 @@ if st.session_state.get('processing'):
                     use_chunking = (word_count > CHUNK_THRESHOLD)
 
                     if use_chunking:
-                        status.update(label=f"📝 Long transcript detected ({word_count} words). Activating chunking.")
+                        status.update(label=f"📝 Long transcript detected ({word_count} words). Activating chunking... ({time.time() - start_time:.1f}s)")
                         chunks = chunk_text_by_words(final_source_transcript, chunk_size=4000, overlap=200)
                         all_notes, context_package = [], ""
                         for i, chunk in enumerate(chunks):
-                            status.update(label=f"🧠 Processing Chunk {i+1}/{len(chunks)}...")
+                            status.update(label=f"🧠 Processing Chunk {i+1}/{len(chunks)}... ({time.time() - start_time:.1f}s)")
                             prompt = PROMPT_INITIAL.format(base_instructions=base_instructions, chunk_text=chunk) if i == 0 else PROMPT_CONTINUATION.format(base_instructions=base_instructions, context_package=context_package, chunk_text=chunk)
                             chunk_response = notes_model.generate_content(prompt, generation_config=main_gen_config)
                             notes_for_chunk = chunk_response.text.strip() if chunk_response and hasattr(chunk_response, 'text') else ""
@@ -949,9 +937,7 @@ if st.session_state.get('processing'):
                         expert_option = st.session_state.get('expert_meeting_prompt_option', DEFAULT_EXPERT_MEETING_OPTION)
                         prompt_key = "Option 1: Existing (Detailed & Strict)" if expert_option == "Option 1: Existing (Detailed & Strict)" else "Option 2: Less Verbose (Default)"
                         single_pass_template_wrapper = PROMPTS["Expert Meeting"][prompt_key]
-                        
                         prompt_template = single_pass_template_wrapper.format(base_instructions=base_instructions)
-                        
                         context = f"**CONTEXT:**\n{st.session_state.get('context_input', '')}" if st.session_state.get('add_context_enabled') and st.session_state.get('context_input') else ""
                         final_prompt = format_prompt_safe(prompt_template, transcript=final_source_transcript, context_section=context)
                         response = notes_model.generate_content(final_prompt, generation_config=main_gen_config)
@@ -960,7 +946,6 @@ if st.session_state.get('processing'):
                         generated_content = response.text.strip()
                 
                 else: # Logic for Earnings Call, Custom
-                    # This logic remains as it was, since chunking/editing problem was specific to Expert Meetings
                     prompt_template = get_prompt_display_text(for_display_only=False)
                     topic_instructions = ""
                     if meeting_type == "Earnings Call":
@@ -975,9 +960,8 @@ if st.session_state.get('processing'):
                         raise Exception(f"Note generation failed or returned empty. Model response: {response.text if response else 'No response'}")
                     generated_content = response.text.strip()
                 
-                # --- Handle Executive Summary ---
                 if meeting_type == "Expert Meeting" and st.session_state.expert_meeting_prompt_option == "Option 3: Option 2 + Executive Summary":
-                    status.update(label="📄 Generating Executive Summary...")
+                    status.update(label=f"📄 Generating Executive Summary... ({time.time() - start_time:.1f}s)")
                     summary_prompt = format_prompt_safe(PROMPTS["Expert Meeting"][EXPERT_MEETING_SUMMARY_PROMPT_KEY], generated_notes=generated_content)
                     summary_response = notes_model.generate_content(summary_prompt, generation_config=summary_gen_config)
                     if summary_response and hasattr(summary_response, 'text') and summary_response.text.strip():
@@ -990,11 +974,11 @@ if st.session_state.get('processing'):
                 st.session_state.edited_notes_text = st.session_state.generated_notes
                 add_to_history(st.session_state.generated_notes)
                 st.session_state.suggested_filename = generate_suggested_filename(st.session_state.generated_notes, meeting_type)
-                status.update(label="✅ Success!", state="complete")
+                status.update(label=f"✅ Success! ({time.time() - start_time:.1f}s)", state="complete")
 
         except Exception as e:
             st.session_state.error_message = f"❌ Processing Error: {e}"
-            status.update(label=f"❌ Error: {e}", state="error")
+            status.update(label=f"❌ Error: {e} ({time.time() - start_time:.1f}s)", state="error")
         finally:
             st.session_state.processing = False
             if processed_audio_chunk_references:
