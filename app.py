@@ -149,18 +149,18 @@ st.markdown("""
 
 # --- Define Available Models & Meeting Types ---
 AVAILABLE_MODELS = {
-    "Gemini 1.5 Flash (Fast & Versatile)": "gemini-1.5-flash",
-    "Gemini 1.5 Pro (Complex Reasoning)": "gemini-1.5-pro",
-    "Gemini 2.0 Flash (Fast & Versatile)": "gemini-2.0-flash-lite",
-    "Gemini 2.5 Flash (Fast & Versatile)": "gemini-2.5-flash",
-    "Gemini 2.5 Pro (paid)": "gemini-2.5-pro",
-    "Gemini 2.5 Pro Exp. Preview (Enhanced Reasoning)": "gemini-2.5-pro",
+    "Gemini 1.5 Flash": "gemini-1.5-flash",
+    "Gemini 1.5 Pro": "gemini-1.5-pro",
+    "Gemini 2.0 Flash": "gemini-2.0-flash-lite",
+    "Gemini 2.5 Flash": "gemini-2.5-flash",
+    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
 }
-DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro (paid)"
-if DEFAULT_NOTES_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_NOTES_MODEL_NAME = "Gemini 1.5 Pro (Complex Reasoning)"
-DEFAULT_TRANSCRIPTION_MODEL_NAME = "Gemini 2.5 Flash (Fast & Versatile)"
+DEFAULT_NOTES_MODEL_NAME = "Gemini 2.5 Pro"
+if DEFAULT_NOTES_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_NOTES_MODEL_NAME = "gemini-2.5-flash"
+DEFAULT_TRANSCRIPTION_MODEL_NAME = "gemini-2.5-flash"
 if DEFAULT_TRANSCRIPTION_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_TRANSCRIPTION_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
-DEFAULT_REFINEMENT_MODEL_NAME = "Gemini 2.5 Flash (Fast & Versatile)"
+DEFAULT_REFINEMENT_MODEL_NAME = "gemini-2.5-flash-lite"
 if DEFAULT_REFINEMENT_MODEL_NAME not in AVAILABLE_MODELS: DEFAULT_REFINEMENT_MODEL_NAME = list(AVAILABLE_MODELS.keys())[0]
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 DEFAULT_MEETING_TYPE = MEETING_TYPES[0]
