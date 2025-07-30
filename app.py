@@ -256,8 +256,8 @@ Generate factual notes from the provided transcript, striving for natural senten
         "Generate New Notes": """You are an expert AI assistant creating DETAILED and COMPREHENSIVE notes from an earnings call transcript for an investment firm. Your primary goal is completeness.
 
 **Formatting Requirements (Mandatory):**
-- Use US$ for dollars (US$2.5M), % for percentages, and state comparison periods (+5% YoY, -2% QoQ).
-- Represent fiscal periods accurately (Q3 FY25).
+- Use US$ for dollars (US$ 2.5 mn), % for percentages, and state comparison periods (+5% YoY, -2% QoQ).
+- Represent fiscal periods accurately (Q3FY25).
 - Use bullet points under headings. Each bullet must be a complete sentence.
 - Use crisp, professional language, but **ensure every financial figure, strategic detail, and forward-looking statement is captured. Brevity must not come at the cost of completeness.**
 
