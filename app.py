@@ -914,7 +914,7 @@ if st.session_state.get('processing'):
 
                     if use_chunking:
                         status.update(label=f"📝 Long transcript detected ({word_count} words). Activating chunking... ({time.time() - start_time:.1f}s)")
-                        chunks = chunk_text_by_words(final_source_transcript, chunk_size=4000, overlap=200)
+                        chunks = chunk_text_by_words(final_source_transcript, chunk_size=5000, overlap=200)
                         all_notes, context_package = [], ""
                         for i, chunk in enumerate(chunks):
                             status.update(label=f"🧠 Processing Chunk {i+1}/{len(chunks)}... ({time.time() - start_time:.1f}s)")
