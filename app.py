@@ -325,7 +325,7 @@ for key, value in default_state.items():
     if key not in st.session_state: st.session_state[key] = value
 
 # --- Helper Functions ---
-def chunk_text_by_words(text, chunk_size=4000, overlap=200):
+def chunk_text_by_words(text, chunk_size=5000, overlap=200):
     words = text.split()
     if len(words) <= chunk_size:
         return [text]
