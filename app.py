@@ -53,6 +53,25 @@ AVAILABLE_MODELS = {
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
+SECTOR_OPTIONS = ["Other / Manual Topics", "IT Services", "QSR"]
+SECTOR_TOPICS = {
+    "IT Services": """Future investments related comments (Including GenAI, AI, Data, Cloud, etc):
+Capital allocation:
+Talent supply chain related comments:
+Org structure change:
+Other comments:
+Short-term comments:
+- Guidance:
+- Order booking:
+- Impact of macro slowdown:
+- Vertical wise comments:""",
+    "QSR": """Customer proposition:
+Menu strategy (Includes: new product launches, etc):
+Operational update (Includes: SSSG, SSTG, Price hike, etc):
+Unit economics:
+Store opening:"""
+}
+
 
 EXPERT_MEETING_CHUNK_BASE = """### **NOTES STRUCTURE**
 
@@ -102,6 +121,7 @@ class AppState:
     selected_meeting_type: str = "Expert Meeting"
     selected_note_style: str = "Option 2: Less Verbose"
     earnings_call_mode: str = "Generate New Notes"
+    selected_sector: str = "Other / Manual Topics"
     
     # Model Selection
     notes_model: str = "Gemini 1.5 Pro"
@@ -143,10 +163,15 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
             return file_bytes.read().decode("utf-8"), name
         elif ext in [".wav", ".mp3", ".m4a", ".ogg", ".flac"]:
             audio = AudioSegment.from_file(file_bytes)
-            return f"Simulated transcription for '{name}' ({len(audio)/1000:.1f}s audio).", name
+            return f"Simulated transcription for '{name}' ({len(audio)/1000:.1f}s audio). Actual audio transcription requires more complex chunking and API calls.", name
     except Exception as e:
         return f"Error: Could not process file {name}. Details: {str(e)}", name
     return None, name
+
+@st.cache_data
+def db_get_sectors() -> dict:
+    """Cached function to retrieve sectors from the database."""
+    return database.get_sectors()
 
 def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
     """Constructs the final prompt based on the complete application state."""
@@ -249,8 +274,13 @@ def process_and_save_task(state: AppState, status_ui):
 
 # --- 5. UI RENDERING FUNCTIONS ---
 
+def on_sector_change():
+    """Callback to update topics when the main sector selection changes."""
+    state = st.session_state.app_state
+    all_sectors = db_get_sectors()
+    state.earnings_call_topics = all_sectors.get(state.selected_sector, "")
+
 def render_input_and_processing_tab(state: AppState):
-    # --- Part 1: All Inputs and Configuration ---
     state.input_method = pills("Input Method", ["Paste Text", "Upload File"], index=["Paste Text", "Upload File"].index(state.input_method))
     
     if state.input_method == "Paste Text":
@@ -265,12 +295,70 @@ def render_input_and_processing_tab(state: AppState):
     
     if state.selected_meeting_type == "Expert Meeting":
         state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
+    
     elif state.selected_meeting_type == "Earnings Call":
         state.earnings_call_mode = st.radio("Mode", EARNINGS_CALL_MODES, horizontal=True, index=EARNINGS_CALL_MODES.index(state.earnings_call_mode))
+        
+        all_sectors = db_get_sectors()
+        sector_options = ["Other / Manual Topics"] + sorted(list(all_sectors.keys()))
+        
+        try:
+            current_sector_index = sector_options.index(state.selected_sector)
+        except ValueError:
+            current_sector_index = 0
+
+        state.selected_sector = st.selectbox(
+            "Sector (for Topic Templates)", sector_options, 
+            index=current_sector_index,
+            on_change=on_sector_change,
+            key="sector_selector"
+        )
+        state.earnings_call_topics = st.text_area(
+            "Topic Instructions", value=state.earnings_call_topics, height=150, 
+            placeholder="Select a sector to load a template, or enter topics manually."
+        )
+
+        with st.expander("✏️ Manage Sector Templates"):
+            st.write("Add, edit, or delete the sector templates used in the dropdown above.")
+            
+            st.markdown("**Edit or Delete an Existing Sector**")
+            sector_to_edit = st.selectbox("Select Sector to Edit", sorted(list(all_sectors.keys())))
+            
+            if sector_to_edit:
+                topics_for_edit = st.text_area("Sector Topics", value=all_sectors[sector_to_edit], key=f"topics_{sector_to_edit}")
+                
+                col1, col2 = st.columns([1,1])
+                if col1.button("💾 Save Changes", key=f"save_{sector_to_edit}"):
+                    database.save_sector(sector_to_edit, topics_for_edit)
+                    db_get_sectors.clear()
+                    st.toast(f"✅ Sector '{sector_to_edit}' updated!", icon="💾")
+                    st.rerun()
+
+                if col2.button("❌ Delete Sector", type="primary", key=f"delete_{sector_to_edit}"):
+                    database.delete_sector(sector_to_edit)
+                    db_get_sectors.clear()
+                    state.selected_sector = "Other / Manual Topics"
+                    on_sector_change()
+                    st.toast(f"🗑️ Sector '{sector_to_edit}' deleted!", icon="🗑️")
+                    st.rerun()
+
+            st.divider()
+            st.markdown("**Add a New Sector**")
+            new_sector_name = st.text_input("New Sector Name")
+            new_sector_topics = st.text_area("Topics for New Sector", key="new_sector_topics")
+            
+            if st.button("➕ Add New Sector"):
+                if new_sector_name and new_sector_topics:
+                    database.save_sector(new_sector_name, new_sector_topics)
+                    db_get_sectors.clear()
+                    st.toast(f"✅ Sector '{new_sector_name}' added!", icon="➕")
+                    st.rerun()
+                else:
+                    st.warning("Please provide both a name and topics for the new sector.")
+
         if state.earnings_call_mode == "Enrich Existing Notes":
             state.existing_notes_input = st.text_area("Paste Existing Notes to Enrich:", value=state.existing_notes_input)
-        state.earnings_call_topics = st.text_area("Topic Instructions (Optional)", value=state.earnings_call_topics, placeholder="One topic per line...")
-
+    
     with st.expander("⚙️ Advanced Settings & Models"):
         state.refinement_enabled = st.toggle("Enable Transcript Refinement", value=state.refinement_enabled)
         state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
@@ -293,7 +381,6 @@ def render_input_and_processing_tab(state: AppState):
     
     st.divider()
 
-    # --- Part 2: Processing Logic ---
     st.subheader("🚀 Generate")
     validation_error = validate_inputs(state)
     
@@ -321,7 +408,6 @@ def render_input_and_processing_tab(state: AppState):
         st.code(state.error_message)
 
 def render_output_and_history_tab(state: AppState):
-    # --- Part 1: Active Note Output ---
     st.subheader("📄 Active Note")
     notes = database.get_all_notes()
     if not notes:
@@ -346,7 +432,6 @@ def render_output_and_history_tab(state: AppState):
             
     st.divider()
 
-    # --- Part 2: Analytics and History ---
     st.subheader("📊 Analytics & History")
     summary = database.get_analytics_summary()
     
@@ -371,8 +456,8 @@ def render_output_and_history_tab(state: AppState):
 
 # --- 6. MAIN APPLICATION RUNNER ---
 def run_app():
-    st.set_page_config(page_title="SynthNotes AI 🚀", layout="wide")
-    st.title("SynthNotes AI 🚀")
+    st.set_page_config(page_title="SynthNotes AI", layout="wide")
+    st.title("SynthNotes AI")
     
     if "config_error" in st.session_state:
         st.error(st.session_state.config_error)
@@ -382,6 +467,9 @@ def run_app():
         database.init_db()
         if "app_state" not in st.session_state:
             st.session_state.app_state = AppState()
+            # Initialize topics on first run if they are empty
+            if not st.session_state.app_state.earnings_call_topics:
+                on_sector_change()
 
         tabs = st.tabs(["📝 Input & Generate", "📄 Output & History"])
         
