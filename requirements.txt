@@ -10,5 +10,5 @@ streamlit-extras
 pydantic
 streamlit-pills
 streamlit-ace
-py-docx
+python-docx
 plotly
