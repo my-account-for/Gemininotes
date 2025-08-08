@@ -20,36 +20,30 @@ from enum import Enum
 from streamlit_pills import pills
 from streamlit_ace import st_ace
 import re
+import tempfile
 
 # --- Local Imports ---
 import database
 
 # --- 2. CONSTANTS & CONFIG ---
 load_dotenv()
-
-# Configure the Gemini client safely
 try:
     if "GEMINI_API_KEY" in os.environ and os.environ["GEMINI_API_KEY"]:
         genai.configure(api_key=os.environ["GEMINI_API_KEY"])
     else:
-        st.session_state.config_error = "🔴 GEMINI_API_KEY not found. Please create a .env file and add your key."
+        st.session_state.config_error = "🔴 GEMINI_API_KEY not found."
 except Exception as e:
     st.session_state.config_error = f"🔴 Error configuring Google AI Client: {e}"
 
-# Application Constants
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
 CHUNK_WORD_SIZE = 4500
 CHUNK_WORD_OVERLAP = 200
 
-# Models & Prompts
 AVAILABLE_MODELS = {
-    "Gemini 1.5 Flash": "gemini-1.5-flash",
-    "Gemini 1.5 Pro": "gemini-1.5-pro",
-    "Gemini 2.0 Flash": "gemini-2.0-flash-lite",
-    "Gemini 2.5 Flash": "gemini-2.5-flash",
-    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
-    "Gemini 2.5 Pro": "gemini-2.5-pro",
+    "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
+    "Gemini 2.0 Flash": "gemini-2.0-flash-lite", "Gemini 2.5 Flash": "gemini-2.5-flash",
+    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite", "Gemini 2.5 Pro": "gemini-2.5-pro",
 }
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
@@ -94,7 +88,7 @@ Structure the main body in Question/Answer format.
 -   Use bullet points (`-`) directly below the question.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   **PRIORITY #1: CAPTURE ALL SPECIFICS.**"""
-    
+
 PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze an expert consultation transcript chunk and generate detailed, factual notes.
 Your primary directive is **100% completeness and accuracy**. You will process the transcript sequentially. For every Question/Answer pair you identify, you must generate notes following the structure below.
 ---
@@ -144,6 +138,15 @@ class AppState:
     fallback_content: Optional[str] = None
 
 # --- 4. CORE PROCESSING & UTILITY FUNCTIONS ---
+def safe_get_token_count(response):
+    """Safely get the token count from a response, returning 0 if unavailable."""
+    try:
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            return getattr(response.usage_metadata, 'total_token_count', 0)
+    except (AttributeError, ValueError):
+        pass
+    return 0
+    
 @st.cache_data(ttl=3600)
 def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
     name = uploaded_file.name
@@ -168,18 +171,16 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
 def db_get_sectors() -> dict:
     return database.get_sectors()
 
-def chunk_text_by_words(text, chunk_size=CHUNK_WORD_SIZE, overlap=CHUNK_WORD_OVERLAP):
+def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List[str]:
     words = text.split()
     if len(words) <= chunk_size:
         return [text]
     
-    chunks = []
-    start = 0
+    chunks, start = [], 0
     while start < len(words):
         end = start + chunk_size
         chunks.append(" ".join(words[start:end]))
-        if end >= len(words):
-            break
+        if end >= len(words): break
         start += (chunk_size - overlap)
     return chunks
 
@@ -219,9 +220,9 @@ def validate_inputs(state: AppState) -> Optional[str]:
         size_mb = state.uploaded_file.size / (1024 * 1024)
         ext = os.path.splitext(state.uploaded_file.name)[1].lower()
         if ext == ".pdf" and size_mb > MAX_PDF_MB:
-            return f"PDF file is too large ({size_mb:.1f}MB). Limit is {MAX_PDF_MB}MB."
-        elif ext not in [".pdf", ".txt", ".md"] and size_mb > MAX_AUDIO_MB:
-            return f"Audio file is too large ({size_mb:.1f}MB). Limit is {MAX_AUDIO_MB}MB."
+            return f"PDF is too large ({size_mb:.1f}MB). Limit: {MAX_PDF_MB}MB."
+        elif ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac'] and size_mb > MAX_AUDIO_MB:
+            return f"Audio is too large ({size_mb:.1f}MB). Limit: {MAX_AUDIO_MB}MB."
             
     if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes" and not state.existing_notes_input:
         return "Please provide existing notes for enrichment mode."
@@ -243,25 +244,27 @@ def process_and_save_task(state: AppState, status_ui):
             status_ui.update(label="Step 1.1: Processing Audio...")
             audio_bytes = state.uploaded_file.getvalue()
             audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-            audio_chunks = make_chunks(audio, 5 * 60 * 1000) # 5-minute chunks
             
-            all_transcripts, cloud_files_to_delete, local_files_to_delete = [], [], []
+            chunk_length_ms = 5 * 60 * 1000
+            audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
+            
+            all_transcripts, cloud_files, local_files = [], [], []
             try:
                 for i, chunk in enumerate(audio_chunks):
                     status_ui.update(label=f"Step 1.2: Transcribing audio chunk {i+1}/{len(audio_chunks)}...")
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_chunk_file:
-                        chunk.export(temp_chunk_file.name, format="wav")
-                        local_files_to_delete.append(temp_chunk_file.name)
-                        cloud_file_ref = genai.upload_file(path=temp_chunk_file.name)
-                        cloud_files_to_delete.append(cloud_file_ref.name)
-                        while cloud_file_ref.state.name == "PROCESSING": time.sleep(5); cloud_file_ref = genai.get_file(cloud_file_ref.name)
-                        if cloud_file_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {i+1} failed to process.")
-                        response = transcription_model.generate_content(["Transcribe this audio.", cloud_file_ref])
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
+                        chunk.export(temp_f.name, format="wav")
+                        local_files.append(temp_f.name)
+                        cloud_ref = genai.upload_file(path=temp_f.name)
+                        cloud_files.append(cloud_ref.name)
+                        while cloud_ref.state.name == "PROCESSING": time.sleep(2); cloud_ref = genai.get_file(cloud_ref.name)
+                        if cloud_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {i+1} failed processing.")
+                        response = transcription_model.generate_content(["Transcribe this audio.", cloud_ref])
                         all_transcripts.append(response.text)
                 raw_transcript = "\n\n".join(all_transcripts).strip()
             finally:
-                for path in local_files_to_delete: os.remove(path)
-                for cloud_name in cloud_files_to_delete: 
+                for path in local_files: os.remove(path)
+                for cloud_name in cloud_files: 
                     try: genai.delete_file(cloud_name)
                     except: pass
         
@@ -273,7 +276,7 @@ def process_and_save_task(state: AppState, status_ui):
         raw_transcript = state.text_input
 
     if not raw_transcript: raise ValueError("Source content is empty.")
-
+    
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
 
     if state.refinement_enabled:
@@ -283,14 +286,14 @@ def process_and_save_task(state: AppState, status_ui):
         response = refinement_model.generate_content(refine_prompt)
         refined_transcript = response.text
         final_transcript = refined_transcript
-        total_tokens += response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else 0
+        total_tokens += safe_get_token_count(response)
 
     status_ui.update(label="Step 3: Generating Notes...")
     words = final_transcript.split()
     final_notes_content = ""
 
     if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
-        chunks = chunk_text_by_words(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+        chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
         all_notes, context_package = [], ""
         prompt_base = EXPERT_MEETING_CHUNK_BASE_OPTION_2 if state.selected_note_style != "Option 1: Detailed & Strict" else EXPERT_MEETING_CHUNK_BASE
 
@@ -300,21 +303,21 @@ def process_and_save_task(state: AppState, status_ui):
             prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
             response = notes_model.generate_content(prompt)
             all_notes.append(response.text)
-            total_tokens += response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else 0
+            total_tokens += safe_get_token_count(response)
             context_package = _create_context_from_notes(response.text)
         final_notes_content = "\n\n".join(all_notes)
     else:
         prompt = get_dynamic_prompt(state, final_transcript)
         response = notes_model.generate_content(prompt)
         final_notes_content = response.text
-        total_tokens += response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else 0
+        total_tokens += safe_get_token_count(response)
 
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
         status_ui.update(label="Step 4: Generating Executive Summary...")
         summary_prompt = f"Create a concise executive summary from these notes:\n\n{final_notes_content}"
         response = notes_model.generate_content(summary_prompt)
         final_notes_content += f"\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{response.text}"
-        total_tokens += response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else 0
+        total_tokens += safe_get_token_count(response)
 
     status_ui.update(label="Step 5: Saving to Database...")
     note_data = {
@@ -373,12 +376,9 @@ def render_input_and_processing_tab(state: AppState):
                 topics_for_edit = st.text_area("Sector Topics", value=all_sectors[sector_to_edit], key=f"topics_{sector_to_edit}")
                 col1, col2 = st.columns([1,1])
                 if col1.button("💾 Save Changes", key=f"save_{sector_to_edit}"):
-                    database.save_sector(sector_to_edit, topics_for_edit)
-                    db_get_sectors.clear(); st.toast(f"✅ Sector '{sector_to_edit}' updated!", icon="💾"); st.rerun()
+                    database.save_sector(sector_to_edit, topics_for_edit); db_get_sectors.clear(); st.toast(f"✅ Sector '{sector_to_edit}' updated!", icon="💾"); st.rerun()
                 if col2.button("❌ Delete Sector", type="primary", key=f"delete_{sector_to_edit}"):
-                    database.delete_sector(sector_to_edit)
-                    db_get_sectors.clear(); state.selected_sector = "Other / Manual Topics"; on_sector_change()
-                    st.toast(f"🗑️ Sector '{sector_to_edit}' deleted!", icon="🗑️"); st.rerun()
+                    database.delete_sector(sector_to_edit); db_get_sectors.clear(); state.selected_sector = "Other / Manual Topics"; on_sector_change(); st.toast(f"🗑️ Sector '{sector_to_edit}' deleted!", icon="🗑️"); st.rerun()
 
             st.divider()
             st.markdown("**Add a New Sector**")
@@ -387,8 +387,7 @@ def render_input_and_processing_tab(state: AppState):
             
             if st.button("➕ Add New Sector"):
                 if new_sector_name and new_sector_topics:
-                    database.save_sector(new_sector_name, new_sector_topics)
-                    db_get_sectors.clear(); st.toast(f"✅ Sector '{new_sector_name}' added!", icon="➕"); st.rerun()
+                    database.save_sector(new_sector_name, new_sector_topics); db_get_sectors.clear(); st.toast(f"✅ Sector '{new_sector_name}' added!", icon="➕"); st.rerun()
                 else:
                     st.warning("Please provide both a name and topics for the new sector.")
 
