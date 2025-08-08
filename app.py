@@ -121,12 +121,12 @@ class AppState:
     selected_meeting_type: str = "Expert Meeting"
     selected_note_style: str = "Option 2: Less Verbose"
     earnings_call_mode: str = "Generate New Notes"
-    selected_sector: str = "Other / Manual Topics"
+    selected_sector: str = "IT Services"
     
-    # Model Selection
-    notes_model: str = "Gemini 1.5 Pro"
-    refinement_model: str = "Gemini 1.5 Pro"
-    transcription_model: str = "Gemini 1.5 Flash"
+    # Model Selection - UPDATED DEFAULTS
+    notes_model: str = "Gemini 2.5 Pro"
+    refinement_model: str = "Gemini 2.5 Flash Lite"
+    transcription_model: str = "Gemini 2.5 Flash"
     
     # Toggles & Inputs
     refinement_enabled: bool = True
@@ -256,7 +256,7 @@ def process_and_save_task(state: AppState, status_ui):
 
     final_notes_content = "\n\n---\n\n".join(all_notes)
     
-    if state.selected_note_style == "Option 3: Less Verbose + Summary":
+    if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
         status_ui.update(label="Step 4: Generating Executive Summary...")
         summary_prompt = f"Create a concise executive summary from these notes:\n\n{final_notes_content}"
         response = notes_model.generate_content(summary_prompt)
@@ -318,7 +318,7 @@ def render_input_and_processing_tab(state: AppState):
             placeholder="Select a sector to load a template, or enter topics manually."
         )
 
-        with st.expander("✏️ Manage Sector Templates"):
+        with st.expander("✏️ Manage Sector Templates", expanded=True):
             st.write("Add, edit, or delete the sector templates used in the dropdown above.")
             
             st.markdown("**Edit or Delete an Existing Sector**")
@@ -467,9 +467,7 @@ def run_app():
         database.init_db()
         if "app_state" not in st.session_state:
             st.session_state.app_state = AppState()
-            # Initialize topics on first run if they are empty
-            if not st.session_state.app_state.earnings_call_topics:
-                on_sector_change()
+            on_sector_change()
 
         tabs = st.tabs(["📝 Input & Generate", "📄 Output & History"])
         
