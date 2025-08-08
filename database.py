@@ -47,7 +47,6 @@ def init_db():
         _populate_default_sectors(conn)
 
 def safe_db_operation(operation_func, *args, **kwargs):
-    """FIX #5: Wrapper to handle 'database is locked' errors with retries."""
     max_retries = 5
     for attempt in range(max_retries):
         try:
@@ -55,7 +54,7 @@ def safe_db_operation(operation_func, *args, **kwargs):
                 return operation_func(conn, *args, **kwargs)
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e) and attempt < max_retries - 1:
-                time.sleep(0.1 * (2 ** attempt))  # Exponential backoff
+                time.sleep(0.1 * (2 ** attempt))
                 continue
             else:
                 raise
@@ -98,6 +97,24 @@ def _get_all_notes_op(conn, search_query, date_range, meeting_types):
 
 def get_all_notes(search_query="", date_range=None, meeting_types=None):
     return safe_db_operation(_get_all_notes_op, search_query, date_range, meeting_types)
+
+# --- THIS IS THE MISSING FUNCTION THAT HAS BEEN ADDED BACK ---
+def get_analytics_summary():
+    """Calculates summary metrics from the database."""
+    notes = get_all_notes()
+    if not notes:
+        return {"total_notes": 0, "avg_time": 0, "total_tokens": 0}
+    
+    valid_notes_for_avg = [n for n in notes if n.get('processing_time')]
+    total_time = sum(n.get('processing_time', 0) for n in valid_notes_for_avg)
+    total_tokens = sum(n.get('token_usage', 0) for n in notes if n.get('token_usage'))
+    
+    return {
+        "total_notes": len(notes),
+        "avg_time": total_time / len(valid_notes_for_avg) if valid_notes_for_avg else 0,
+        "total_tokens": total_tokens
+    }
+# ----------------------------------------------------------------
 
 def _get_sectors_op(conn):
     conn.row_factory = sqlite3.Row
