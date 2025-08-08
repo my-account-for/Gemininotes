@@ -1,5 +1,6 @@
 import sqlite3
 import time
+import random
 from datetime import datetime
 
 DB_FILE = "synthnotes.db"
@@ -31,7 +32,7 @@ def _populate_default_sectors(conn):
         conn.commit()
 
 def init_db():
-    with sqlite3.connect(DB_FILE, timeout=10) as conn:
+    with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS notes (
@@ -47,18 +48,21 @@ def init_db():
         _populate_default_sectors(conn)
 
 def safe_db_operation(operation_func, *args, **kwargs):
-    max_retries = 5
+    """Handles 'database is locked' errors with randomized exponential backoff."""
+    max_retries = 3
+    base_delay = 0.1
     for attempt in range(max_retries):
         try:
-            with sqlite3.connect(DB_FILE, timeout=10.0) as conn:
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
                 return operation_func(conn, *args, **kwargs)
         except sqlite3.OperationalError as e:
-            if "database is locked" in str(e) and attempt < max_retries - 1:
-                time.sleep(0.1 * (2 ** attempt))
+            if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 0.1)
+                time.sleep(delay)
                 continue
             else:
-                raise
-    raise Exception("Database remained locked after multiple retries.")
+                raise ConnectionError(f"Database operation failed after retries: {e}")
+    raise ConnectionError("Database remained locked after multiple retries.")
 
 
 def _save_note_op(conn, note_data: dict):
@@ -98,9 +102,7 @@ def _get_all_notes_op(conn, search_query, date_range, meeting_types):
 def get_all_notes(search_query="", date_range=None, meeting_types=None):
     return safe_db_operation(_get_all_notes_op, search_query, date_range, meeting_types)
 
-# --- THIS IS THE MISSING FUNCTION THAT HAS BEEN ADDED BACK ---
 def get_analytics_summary():
-    """Calculates summary metrics from the database."""
     notes = get_all_notes()
     if not notes:
         return {"total_notes": 0, "avg_time": 0, "total_tokens": 0}
@@ -114,7 +116,6 @@ def get_analytics_summary():
         "avg_time": total_time / len(valid_notes_for_avg) if valid_notes_for_avg else 0,
         "total_tokens": total_tokens
     }
-# ----------------------------------------------------------------
 
 def _get_sectors_op(conn):
     conn.row_factory = sqlite3.Row
