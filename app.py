@@ -42,7 +42,14 @@ CHUNK_WORD_SIZE = 4500
 CHUNK_WORD_OVERLAP = 200
 
 # Models & Prompts
-AVAILABLE_MODELS = {"Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro"}
+AVAILABLE_MODELS = {
+    "Gemini 1.5 Flash": "gemini-1.5-flash",
+    "Gemini 1.5 Pro": "gemini-1.5-pro",
+    "Gemini 2.0 Flash": "gemini-2.0-flash-lite",
+    "Gemini 2.5 Flash": "gemini-2.5-flash",
+    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
+}
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
@@ -136,7 +143,6 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
             return file_bytes.read().decode("utf-8"), name
         elif ext in [".wav", ".mp3", ".m4a", ".ogg", ".flac"]:
             audio = AudioSegment.from_file(file_bytes)
-            # This is a placeholder for actual audio transcription, which is a complex task involving chunking and multiple API calls.
             return f"Simulated transcription for '{name}' ({len(audio)/1000:.1f}s audio).", name
     except Exception as e:
         return f"Error: Could not process file {name}. Details: {str(e)}", name
@@ -243,7 +249,8 @@ def process_and_save_task(state: AppState, status_ui):
 
 # --- 5. UI RENDERING FUNCTIONS ---
 
-def render_input_tab(state: AppState):
+def render_input_and_processing_tab(state: AppState):
+    # --- Part 1: All Inputs and Configuration ---
     state.input_method = pills("Input Method", ["Paste Text", "Upload File"], index=["Paste Text", "Upload File"].index(state.input_method))
     
     if state.input_method == "Paste Text":
@@ -283,11 +290,14 @@ def render_input_tab(state: AppState):
     st.subheader("Prompt Preview")
     prompt_preview = get_dynamic_prompt(state, "[...transcript content will be inserted here...]")
     st_ace(value=prompt_preview, language='markdown', theme='github', height=200, readonly=True, key="prompt_preview_ace")
+    
+    st.divider()
 
-def render_processing_tab(state: AppState):
+    # --- Part 2: Processing Logic ---
+    st.subheader("🚀 Generate")
     validation_error = validate_inputs(state)
     
-    if st.button("🚀 Generate Notes", type="primary", use_container_width=True, disabled=bool(validation_error)):
+    if st.button("Generate Notes", type="primary", use_container_width=True, disabled=bool(validation_error)):
         state.processing = True
         state.error_message = None
         st.rerun()
@@ -296,11 +306,11 @@ def render_processing_tab(state: AppState):
         st.warning(f"⚠️ Please fix the following: {validation_error}")
         
     if state.processing:
-        with st.status("🚀 Processing your request...", expanded=True) as status:
+        with st.status("Processing your request...", expanded=True) as status:
             try:
                 final_note = process_and_save_task(state, status)
                 state.active_note_id = final_note['id']
-                status.update(label="✅ Success! View your note in the 'Output' tab.", state="complete")
+                status.update(label="✅ Success! View your note in the 'Output & History' tab.", state="complete")
             except Exception as e:
                 state.error_message = f"{e}\n\n{traceback.format_exc()}"
                 status.update(label=f"❌ Error: {e}", state="error")
@@ -310,10 +320,12 @@ def render_processing_tab(state: AppState):
         st.error("Last run failed. See details below:")
         st.code(state.error_message)
 
-def render_output_tab(state: AppState):
+def render_output_and_history_tab(state: AppState):
+    # --- Part 1: Active Note Output ---
+    st.subheader("📄 Active Note")
     notes = database.get_all_notes()
     if not notes:
-        st.info("No notes have been generated yet.")
+        st.info("No notes have been generated yet. Go to the 'Input & Generate' tab to create one.")
         return
         
     if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
@@ -321,7 +333,7 @@ def render_output_tab(state: AppState):
 
     active_note = next((n for n in notes if n['id'] == state.active_note_id), notes[0])
     
-    st.subheader(f"📄 Viewing Note for: {active_note['file_name']}")
+    st.markdown(f"**Viewing Note for:** `{active_note['file_name']}`")
     st.caption(f"ID: {active_note['id']} | Generated: {datetime.fromisoformat(active_note['created_at']).strftime('%Y-%m-%d %H:%M')}")
     
     edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
@@ -331,19 +343,18 @@ def render_output_tab(state: AppState):
             st.text_area("Refined Transcript", value=active_note['refined_transcript'], height=200, disabled=True, key=f"refined_tx_{active_note['id']}")
         if active_note['raw_transcript']:
             st.text_area("Raw Source", value=active_note['raw_transcript'], height=200, disabled=True, key=f"raw_tx_{active_note['id']}")
+            
+    st.divider()
 
-def render_analytics_tab(state: AppState):
+    # --- Part 2: Analytics and History ---
     st.subheader("📊 Analytics & History")
     summary = database.get_analytics_summary()
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Notes", summary['total_notes'])
+    c1.metric("Total Notes in DB", summary['total_notes'])
     c2.metric("Avg. Time / Note", f"{summary['avg_time']:.1f}s")
     c3.metric("Total Tokens (Est.)", f"{summary['total_tokens']:,}")
 
-    st.subheader("📚 Note History")
-    notes = database.get_all_notes()
-    
     for note in notes:
         with st.container(border=True):
             col1, col2 = st.columns([4, 1])
@@ -351,9 +362,9 @@ def render_analytics_tab(state: AppState):
                 st.markdown(f"**File:** `{note['file_name']}` ({note['meeting_type']})")
                 st.caption(f"ID: {note['id']} | {datetime.fromisoformat(note['created_at']).strftime('%Y-%m-%d %H:%M')}")
             with col2:
-                if st.button("View", key=f"view_{note['id']}", use_container_width=True):
+                if st.button("Set as Active", key=f"view_{note['id']}", use_container_width=True):
                     state.active_note_id = note['id']
-                    st.toast(f"Loaded '{note['file_name']}'.")
+                    st.rerun()
             
             with st.expander("Preview"):
                 st.markdown(note['content'])
@@ -361,7 +372,7 @@ def render_analytics_tab(state: AppState):
 # --- 6. MAIN APPLICATION RUNNER ---
 def run_app():
     st.set_page_config(page_title="SynthNotes AI 🚀", layout="wide")
-    st.title("SynthNotes AI 🚀 (Fully Functional)")
+    st.title("SynthNotes AI 🚀")
     
     if "config_error" in st.session_state:
         st.error(st.session_state.config_error)
@@ -372,12 +383,10 @@ def run_app():
         if "app_state" not in st.session_state:
             st.session_state.app_state = AppState()
 
-        tabs = st.tabs(["📝 Input & Config", "⚙️ Processing", "📄 Output", "📊 History & Analytics"])
+        tabs = st.tabs(["📝 Input & Generate", "📄 Output & History"])
         
-        with tabs[0]: render_input_tab(st.session_state.app_state)
-        with tabs[1]: render_processing_tab(st.session_state.app_state)
-        with tabs[2]: render_output_tab(st.session_state.app_state)
-        with tabs[3]: render_analytics_tab(st.session_state.app_state)
+        with tabs[0]: render_input_and_processing_tab(st.session_state.app_state)
+        with tabs[1]: render_output_and_history_tab(st.session_state.app_state)
     
     except Exception as e:
         st.error("A critical application error occurred.")
