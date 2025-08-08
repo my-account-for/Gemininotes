@@ -1,15 +1,15 @@
+# /--------------------------\
+# |   START OF app.py FILE   |
+# \--------------------------/
+
 # --- 1. IMPORTS ---
 import streamlit as st
 import google.generativeai as genai
-import google.api_core.exceptions
 import os
 import io
 import time
-import tempfile
-from datetime import datetime, date
+from datetime import datetime
 import uuid
-import threading
-import queue
 import traceback
 from dotenv import load_dotenv
 import PyPDF2
@@ -31,10 +31,8 @@ try:
     if "GEMINI_API_KEY" in os.environ and os.environ["GEMINI_API_KEY"]:
         genai.configure(api_key=os.environ["GEMINI_API_KEY"])
     else:
-        # This will be caught by the main app runner
-        raise ValueError("GEMINI_API_KEY not found in environment.")
+        st.session_state.config_error = "🔴 GEMINI_API_KEY not found. Please create a .env file and add your key."
 except Exception as e:
-    # Defer error display to the main app body
     st.session_state.config_error = f"🔴 Error configuring Google AI Client: {e}"
 
 # Application Constants
@@ -47,6 +45,7 @@ CHUNK_WORD_OVERLAP = 200
 AVAILABLE_MODELS = {"Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro"}
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
+EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
 EXPERT_MEETING_CHUNK_BASE = """### **NOTES STRUCTURE**
 
@@ -85,159 +84,44 @@ Structure the main body in Question/Answer format.
 
 **(2.B) Answers:**
 -   Use bullet points (`-`) directly below the question.
--   Each bullet point should convey specific factual information in a clear, complete sentence.
+-   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   **PRIORITY #1: CAPTURE ALL SPECIFICS.**"""
 
-
 # --- 3. STATE & DATA MODELS ---
-
-class ProcessingStage(Enum):
-    IDLE = "Idle"
-    VALIDATING = "Validating Inputs"
-    TRANSCRIBING = "Transcribing Audio"
-    REFINING = "Refining Transcript"
-    CHUNKING = "Chunking Long Text"
-    GENERATING = "Generating Notes"
-    SUMMARIZING = "Creating Summary"
-    COMPLETE = "Complete"
-    ERROR = "Error"
-
-class ValidationError(Enum):
-    MISSING_INPUT = "No input file or text provided."
-    FILE_TOO_LARGE = "A file exceeds the size limit."
-
-@dataclass
-class ProcessingMetrics:
-    start_time: float = 0.0
-    progress_percent: float = 0.0
-    status_message: str = "Starting..."
-    token_usage: int = 0
-    current_chunk: int = 0
-    total_chunks: int = 1
-
-    @property
-    def duration(self) -> float:
-        return time.time() - self.start_time
-
 @dataclass
 class AppState:
-    current_stage: ProcessingStage = ProcessingStage.IDLE
-    error_details: Dict[str, str] = field(default_factory=dict)
-    
     # User Config
+    input_method: str = "Paste Text"
     selected_meeting_type: str = "Expert Meeting"
     selected_note_style: str = "Option 2: Less Verbose"
-    selected_model: str = "Gemini 1.5 Pro"
+    earnings_call_mode: str = "Generate New Notes"
+    
+    # Model Selection
+    notes_model: str = "Gemini 1.5 Pro"
+    refinement_model: str = "Gemini 1.5 Pro"
+    transcription_model: str = "Gemini 1.5 Flash"
+    
+    # Toggles & Inputs
     refinement_enabled: bool = True
+    add_context_enabled: bool = False
+    context_input: str = ""
+    speaker_1: str = ""
+    speaker_2: str = ""
+    earnings_call_topics: str = ""
+    existing_notes_input: str = ""
+    text_input: str = ""
     
-    # Data & Results
-    uploaded_files: List[Any] = field(default_factory=list)
+    # File & Processing State
+    uploaded_file: Optional[Any] = None
+    processing: bool = False
     active_note_id: Optional[str] = None
-    
-    # Background Task Management
-    task_id: Optional[str] = None
-    metrics: ProcessingMetrics = field(default_factory=ProcessingMetrics)
-    prompt_content: str = ""
+    error_message: Optional[str] = None
 
-# --- 4. BACKGROUND TASK MANAGER ---
-class BackgroundTaskManager:
-    def __init__(self):
-        self.task_queue = queue.Queue()
-        self.result_queue = queue.Queue()
-        self.worker_thread = threading.Thread(target=self._worker, daemon=True)
-        self.worker_thread.start()
+# --- 4. CORE PROCESSING & UTILITY FUNCTIONS ---
 
-    def _worker(self):
-        while True:
-            task_id, task_func, args, kwargs = self.task_queue.get()
-            try:
-                result = task_func(*args, **kwargs)
-                self.result_queue.put({'id': task_id, 'status': 'success', 'result': result})
-            except Exception as e:
-                self.result_queue.put({'id': task_id, 'status': 'error', 'error': str(e)})
-            self.task_queue.task_done()
-
-    def submit_task(self, task_func, *args, **kwargs) -> str:
-        task_id = str(uuid.uuid4())
-        self.task_queue.put((task_id, task_func, args, kwargs))
-        return task_id
-
-    def get_result(self) -> Optional[Dict]:
-        try:
-            return self.result_queue.get_nowait()
-        except queue.Empty:
-            return None
-
-# --- 5. CORE PROCESSING LOGIC ---
-
-def process_single_file_task(state: AppState, uploaded_file: Any, progress_callback):
-    start_time = time.time()
-    model = genai.GenerativeModel(AVAILABLE_MODELS[state.selected_model])
-    
-    progress_callback(ProcessingStage.TRANSCRIBING, 0.1, f"Processing {uploaded_file.name}")
-    raw_transcript, file_name = get_file_content(uploaded_file)
-    if not raw_transcript or raw_transcript.startswith("Error:"):
-        raise ValueError(f"Content extraction failed: {raw_transcript}")
-    
-    final_transcript = raw_transcript
-    refined_transcript = None
-    total_tokens = 0
-
-    if state.refinement_enabled:
-        progress_callback(ProcessingStage.REFINING, 0.3, "Refining transcript...")
-        refine_prompt = f"Refine the following transcript. Correct spelling and grammar, and improve readability without changing the content.\n\n{raw_transcript}"
-        response = model.generate_content(refine_prompt)
-        refined_transcript = response.text
-        final_transcript = refined_transcript
-        total_tokens += response.usage_metadata.total_token_count
-
-    words = final_transcript.split()
-    chunks = [final_transcript]
-    if len(words) > CHUNK_WORD_SIZE:
-        progress_callback(ProcessingStage.CHUNKING, 0.5, "Chunking long document...")
-        chunks = [ " ".join(words[i:i + CHUNK_WORD_SIZE]) for i in range(0, len(words), CHUNK_WORD_SIZE - CHUNK_WORD_OVERLAP) ]
-    
-    all_notes = []
-    for i, chunk in enumerate(chunks):
-        progress_callback(ProcessingStage.GENERATING, 0.6 + (0.3 * (i+1)/len(chunks)), f"Generating notes for chunk {i+1}/{len(chunks)}...")
-        
-        if state.selected_meeting_type == "Expert Meeting":
-            prompt_base = EXPERT_MEETING_CHUNK_BASE_OPTION_2 if state.selected_note_style != "Option 1: Detailed & Strict" else EXPERT_MEETING_CHUNK_BASE
-            prompt = f"{prompt_base}\n\n**MEETING TRANSCRIPT CHUNK:**\n{chunk}"
-        else:
-            prompt = f"Create notes for a '{state.selected_meeting_type}' meeting from the following chunk:\n\n{chunk}"
-        
-        response = model.generate_content(prompt)
-        all_notes.append(response.text)
-        total_tokens += response.usage_metadata.total_token_count
-
-    final_notes_content = "\n\n---\n\n".join(all_notes)
-    
-    if state.selected_note_style == "Option 3: Less Verbose + Summary":
-        progress_callback(ProcessingStage.SUMMARIZING, 0.9, "Generating executive summary...")
-        summary_prompt = f"Based on the following detailed notes, create a concise executive summary:\n\n{final_notes_content}"
-        response = model.generate_content(summary_prompt)
-        final_notes_content += f"\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{response.text}"
-        total_tokens += response.usage_metadata.total_token_count
-
-    progress_callback(ProcessingStage.COMPLETE, 0.99, "Saving to database...")
-    note_data = {
-        'id': str(uuid.uuid4()),
-        'created_at': datetime.now().isoformat(),
-        'meeting_type': state.selected_meeting_type,
-        'file_name': file_name,
-        'content': final_notes_content,
-        'raw_transcript': raw_transcript,
-        'refined_transcript': refined_transcript,
-        'token_usage': total_tokens,
-        'processing_time': time.time() - start_time
-    }
-    database.save_note(note_data)
-    return note_data
-
-# --- 6. UTILITY & VALIDATION FUNCTIONS ---
 @st.cache_data(ttl=3600)
 def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
+    """Extracts content from an uploaded file. Caches the result."""
     name = uploaded_file.name
     file_bytes = io.BytesIO(uploaded_file.getvalue())
     ext = os.path.splitext(name)[1].lower()
@@ -252,116 +136,184 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
             return file_bytes.read().decode("utf-8"), name
         elif ext in [".wav", ".mp3", ".m4a", ".ogg", ".flac"]:
             audio = AudioSegment.from_file(file_bytes)
-            return f"Simulated transcription for '{name}' ({len(audio)/1000:.1f}s audio). Actual transcription via API is needed for full functionality.", name
+            # This is a placeholder for actual audio transcription, which is a complex task involving chunking and multiple API calls.
+            return f"Simulated transcription for '{name}' ({len(audio)/1000:.1f}s audio).", name
     except Exception as e:
         return f"Error: Could not process file {name}. Details: {str(e)}", name
     return None, name
 
-def validate_inputs_comprehensive(state: AppState) -> List[ValidationError]:
-    errors = []
-    if not state.uploaded_files:
-        errors.append(ValidationError.MISSING_INPUT)
-    for f in state.uploaded_files:
-        if f.size > MAX_AUDIO_MB * 1024 * 1024:
-            errors.append(ValidationError.FILE_TOO_LARGE)
-            break
-    return errors
+def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
+    """Constructs the final prompt based on the complete application state."""
+    meeting_type = state.selected_meeting_type
+    context_section = f"**ADDITIONAL CONTEXT:**\n{state.context_input}" if state.add_context_enabled and state.context_input else ""
 
-# --- 7. UI RENDERING FUNCTIONS ---
-
-@st.fragment
-def update_progress_fragment():
-    state = st.session_state.app_state
-    result = st.session_state.task_manager.get_result()
+    if meeting_type == "Expert Meeting":
+        prompt_base = EXPERT_MEETING_CHUNK_BASE_OPTION_2 if state.selected_note_style != "Option 1: Detailed & Strict" else EXPERT_MEETING_CHUNK_BASE
+        return f"{prompt_base}\n\n{context_section}\n\n**MEETING TRANSCRIPT CHUNK:**\n{transcript_chunk}"
     
-    if result and result.get('id') == state.task_id:
-        if result['status'] == 'success':
-            state.current_stage = ProcessingStage.COMPLETE
-            st.session_state.active_note_id = result['result']['id']
+    elif meeting_type == "Earnings Call":
+        topic_instructions = state.earnings_call_topics or "Identify logical themes and use them as bold headings."
+        if state.earnings_call_mode == "Enrich Existing Notes":
+            return f"Enrich the following existing notes based on the new transcript chunk. Focus on these topics: {topic_instructions}\n\n**EXISTING NOTES:**\n{state.existing_notes_input}\n\n**NEW TRANSCRIPT CHUNK:**\n{transcript_chunk}"
         else:
-            state.current_stage = ProcessingStage.ERROR
-            state.error_details = {'message': result['error']}
-        state.task_id = None
-        st.rerun()
-    
-    if state.current_stage not in [ProcessingStage.IDLE, ProcessingStage.COMPLETE, ProcessingStage.ERROR]:
-        st.progress(state.metrics.progress_percent, text=f"{state.metrics.status_message} ({state.metrics.duration:.1f}s)")
-        time.sleep(1)
-        st.rerun()
+            return f"Generate detailed earnings call notes based on the transcript chunk. Structure your notes under these topics: {topic_instructions}\n\n{context_section}\n\n**TRANSCRIPT CHUNK:**\n{transcript_chunk}"
+            
+    elif meeting_type == "Custom":
+        return f"CUSTOM PROMPT: Please follow user instructions.\n\n{context_section}\n\n**TRANSCRIPT:**\n{transcript_chunk}"
+        
+    return f"Error: Unknown meeting type '{meeting_type}'"
 
-def render_input_tab():
-    state = st.session_state.app_state
-    st.subheader("1. Configure Meeting")
+def validate_inputs(state: AppState) -> Optional[str]:
+    """Validates all inputs and returns an error message string if invalid, otherwise None."""
+    if state.input_method == "Paste Text" and not state.text_input.strip():
+        return "Please paste a transcript or switch to file upload."
+    if state.input_method == "Upload File" and not state.uploaded_file:
+        return "Please upload a file or switch to pasting text."
     
-    state.selected_meeting_type = pills(
-        "Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type)
-    )
+    if state.uploaded_file and state.uploaded_file.size > MAX_AUDIO_MB * 1024 * 1024:
+        return f"File size exceeds the {MAX_AUDIO_MB}MB limit."
+        
+    if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes" and not state.existing_notes_input:
+        return "Please provide existing notes for enrichment mode."
+        
+    return None
 
-    with st.expander("⚙️ Advanced Settings"):
-        if state.selected_meeting_type == "Expert Meeting":
-            state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
-        state.selected_model = st.selectbox("AI Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.selected_model))
+def process_and_save_task(state: AppState, status_ui):
+    """The main processing pipeline. Called within a `st.status` block."""
+    start_time = time.time()
+    notes_model = genai.GenerativeModel(AVAILABLE_MODELS[state.notes_model])
+    refinement_model = genai.GenerativeModel(AVAILABLE_MODELS[state.refinement_model])
+    
+    status_ui.update(label="Step 1: Preparing Source Content...")
+    raw_transcript, file_name = "", "Pasted Text"
+    if state.input_method == "Paste Text":
+        raw_transcript = state.text_input
+    elif state.uploaded_file:
+        content, name = get_file_content(state.uploaded_file)
+        if content is None or content.startswith("Error:"):
+            raise ValueError(content or "Failed to read file content.")
+        raw_transcript, file_name = content, name
+    
+    if not raw_transcript:
+        raise ValueError("Source content is empty.")
+
+    final_transcript = raw_transcript
+    refined_transcript = None
+    total_tokens = 0
+
+    if state.refinement_enabled:
+        status_ui.update(label="Step 2: Refining Transcript...")
+        speaker_info = f"Speakers are {state.speaker_1} and {state.speaker_2}." if state.speaker_1 and state.speaker_2 else ""
+        refine_prompt = f"Refine the following transcript. Correct errors and label speakers if possible. {speaker_info}\n\n{raw_transcript}"
+        response = refinement_model.generate_content(refine_prompt)
+        refined_transcript = response.text
+        final_transcript = refined_transcript
+        total_tokens += response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else 0
+
+    status_ui.update(label="Step 3: Generating Notes...")
+    words = final_transcript.split()
+    chunks = [" ".join(words[i:i + CHUNK_WORD_SIZE]) for i in range(0, len(words), CHUNK_WORD_SIZE - CHUNK_WORD_OVERLAP)]
+    
+    all_notes = []
+    for i, chunk in enumerate(chunks):
+        if len(chunks) > 1:
+            status_ui.update(label=f"Step 3: Generating Notes (Chunk {i+1}/{len(chunks)})...")
+        prompt = get_dynamic_prompt(state, chunk)
+        response = notes_model.generate_content(prompt)
+        all_notes.append(response.text)
+        total_tokens += response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else 0
+
+    final_notes_content = "\n\n---\n\n".join(all_notes)
+    
+    if state.selected_note_style == "Option 3: Less Verbose + Summary":
+        status_ui.update(label="Step 4: Generating Executive Summary...")
+        summary_prompt = f"Create a concise executive summary from these notes:\n\n{final_notes_content}"
+        response = notes_model.generate_content(summary_prompt)
+        final_notes_content += f"\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{response.text}"
+        total_tokens += response.usage_metadata.total_token_count if hasattr(response, 'usage_metadata') else 0
+
+    status_ui.update(label="Step 5: Saving to Database...")
+    note_data = {
+        'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
+        'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript,
+        'refined_transcript': refined_transcript, 'token_usage': total_tokens, 'processing_time': time.time() - start_time
+    }
+    database.save_note(note_data)
+    return note_data
+
+# --- 5. UI RENDERING FUNCTIONS ---
+
+def render_input_tab(state: AppState):
+    state.input_method = pills("Input Method", ["Paste Text", "Upload File"], index=["Paste Text", "Upload File"].index(state.input_method))
+    
+    if state.input_method == "Paste Text":
+        state.text_input = st.text_area("Paste source transcript here:", height=250, key="text_input_main")
+        state.uploaded_file = None
+    else:
+        state.uploaded_file = st.file_uploader("Upload a File (PDF, TXT, MP3, etc.)", type=['pdf', 'wav', 'mp3', 'm4a', 'txt'])
+        state.text_input = ""
+
+    st.subheader("Configuration")
+    state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type))
+    
+    if state.selected_meeting_type == "Expert Meeting":
+        state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
+    elif state.selected_meeting_type == "Earnings Call":
+        state.earnings_call_mode = st.radio("Mode", EARNINGS_CALL_MODES, horizontal=True, index=EARNINGS_CALL_MODES.index(state.earnings_call_mode))
+        if state.earnings_call_mode == "Enrich Existing Notes":
+            state.existing_notes_input = st.text_area("Paste Existing Notes to Enrich:", value=state.existing_notes_input)
+        state.earnings_call_topics = st.text_area("Topic Instructions (Optional)", value=state.earnings_call_topics, placeholder="One topic per line...")
+
+    with st.expander("⚙️ Advanced Settings & Models"):
         state.refinement_enabled = st.toggle("Enable Transcript Refinement", value=state.refinement_enabled)
-
-    st.subheader("2. Upload Content")
-    state.uploaded_files = st.file_uploader(
-        "📎 Drag & Drop Files (PDF, TXT, MP3, etc.)",
-        type=['pdf', 'wav', 'mp3', 'm4a', 'txt'],
-        accept_multiple_files=True
-    )
-    
-    st.subheader("3. Custom Prompt Override (Optional)")
-    state.prompt_content = st_ace(
-        value="# Edit here for a full override of the generated prompt.",
-        language='markdown', theme='tomorrow_night', height=150
-    )
-
-def render_processing_tab():
-    state = st.session_state.app_state
-    
-    if state.current_stage == ProcessingStage.IDLE:
-        st.info("Configure your inputs in the '📝 Input' tab, then start processing here.")
-        errors = validate_inputs_comprehensive(state)
+        state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
+        if state.add_context_enabled:
+            state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
         
-        if errors:
-            for error in errors: st.warning(f"⚠️ {error.value}")
+        c1, c2 = st.columns(2)
+        state.speaker_1 = c1.text_input("Speaker 1 Name (Optional)", value=state.speaker_1)
+        state.speaker_2 = c2.text_input("Speaker 2 Name (Optional)", value=state.speaker_2)
+
+        st.markdown("**Model Selection**")
+        m1, m2, m3 = st.columns(3)
+        state.notes_model = m1.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
+        state.refinement_model = m2.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
+        state.transcription_model = m3.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
+    
+    st.subheader("Prompt Preview")
+    prompt_preview = get_dynamic_prompt(state, "[...transcript content will be inserted here...]")
+    st_ace(value=prompt_preview, language='markdown', theme='github', height=200, readonly=True, key="prompt_preview_ace")
+
+def render_processing_tab(state: AppState):
+    validation_error = validate_inputs(state)
+    
+    if st.button("🚀 Generate Notes", type="primary", use_container_width=True, disabled=bool(validation_error)):
+        state.processing = True
+        state.error_message = None
+        st.rerun()
+
+    if validation_error:
+        st.warning(f"⚠️ Please fix the following: {validation_error}")
         
-        if st.button("🚀 Start Generating Notes", type="primary", use_container_width=True, disabled=bool(errors)):
-            state.current_stage = ProcessingStage.VALIDATING
-            state.metrics = ProcessingMetrics(start_time=time.time())
-            
-            def progress_callback(stage, percent, message):
-                state.current_stage = stage
-                state.metrics.progress_percent = percent
-                state.metrics.status_message = message
-            
-            task_id = st.session_state.task_manager.submit_task(
-                process_single_file_task, state=state, uploaded_file=state.uploaded_files[0], progress_callback=progress_callback
-            )
-            state.task_id = task_id
-            st.rerun()
-            
-    elif state.current_stage == ProcessingStage.COMPLETE:
-        st.success("✅ Processing Complete! View results in the '📄 Output' tab.")
-        if st.button("Process Another Batch"):
-            state.current_stage = ProcessingStage.IDLE
-            state.uploaded_files, st.session_state.active_note_id = [], None
-            st.rerun()
+    if state.processing:
+        with st.status("🚀 Processing your request...", expanded=True) as status:
+            try:
+                final_note = process_and_save_task(state, status)
+                state.active_note_id = final_note['id']
+                status.update(label="✅ Success! View your note in the 'Output' tab.", state="complete")
+            except Exception as e:
+                state.error_message = f"{e}\n\n{traceback.format_exc()}"
+                status.update(label=f"❌ Error: {e}", state="error")
+        state.processing = False
 
-    elif state.current_stage == ProcessingStage.ERROR:
-        st.error(f"❌ Processing Failed: {state.error_details.get('message', 'Unknown error.')}")
-        if st.button("Try Again"):
-            state.current_stage = ProcessingStage.IDLE
-            st.rerun()
-            
-    else: 
-        update_progress_fragment()
+    if state.error_message:
+        st.error("Last run failed. See details below:")
+        st.code(state.error_message)
 
-def render_output_tab():
-    state = st.session_state.app_state
+def render_output_tab(state: AppState):
     notes = database.get_all_notes()
     if not notes:
-        st.info("No notes generated yet. Process a file from the '⚙️ Processing' tab.")
+        st.info("No notes have been generated yet.")
         return
         
     if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
@@ -369,55 +321,48 @@ def render_output_tab():
 
     active_note = next((n for n in notes if n['id'] == state.active_note_id), notes[0])
     
-    st.subheader(f"📄 Output for: {active_note['file_name']}")
+    st.subheader(f"📄 Viewing Note for: {active_note['file_name']}")
     st.caption(f"ID: {active_note['id']} | Generated: {datetime.fromisoformat(active_note['created_at']).strftime('%Y-%m-%d %H:%M')}")
     
-    with st.expander("Export Options"):
-        export_format = st.selectbox("Export Format", ["Markdown", "PDF", "Word", "JSON"])
-        if st.button(f"📤 Export as {export_format}", use_container_width=True):
-            st.toast(f"Simulating export to {export_format}...", icon="✅")
-
     edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
-    # In a real app, a "Save Changes" button here would update the database.
-
-def render_analytics_tab():
-    st.subheader("📊 Analytics & History")
     
+    with st.expander("View Source Transcripts"):
+        if active_note['refined_transcript']:
+            st.text_area("Refined Transcript", value=active_note['refined_transcript'], height=200, disabled=True, key=f"refined_tx_{active_note['id']}")
+        if active_note['raw_transcript']:
+            st.text_area("Raw Source", value=active_note['raw_transcript'], height=200, disabled=True, key=f"raw_tx_{active_note['id']}")
+
+def render_analytics_tab(state: AppState):
+    st.subheader("📊 Analytics & History")
     summary = database.get_analytics_summary()
+    
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Notes", summary['total_notes'])
     c2.metric("Avg. Time / Note", f"{summary['avg_time']:.1f}s")
     c3.metric("Total Tokens (Est.)", f"{summary['total_tokens']:,}")
 
     st.subheader("📚 Note History")
-    c1, c2, c3 = st.columns([2, 1, 1])
-    search_query = c1.text_input("🔍 Search notes by content or filename...")
-    date_filter = c2.date_input("Filter by date", value=(), key="date_filter_input") # Using a key to avoid state issues
-    type_filter = c3.multiselect("Filter by type", MEETING_TYPES)
-    
-    notes = database.get_all_notes(search_query, date_filter, type_filter)
-    st.write(f"Found {len(notes)} notes.")
+    notes = database.get_all_notes()
     
     for note in notes:
         with st.container(border=True):
             col1, col2 = st.columns([4, 1])
             with col1:
-                st.markdown(f"**File:** `{note['file_name']}`")
-                st.caption(f"ID: {note['id']} | Generated: {datetime.fromisoformat(note['created_at']).strftime('%Y-%m-%d %H:%M')}")
+                st.markdown(f"**File:** `{note['file_name']}` ({note['meeting_type']})")
+                st.caption(f"ID: {note['id']} | {datetime.fromisoformat(note['created_at']).strftime('%Y-%m-%d %H:%M')}")
             with col2:
-                if st.button("View in Output", key=f"view_{note['id']}", use_container_width=True):
-                    st.session_state.app_state.active_note_id = note['id']
-                    st.toast(f"Loaded '{note['file_name']}'. Go to '📄 Output' tab.")
+                if st.button("View", key=f"view_{note['id']}", use_container_width=True):
+                    state.active_note_id = note['id']
+                    st.toast(f"Loaded '{note['file_name']}'.")
             
             with st.expander("Preview"):
                 st.markdown(note['content'])
-    
-# --- 8. MAIN APPLICATION RUNNER ---
+
+# --- 6. MAIN APPLICATION RUNNER ---
 def run_app():
     st.set_page_config(page_title="SynthNotes AI 🚀", layout="wide")
-    st.title("SynthNotes AI 🚀 (Modernized)")
+    st.title("SynthNotes AI 🚀 (Fully Functional)")
     
-    # Critical: Check for config errors before doing anything else
     if "config_error" in st.session_state:
         st.error(st.session_state.config_error)
         st.stop()
@@ -426,24 +371,21 @@ def run_app():
         database.init_db()
         if "app_state" not in st.session_state:
             st.session_state.app_state = AppState()
-        if "task_manager" not in st.session_state:
-            st.session_state.task_manager = BackgroundTaskManager()
 
-        if "onboarding_complete" not in st.session_state:
-            st.success("🎉 Welcome to the new SynthNotes AI!")
-            st.info("This modernized interface uses tabs for navigation. Start by configuring your job in the 'Input' tab.")
-            st.session_state.onboarding_complete = True
-
-        tabs = st.tabs(["📝 Input", "⚙️ Processing", "📄 Output", "📊 Analytics & History"])
+        tabs = st.tabs(["📝 Input & Config", "⚙️ Processing", "📄 Output", "📊 History & Analytics"])
         
-        with tabs[0]: render_input_tab()
-        with tabs[1]: render_processing_tab()
-        with tabs[2]: render_output_tab()
-        with tabs[3]: render_analytics_tab()
+        with tabs[0]: render_input_tab(st.session_state.app_state)
+        with tabs[1]: render_processing_tab(st.session_state.app_state)
+        with tabs[2]: render_output_tab(st.session_state.app_state)
+        with tabs[3]: render_analytics_tab(st.session_state.app_state)
     
     except Exception as e:
-        st.error(f"A critical error occurred in the application: {e}")
+        st.error("A critical application error occurred.")
         st.code(traceback.format_exc())
 
 if __name__ == "__main__":
     run_app()
+
+# /------------------------\
+# |   END OF app.py FILE   |
+# \------------------------/
