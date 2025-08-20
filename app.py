@@ -123,7 +123,7 @@ class AppState:
     notes_model: str = "Gemini 2.5 Pro"
     refinement_model: str = "Gemini 2.5 Flash Lite"
     transcription_model: str = "Gemini 2.5 Flash"
-    refinement_enabled: bool = False
+    refinement_enabled: bool = True
     add_context_enabled: bool = False
     context_input: str = ""
     speaker_1: str = ""
@@ -279,14 +279,61 @@ def process_and_save_task(state: AppState, status_ui):
     
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
 
+    # --- START OF CORRECTED REFINEMENT LOGIC ---
     if state.refinement_enabled:
         status_ui.update(label="Step 2: Refining Transcript...")
-        speaker_info = f"Speakers are {state.speaker_1} and {state.speaker_2}." if state.speaker_1 and state.speaker_2 else ""
-        refine_prompt = f"Refine the following transcript. Correct errors and label speakers if possible. {speaker_info}\n\n{raw_transcript}"
-        response = refinement_model.generate_content(refine_prompt)
-        refined_transcript = response.text
+        words = raw_transcript.split()
+        
+        if len(words) <= CHUNK_WORD_SIZE:
+            # Transcript is short enough to process in one go
+            speaker_info = f"Speakers are {state.speaker_1} and {state.speaker_2}." if state.speaker_1 and state.speaker_2 else ""
+            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT:\n{raw_transcript}"
+            response = refinement_model.generate_content(refine_prompt)
+            refined_transcript = response.text
+            total_tokens += safe_get_token_count(response)
+        else:
+            # Transcript is long and must be processed in chunks to avoid repetition errors
+            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+            all_refined_chunks = []
+            
+            for i, chunk in enumerate(chunks):
+                status_ui.update(label=f"Step 2: Refining Transcript (Chunk {i+1}/{len(chunks)})...")
+                
+                # For subsequent chunks, provide the end of the last refined chunk as context
+                context = ""
+                if i > 0 and all_refined_chunks:
+                    last_refined_chunk = all_refined_chunks[-1]
+                    context_words = last_refined_chunk.split()
+                    # Provide the last ~150 words as context for a smooth transition
+                    context = " ".join(context_words[-150:])
+                
+                speaker_info = f"Speakers are {state.speaker_1} and {state.speaker_2}." if state.speaker_1 and state.speaker_2 else ""
+                
+                if not context:
+                    prompt = f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}"
+                else:
+                    prompt = f"""You are continuing to refine a long transcript. Below is the tail end of the previously refined section. Your task is to continue the refinement process seamlessly on the new chunk provided.
+
+Ensure there is no abrupt break in formatting or style. Do NOT repeat the context in your output. Your response should start directly with the refined version of the new chunk.
+
+{speaker_info}
+
+---
+PREVIOUSLY REFINED CONTEXT (FOR CONTINUITY ONLY - DO NOT REPEAT THIS IN YOUR OUTPUT):
+...{context}
+---
+
+NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
+{chunk}"""
+                
+                response = refinement_model.generate_content(prompt)
+                all_refined_chunks.append(response.text)
+                total_tokens += safe_get_token_count(response)
+
+            refined_transcript = "".join(all_refined_chunks)
+        
         final_transcript = refined_transcript
-        total_tokens += safe_get_token_count(response)
+    # --- END OF CORRECTED REFINEMENT LOGIC ---
 
     status_ui.update(label="Step 3: Generating Notes...")
     words = final_transcript.split()
@@ -304,7 +351,8 @@ def process_and_save_task(state: AppState, status_ui):
             response = notes_model.generate_content(prompt)
             all_notes.append(response.text)
             total_tokens += safe_get_token_count(response)
-            context_package = _create_context_from_notes(response.text)
+            # Use all notes for context to be robust against single-chunk failures
+            context_package = _create_context_from_notes("\n\n".join(all_notes))
         final_notes_content = "\n\n".join(all_notes)
     else:
         prompt = get_dynamic_prompt(state, final_transcript)
@@ -367,7 +415,7 @@ def render_input_and_processing_tab(state: AppState):
         state.selected_sector = st.selectbox("Sector (for Topic Templates)", sector_options, index=current_sector_index, on_change=on_sector_change, key="sector_selector")
         state.earnings_call_topics = st.text_area("Topic Instructions", value=state.earnings_call_topics, height=150, placeholder="Select a sector to load a template, or enter topics manually.")
 
-        with st.expander("✏️ Manage Sector Templates", expanded=True):
+        with st.expander("✏️ Manage Sector Templates", expanded=False):
             st.write("Add, edit, or delete the sector templates used in the dropdown above.")
             st.markdown("**Edit or Delete an Existing Sector**")
             sector_to_edit = st.selectbox("Select Sector to Edit", sorted(list(all_sectors.keys())))
