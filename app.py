@@ -123,7 +123,7 @@ class AppState:
     notes_model: str = "Gemini 2.5 Pro"
     refinement_model: str = "Gemini 2.5 Flash Lite"
     transcription_model: str = "Gemini 2.5 Flash"
-    refinement_enabled: bool = True
+    refinement_enabled: bool = False
     add_context_enabled: bool = False
     context_input: str = ""
     speaker_1: str = ""
