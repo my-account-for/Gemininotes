@@ -21,7 +21,6 @@ from streamlit_pills import pills
 from streamlit_ace import st_ace
 import re
 import tempfile
-# NLTK import removed
 
 # --- Local Imports ---
 import database
@@ -36,12 +35,11 @@ try:
 except Exception as e:
     st.session_state.config_error = f"🔴 Error configuring Google AI Client: {e}"
 
-# NLTK downloader code removed
-
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
+# MODIFIED: Chunk size and overlap set as per your request.
 CHUNK_WORD_SIZE = 4000
-CHUNK_WORD_OVERLAP = 600
+CHUNK_WORD_OVERLAP = 200
 
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
@@ -209,7 +207,6 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
 def db_get_sectors() -> dict:
     return database.get_sectors()
 
-# MODIFIED: Reverted from sentence-based chunking back to word-based chunking.
 def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List[str]:
     words = text.split()
     if len(words) <= chunk_size:
@@ -217,6 +214,8 @@ def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List
     
     chunks, start = [], 0
     while start < len(words):
+        if chunk_size <= overlap:
+            raise ValueError("Chunk size must be greater than overlap to prevent infinite loops.")
         end = start + chunk_size
         chunks.append(" ".join(words[start:end]))
         if end >= len(words): break
@@ -254,34 +253,7 @@ def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
     
     return "\n".join(context_parts)
 
-def deduplicate_notes(full_notes_text: str) -> str:
-    """
-    Removes duplicate Q&A blocks from the combined notes text.
-    It uses bolded questions as unique identifiers to handle repetition
-    caused by chunk overlap.
-    """
-    if not full_notes_text or not full_notes_text.strip():
-        return ""
-
-    seen_questions = set()
-    clean_blocks = []
-    
-    parts = re.split(r"(\*\*.*?\*\*)", full_notes_text)
-
-    if parts[0]:
-        clean_blocks.append(parts[0])
-
-    for i in range(1, len(parts), 2):
-        question = parts[i].strip()
-        answer = parts[i + 1] if i + 1 < len(parts) else ""
-        
-        if question not in seen_questions:
-            seen_questions.add(question)
-            clean_blocks.append(question)
-            clean_blocks.append(answer)
-    
-    return "".join(clean_blocks).strip()
-
+# REMOVED: deduplicate_notes function has been removed.
 
 def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
     meeting_type = state.selected_meeting_type
@@ -391,7 +363,6 @@ def process_and_save_task(state: AppState, status_ui):
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
         else:
-            # MODIFIED: Reverted to word-based chunking
             chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
             all_refined_chunks = []
             
@@ -432,7 +403,6 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
     final_notes_content = ""
 
     if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
-        # MODIFIED: Reverted to word-based chunking
         chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
         all_notes, context_package = [], ""
         
@@ -463,17 +433,16 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
         final_notes_content = response.text
         total_tokens += safe_get_token_count(response)
 
-    status_ui.update(label="Step 4: Cleaning and De-duplicating...")
-    final_notes_content = deduplicate_notes(final_notes_content)
+    # REMOVED: De-duplication step removed.
 
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
-        status_ui.update(label="Step 5: Generating Executive Summary...")
+        status_ui.update(label="Step 4: Generating Executive Summary...")
         summary_prompt = f"Create a concise executive summary from these notes:\n\n{final_notes_content}"
         response = notes_model.generate_content(summary_prompt)
         final_notes_content += f"\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{response.text}"
         total_tokens += safe_get_token_count(response)
 
-    status_ui.update(label="Step 6: Saving to Database...")
+    status_ui.update(label="Step 5: Saving to Database...")
     note_data = {
         'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
         'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript,
