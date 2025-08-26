@@ -21,7 +21,7 @@ from streamlit_pills import pills
 from streamlit_ace import st_ace
 import re
 import tempfile
-import nltk
+# NLTK import removed
 
 # --- Local Imports ---
 import database
@@ -36,12 +36,7 @@ try:
 except Exception as e:
     st.session_state.config_error = f"🔴 Error configuring Google AI Client: {e}"
 
-# MODIFIED: Corrected the exception handling from DownloadError to LookupError.
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    st.info("Downloading language model for sentence analysis (NLTK)...")
-    nltk.download('punkt')
+# NLTK downloader code removed
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
@@ -65,7 +60,7 @@ EXPERT_MEETING_DETAILED_PROMPT = """### **NOTES STRUCTURE**
 - **DO NOT:** Summarize or include introductions about consulting firms.
 - If no intro exists, OMIT this section entirely.
 
-**(2.) Q-A format:**
+**(2.) Q&A format:**
 Structure the main body STRICTLY in Question/Answer format.
 
 **(2.A) Questions:**
@@ -86,7 +81,7 @@ Your goal is to be **efficient**, not just brief. Efficiency means removing conv
 - **DO:** Capture ALL details (names, dates, numbers, titles).
 - **DO NOT:** Summarize.
 
-**(2.) Q-A format:**
+**(2.) Q&A format:**
 Structure the main body in Question/Answer format.
 
 **(2.A) Questions:**
@@ -170,9 +165,7 @@ def sanitize_input(text: str) -> str:
     """Removes characters and keywords commonly used in prompt injection attacks."""
     if not isinstance(text, str):
         return ""
-    # Remove characters that can manipulate prompt structure
     text = re.sub(r'[{}<>`]', '', text)
-    # Neutralize common instruction-hijacking phrases (case-insensitive)
     injection_patterns = [
         r'ignore all previous instructions',
         r'you are now in.*mode',
@@ -216,41 +209,18 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
 def db_get_sectors() -> dict:
     return database.get_sectors()
 
-def create_chunks_by_sentence(text: str, chunk_size: int, overlap_word_count: int) -> List[str]:
-    """
-    Creates text chunks based on sentences, respecting a target chunk size.
-    An overlap is created by prepending sentences from the end of the previous chunk.
-    """
-    if len(text.split()) <= chunk_size:
+# MODIFIED: Reverted from sentence-based chunking back to word-based chunking.
+def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List[str]:
+    words = text.split()
+    if len(words) <= chunk_size:
         return [text]
-
-    sentences = nltk.sent_tokenize(text)
-    chunks = []
-    current_chunk_sentences = []
-    current_word_count = 0
     
-    for sentence in sentences:
-        sentence_word_count = len(sentence.split())
-        if current_word_count + sentence_word_count > chunk_size and current_chunk_sentences:
-            chunks.append(" ".join(current_chunk_sentences))
-            
-            overlap_sentences = []
-            overlap_words = 0
-            for s in reversed(current_chunk_sentences):
-                overlap_words += len(s.split())
-                if overlap_words > overlap_word_count:
-                    break
-                overlap_sentences.insert(0, s)
-            
-            current_chunk_sentences = overlap_sentences
-            current_word_count = sum(len(s.split()) for s in overlap_sentences)
-
-        current_chunk_sentences.append(sentence)
-        current_word_count += sentence_word_count
-
-    if current_chunk_sentences:
-        chunks.append(" ".join(current_chunk_sentences))
-
+    chunks, start = [], 0
+    while start < len(words):
+        end = start + chunk_size
+        chunks.append(" ".join(words[start:end]))
+        if end >= len(words): break
+        start += (chunk_size - overlap)
     return chunks
 
 def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
@@ -352,25 +322,6 @@ def validate_inputs(state: AppState) -> Optional[str]:
         return "Please provide existing notes for enrichment mode."
     return None
 
-def validate_chunk_processing(original_chunk, generated_notes):
-    """Basic validation to catch potential hallucination"""
-    chunk_words = set(original_chunk.lower().split())
-    notes_words = set(generated_notes.lower().split())
-    
-    suspicious_indicators = [
-        "as mentioned earlier", "as we discussed", "continuing from before",
-        "building on that", "furthermore", "additionally"
-    ]
-    
-    notes_lower = generated_notes.lower()
-    suspicion_score = sum(1 for indicator in suspicious_indicators 
-                         if indicator in notes_lower)
-    
-    if suspicion_score > 2:
-        return False, f"High suspicion score: {suspicion_score}"
-    
-    return True, "Validation passed"
-
 def process_and_save_task(state: AppState, status_ui):
     start_time = time.time()
     notes_model = genai.GenerativeModel(AVAILABLE_MODELS[state.notes_model])
@@ -440,7 +391,8 @@ def process_and_save_task(state: AppState, status_ui):
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
         else:
-            chunks = create_chunks_by_sentence(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+            # MODIFIED: Reverted to word-based chunking
+            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
             all_refined_chunks = []
             
             for i, chunk in enumerate(chunks):
@@ -480,7 +432,8 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
     final_notes_content = ""
 
     if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
-        chunks = create_chunks_by_sentence(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+        # MODIFIED: Reverted to word-based chunking
+        chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
         all_notes, context_package = [], ""
         
         if state.selected_note_style == "Option 1: Detailed & Strict":
@@ -543,11 +496,10 @@ def render_input_and_processing_tab(state: AppState):
     state.input_method = pills("Input Method", ["Paste Text", "Upload File"], index=["Paste Text", "Upload File"].index(state.input_method))
     
     if state.input_method == "Paste Text":
-        state.text_input = st.text_area("Paste source transcript here:", height=250, key="text_input_main")
+        state.text_input = st.text_area("Paste source transcript here:", value=state.text_input, height=250, key="text_input_main")
         state.uploaded_file = None
     else:
         state.uploaded_file = st.file_uploader("Upload a File (PDF, TXT, MP3, etc.)", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'])
-        state.text_input = ""
 
     st.subheader("Configuration")
     state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type))
