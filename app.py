@@ -37,8 +37,8 @@ except Exception as e:
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
-CHUNK_WORD_SIZE = 4500
-CHUNK_WORD_OVERLAP = 200
+CHUNK_WORD_SIZE = 4000
+CHUNK_WORD_OVERLAP = 600
 
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
@@ -49,7 +49,7 @@ MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
-EXPERT_MEETING_CHUNK_BASE = """### **NOTES STRUCTURE**
+EXPERT_MEETING_DETAILED_PROMPT = """### **NOTES STRUCTURE**
 
 **(1.) Opening overview or Expert background (Conditional):**
 - If the transcript chunk begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
@@ -68,7 +68,7 @@ Structure the main body STRICTLY in Question/Answer format.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc."""
 
-EXPERT_MEETING_CHUNK_BASE_OPTION_2 = """### **PRIMARY DIRECTIVE**
+EXPERT_MEETING_CONCISE_PROMPT = """### **PRIMARY DIRECTIVE**
 Your goal is to be slightly less verbose and use a more natural sentence flow where possible. However, you must **NEVER** sacrifice factual detail, data, or specifics for the sake of brevity.
 
 ### **NOTES STRUCTURE**
@@ -98,19 +98,35 @@ Your primary directive is **100% completeness and accuracy**. You will process t
 {chunk_text}
 """
 
-PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task. Your goal is to process the new transcript chunk provided below, using the context from the previous chunk to ensure perfect continuity.
-### **CONTEXT FROM PREVIOUS CHUNK**
+# MODIFIED: Incorporated the final "Guardrail" prompt merging the best of both reports.
+PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task. 
+
+⚠️ CRITICAL: You must ONLY extract factual information from the actual transcript provided. DO NOT invent, assume, or create any content that is not explicitly stated in the transcript.
+
+### **CONTEXT FROM PREVIOUS PROCESSING**
 {context_package}
----
-### **PRIMARY INSTRUCTIONS**
-First, review the context. Because of the overlap in the transcript, you will see text that was already processed. **Locate the "Last Question Processed" from the context and begin your work from the *first NEW question and answer* that follows it.**
-From that point forward, you must adhere to the following procedure for every Q&A pair in the remainder of the chunk.
+
+### **CONTINUATION INSTRUCTIONS**
+1.  **LOCATE YOUR STARTING POINT:** Carefully review the context. Your first task is to find where the "Last complete Q&A processed" ends within the new transcript chunk below.
+2.  **RESUME PROCESSING:** Begin your work from the **first new question and answer** that immediately follows the context.
+3.  **PROCESS NEW CONTENT ONLY:** Process only the new Q&A pairs that appear in the remainder of the transcript.
+4.  **MAINTAIN FORMAT:** Maintain the same formatting style as established in previous chunks.
+
+### **QUALITY CONTROL & ERROR HANDLING**
+-   NEVER create fictional questions or answers.
+-   NEVER expand on topics not explicitly covered in the transcript.
+-   If a Q&A pair seems incomplete, note it but do not fabricate the missing parts.
+-   **CRITICAL GUARDRAIL:** If you cannot reliably find your starting point or if the new chunk is too ambiguous to continue, you MUST output **only** the following text and stop: `Error: Could not resume processing from context.`
+
 ---
 {base_instructions}
 ---
+
 **MEETING TRANSCRIPT (NEW CHUNK):**
 {chunk_text}
-"""
+
+**REMINDER**: Extract ONLY what is actually said in the transcript above. Do not invent content. If you are uncertain where to begin, use the error message."""
+
 
 # --- 3. STATE & DATA MODELS ---
 @dataclass
@@ -184,21 +200,46 @@ def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List
         start += (chunk_size - overlap)
     return chunks
 
-def _create_context_from_notes(notes_text):
-    if not notes_text or not notes_text.strip(): return ""
+def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
+    """Create richer context from previous notes"""
+    if not notes_text or not notes_text.strip():
+        return ""
+    
     questions = re.findall(r"(\*\*.*?\*\*)", notes_text)
-    if not questions: return ""
+    
+    if not questions:
+        return ""
+    
+    context_questions = questions[-3:] if len(questions) >= 3 else questions
+    
+    context_parts = [
+        f"**Chunk #{chunk_number} Context Summary:**",
+        f"- Total questions processed so far: {len(questions)}",
+        f"- Recent question topics: {', '.join(q.strip('*') for q in context_questions[-2:])}",
+        f"- Last complete Q&A processed: {questions[-1]}"
+    ]
+    
     last_question = questions[-1]
-    answer_match = re.search(re.escape(last_question) + r"(.*?)(?=\*\*|$)", notes_text, re.DOTALL)
-    last_answer = answer_match.group(1).strip() if answer_match else ""
-    return f"-   **Last Question Processed:** {last_question}\n-   **Last Answer Provided:**\n{last_answer}".strip()
+    answer_match = re.search(
+        re.escape(last_question) + r"(.*?)(?=\*\*|$)", 
+        notes_text, 
+        re.DOTALL
+    )
+    if answer_match:
+        last_answer = answer_match.group(1).strip()
+        context_parts.append(f"- Last answer content:\n{last_answer[:300]}...")
+    
+    return "\n".join(context_parts)
 
 def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
     meeting_type = state.selected_meeting_type
     context_section = f"**ADDITIONAL CONTEXT:**\n{state.context_input}" if state.add_context_enabled and state.context_input else ""
 
     if meeting_type == "Expert Meeting":
-        prompt_base = EXPERT_MEETING_CHUNK_BASE_OPTION_2 if state.selected_note_style != "Option 1: Detailed & Strict" else EXPERT_MEETING_CHUNK_BASE
+        if state.selected_note_style == "Option 1: Detailed & Strict":
+            prompt_base = EXPERT_MEETING_DETAILED_PROMPT
+        else:
+            prompt_base = EXPERT_MEETING_CONCISE_PROMPT
         return f"{prompt_base}\n\n{context_section}\n\n**MEETING TRANSCRIPT CHUNK:**\n{transcript_chunk}"
     elif meeting_type == "Earnings Call":
         topic_instructions = state.earnings_call_topics or "Identify logical themes and use them as bold headings."
@@ -227,6 +268,25 @@ def validate_inputs(state: AppState) -> Optional[str]:
     if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes" and not state.existing_notes_input:
         return "Please provide existing notes for enrichment mode."
     return None
+
+def validate_chunk_processing(original_chunk, generated_notes):
+    """Basic validation to catch potential hallucination"""
+    chunk_words = set(original_chunk.lower().split())
+    notes_words = set(generated_notes.lower().split())
+    
+    suspicious_indicators = [
+        "as mentioned earlier", "as we discussed", "continuing from before",
+        "building on that", "furthermore", "additionally"
+    ]
+    
+    notes_lower = generated_notes.lower()
+    suspicion_score = sum(1 for indicator in suspicious_indicators 
+                         if indicator in notes_lower)
+    
+    if suspicion_score > 2:
+        return False, f"High suspicion score: {suspicion_score}"
+    
+    return True, "Validation passed"
 
 def process_and_save_task(state: AppState, status_ui):
     start_time = time.time()
@@ -279,32 +339,27 @@ def process_and_save_task(state: AppState, status_ui):
     
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
 
-    # --- START OF CORRECTED REFINEMENT LOGIC ---
     if state.refinement_enabled:
         status_ui.update(label="Step 2: Refining Transcript...")
         words = raw_transcript.split()
         
         if len(words) <= CHUNK_WORD_SIZE:
-            # Transcript is short enough to process in one go
             speaker_info = f"Speakers are {state.speaker_1} and {state.speaker_2}." if state.speaker_1 and state.speaker_2 else ""
             refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT:\n{raw_transcript}"
             response = refinement_model.generate_content(refine_prompt)
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
         else:
-            # Transcript is long and must be processed in chunks to avoid repetition errors
             chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
             all_refined_chunks = []
             
             for i, chunk in enumerate(chunks):
                 status_ui.update(label=f"Step 2: Refining Transcript (Chunk {i+1}/{len(chunks)})...")
                 
-                # For subsequent chunks, provide the end of the last refined chunk as context
                 context = ""
                 if i > 0 and all_refined_chunks:
                     last_refined_chunk = all_refined_chunks[-1]
                     context_words = last_refined_chunk.split()
-                    # Provide the last ~150 words as context for a smooth transition
                     context = " ".join(context_words[-150:])
                 
                 speaker_info = f"Speakers are {state.speaker_1} and {state.speaker_2}." if state.speaker_1 and state.speaker_2 else ""
@@ -333,7 +388,6 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
             refined_transcript = "".join(all_refined_chunks)
         
         final_transcript = refined_transcript
-    # --- END OF CORRECTED REFINEMENT LOGIC ---
 
     status_ui.update(label="Step 3: Generating Notes...")
     words = final_transcript.split()
@@ -342,17 +396,27 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
     if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
         chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
         all_notes, context_package = [], ""
-        prompt_base = EXPERT_MEETING_CHUNK_BASE_OPTION_2 if state.selected_note_style != "Option 1: Detailed & Strict" else EXPERT_MEETING_CHUNK_BASE
+        
+        if state.selected_note_style == "Option 1: Detailed & Strict":
+            prompt_base = EXPERT_MEETING_DETAILED_PROMPT
+        else:
+            prompt_base = EXPERT_MEETING_CONCISE_PROMPT
 
         for i, chunk in enumerate(chunks):
             status_ui.update(label=f"Step 3: Generating Notes (Chunk {i+1}/{len(chunks)})...")
             prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION
             prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
             response = notes_model.generate_content(prompt)
+            
+            # Check for guardrail error message
+            if "Error: Could not resume processing from context." in response.text:
+                st.warning(f"Warning: Model could not process chunk {i+1} due to context ambiguity. It will be skipped.")
+                # Optionally, you could try a fallback here or just skip.
+                continue
+
             all_notes.append(response.text)
             total_tokens += safe_get_token_count(response)
-            # Use all notes for context to be robust against single-chunk failures
-            context_package = _create_context_from_notes("\n\n".join(all_notes))
+            context_package = _create_enhanced_context_from_notes("\n\n".join(all_notes), chunk_number=i + 1)
         final_notes_content = "\n\n".join(all_notes)
     else:
         prompt = get_dynamic_prompt(state, final_transcript)
