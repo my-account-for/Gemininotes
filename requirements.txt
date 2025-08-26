@@ -12,3 +12,4 @@ streamlit-pills
 streamlit-ace
 python-docx
 plotly
+nltk
