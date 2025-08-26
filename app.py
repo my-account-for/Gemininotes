@@ -21,6 +21,8 @@ from streamlit_pills import pills
 from streamlit_ace import st_ace
 import re
 import tempfile
+# MODIFIED: Added NLTK for intelligent, sentence-aware chunking
+import nltk
 
 # --- Local Imports ---
 import database
@@ -34,6 +36,13 @@ try:
         st.session_state.config_error = "🔴 GEMINI_API_KEY not found."
 except Exception as e:
     st.session_state.config_error = f"🔴 Error configuring Google AI Client: {e}"
+
+# MODIFIED: NLTK setup for sentence tokenization
+try:
+    nltk.data.find('tokenizers/punkt')
+except nltk.downloader.DownloadError:
+    st.info("Downloading language model for sentence analysis (NLTK)...")
+    nltk.download('punkt')
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
@@ -98,7 +107,6 @@ Your primary directive is **100% completeness and accuracy**. You will process t
 {chunk_text}
 """
 
-# MODIFIED: Incorporated the final "Guardrail" prompt merging the best of both reports.
 PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task. 
 
 ⚠️ CRITICAL: You must ONLY extract factual information from the actual transcript provided. DO NOT invent, assume, or create any content that is not explicitly stated in the transcript.
@@ -160,6 +168,8 @@ def safe_get_token_count(response):
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
             return getattr(response.usage_metadata, 'total_token_count', 0)
     except (AttributeError, ValueError):
+        # MODIFIED: Added a warning for better visibility on failure.
+        st.warning("Could not retrieve token count from API response.")
         pass
     return 0
     
@@ -187,17 +197,43 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
 def db_get_sectors() -> dict:
     return database.get_sectors()
 
-def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List[str]:
-    words = text.split()
-    if len(words) <= chunk_size:
+# MODIFIED: Replaced word-based chunking with a more robust sentence-based approach.
+def create_chunks_by_sentence(text: str, chunk_size: int, overlap_word_count: int) -> List[str]:
+    """
+    Creates text chunks based on sentences, respecting a target chunk size.
+    An overlap is created by prepending sentences from the end of the previous chunk.
+    """
+    if len(text.split()) <= chunk_size:
         return [text]
+
+    sentences = nltk.sent_tokenize(text)
+    chunks = []
+    current_chunk_sentences = []
+    current_word_count = 0
     
-    chunks, start = [], 0
-    while start < len(words):
-        end = start + chunk_size
-        chunks.append(" ".join(words[start:end]))
-        if end >= len(words): break
-        start += (chunk_size - overlap)
+    for sentence in sentences:
+        sentence_word_count = len(sentence.split())
+        if current_word_count + sentence_word_count > chunk_size and current_chunk_sentences:
+            chunks.append(" ".join(current_chunk_sentences))
+            
+            # Create overlap
+            overlap_sentences = []
+            overlap_words = 0
+            for s in reversed(current_chunk_sentences):
+                overlap_words += len(s.split())
+                if overlap_words > overlap_word_count:
+                    break
+                overlap_sentences.insert(0, s)
+            
+            current_chunk_sentences = overlap_sentences
+            current_word_count = sum(len(s.split()) for s in overlap_sentences)
+
+        current_chunk_sentences.append(sentence)
+        current_word_count += sentence_word_count
+
+    if current_chunk_sentences:
+        chunks.append(" ".join(current_chunk_sentences))
+
     return chunks
 
 def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
@@ -326,7 +362,8 @@ def process_and_save_task(state: AppState, status_ui):
                 for path in local_files: os.remove(path)
                 for cloud_name in cloud_files: 
                     try: genai.delete_file(cloud_name)
-                    except: pass
+                    # MODIFIED: Replaced silent 'pass' with a visible warning for failed cleanup.
+                    except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
         
         elif file_type is None or file_type.startswith("Error:"):
             raise ValueError(file_type or "Failed to read file content.")
@@ -350,7 +387,7 @@ def process_and_save_task(state: AppState, status_ui):
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
         else:
-            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+            chunks = create_chunks_by_sentence(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
             all_refined_chunks = []
             
             for i, chunk in enumerate(chunks):
@@ -368,24 +405,21 @@ def process_and_save_task(state: AppState, status_ui):
                     prompt = f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}"
                 else:
                     prompt = f"""You are continuing to refine a long transcript. Below is the tail end of the previously refined section. Your task is to continue the refinement process seamlessly on the new chunk provided.
-
 Ensure there is no abrupt break in formatting or style. Do NOT repeat the context in your output. Your response should start directly with the refined version of the new chunk.
-
 {speaker_info}
-
 ---
 PREVIOUSLY REFINED CONTEXT (FOR CONTINUITY ONLY - DO NOT REPEAT THIS IN YOUR OUTPUT):
 ...{context}
 ---
-
 NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
 {chunk}"""
                 
                 response = refinement_model.generate_content(prompt)
                 all_refined_chunks.append(response.text)
                 total_tokens += safe_get_token_count(response)
-
-            refined_transcript = "".join(all_refined_chunks)
+            
+            # MODIFIED: CRITICAL BUG FIX - Changed "" to " " to prevent word concatenation.
+            refined_transcript = " ".join(all_refined_chunks)
         
         final_transcript = refined_transcript
 
@@ -394,7 +428,8 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
     final_notes_content = ""
 
     if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
-        chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+        # MODIFIED: Using the new sentence-based chunker for note generation as well.
+        chunks = create_chunks_by_sentence(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
         all_notes, context_package = [], ""
         
         if state.selected_note_style == "Option 1: Detailed & Strict":
@@ -408,10 +443,8 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
             prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
             response = notes_model.generate_content(prompt)
             
-            # Check for guardrail error message
             if "Error: Could not resume processing from context." in response.text:
                 st.warning(f"Warning: Model could not process chunk {i+1} due to context ambiguity. It will be skipped.")
-                # Optionally, you could try a fallback here or just skip.
                 continue
 
             all_notes.append(response.text)
@@ -441,7 +474,8 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
         database.save_note(note_data)
     except Exception as db_error:
         st.session_state.app_state.fallback_content = final_notes_content
-        raise ConnectionError(f"Failed to save note to database: {db_error}")
+        # MODIFIED: Changed from ConnectionError to a more general Exception for semantic correctness.
+        raise Exception(f"Failed to save note to database: {db_error}")
     return note_data
 
 # --- 5. UI RENDERING FUNCTIONS ---
@@ -550,6 +584,11 @@ def render_input_and_processing_tab(state: AppState):
         st.code(state.error_message)
         if state.fallback_content:
             st.download_button("⬇️ Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt")
+        # MODIFIED: Added a button to clear persistent error messages for better UX.
+        if st.button("Clear Error"):
+            state.error_message = None
+            state.fallback_content = None
+            st.rerun()
 
 def render_output_and_history_tab(state: AppState):
     st.subheader("📄 Active Note")
