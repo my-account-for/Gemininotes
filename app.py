@@ -21,7 +21,6 @@ from streamlit_pills import pills
 from streamlit_ace import st_ace
 import re
 import tempfile
-# MODIFIED: Added NLTK for intelligent, sentence-aware chunking
 import nltk
 
 # --- Local Imports ---
@@ -37,7 +36,6 @@ try:
 except Exception as e:
     st.session_state.config_error = f"🔴 Error configuring Google AI Client: {e}"
 
-# MODIFIED: NLTK setup for sentence tokenization
 try:
     nltk.data.find('tokenizers/punkt')
 except nltk.downloader.DownloadError:
@@ -47,7 +45,7 @@ except nltk.downloader.DownloadError:
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
 CHUNK_WORD_SIZE = 4000
-CHUNK_WORD_OVERLAP = 200
+CHUNK_WORD_OVERLAP = 600
 
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
@@ -77,8 +75,9 @@ Structure the main body STRICTLY in Question/Answer format.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc."""
 
-EXPERT_MEETING_CONCISE_PROMPT = """### **PRIMARY DIRECTIVE**
-Your goal is to be slightly less verbose and use a more natural sentence flow where possible. However, you must **NEVER** sacrifice factual detail, data, or specifics for the sake of brevity.
+# MODIFIED: Replaced with the improved prompt to better capture nuance.
+EXPERT_MEETING_CONCISE_PROMPT = """### **PRIMARY DIRECTIVE: EFFICIENT & NUANCED**
+Your goal is to be **efficient**, not just brief. Efficiency means removing conversational filler ("um," "you know," repetition) but **preserving all substantive information**. Your output should be concise yet information-dense.
 
 ### **NOTES STRUCTURE**
 
@@ -96,7 +95,12 @@ Structure the main body in Question/Answer format.
 **(2.B) Answers:**
 -   Use bullet points (`-`) directly below the question.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
--   **PRIORITY #1: CAPTURE ALL SPECIFICS.**"""
+-   **PRIORITY #1: CAPTURE ALL HARD DATA.** This includes all names, examples, monetary values (`$`), percentages (`%`), metrics, and specific entities mentioned.
+-   **PRIORITY #2: CAPTURE ALL NUANCE.** Do not over-summarize. You must retain the following:
+    -   **Sentiment & Tone:** Note if the speaker is optimistic, hesitant, confident, or speculative (e.g., "The expert was cautiously optimistic about...", "He speculated that...").
+    -   **Qualifiers:** Preserve modifying words that change meaning (e.g., "usually," "in most cases," "rarely," "a potential risk is...").
+    -   **Key Examples & Analogies:** If the speaker uses a specific example to illustrate a point, capture it, even if it's a few sentences long.
+    -   **Cause & Effect:** Retain any reasoning provided (e.g., "...because of the new regulations," "...which led to a decrease in...")."""
 
 PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze an expert consultation transcript chunk and generate detailed, factual notes.
 Your primary directive is **100% completeness and accuracy**. You will process the transcript sequentially. For every Question/Answer pair you identify, you must generate notes following the structure below.
@@ -168,7 +172,6 @@ def safe_get_token_count(response):
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
             return getattr(response.usage_metadata, 'total_token_count', 0)
     except (AttributeError, ValueError):
-        # MODIFIED: Added a warning for better visibility on failure.
         st.warning("Could not retrieve token count from API response.")
         pass
     return 0
@@ -197,7 +200,6 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
 def db_get_sectors() -> dict:
     return database.get_sectors()
 
-# MODIFIED: Replaced word-based chunking with a more robust sentence-based approach.
 def create_chunks_by_sentence(text: str, chunk_size: int, overlap_word_count: int) -> List[str]:
     """
     Creates text chunks based on sentences, respecting a target chunk size.
@@ -216,7 +218,6 @@ def create_chunks_by_sentence(text: str, chunk_size: int, overlap_word_count: in
         if current_word_count + sentence_word_count > chunk_size and current_chunk_sentences:
             chunks.append(" ".join(current_chunk_sentences))
             
-            # Create overlap
             overlap_sentences = []
             overlap_words = 0
             for s in reversed(current_chunk_sentences):
@@ -266,6 +267,35 @@ def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
         context_parts.append(f"- Last answer content:\n{last_answer[:300]}...")
     
     return "\n".join(context_parts)
+
+def deduplicate_notes(full_notes_text: str) -> str:
+    """
+    Removes duplicate Q&A blocks from the combined notes text.
+    It uses bolded questions as unique identifiers to handle repetition
+    caused by chunk overlap.
+    """
+    if not full_notes_text or not full_notes_text.strip():
+        return ""
+
+    seen_questions = set()
+    clean_blocks = []
+    
+    parts = re.split(r"(\*\*.*?\*\*)", full_notes_text)
+
+    if parts[0]:
+        clean_blocks.append(parts[0])
+
+    for i in range(1, len(parts), 2):
+        question = parts[i].strip()
+        answer = parts[i + 1] if i + 1 < len(parts) else ""
+        
+        if question not in seen_questions:
+            seen_questions.add(question)
+            clean_blocks.append(question)
+            clean_blocks.append(answer)
+    
+    return "".join(clean_blocks).strip()
+
 
 def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
     meeting_type = state.selected_meeting_type
@@ -362,7 +392,6 @@ def process_and_save_task(state: AppState, status_ui):
                 for path in local_files: os.remove(path)
                 for cloud_name in cloud_files: 
                     try: genai.delete_file(cloud_name)
-                    # MODIFIED: Replaced silent 'pass' with a visible warning for failed cleanup.
                     except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
         
         elif file_type is None or file_type.startswith("Error:"):
@@ -418,7 +447,6 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
                 all_refined_chunks.append(response.text)
                 total_tokens += safe_get_token_count(response)
             
-            # MODIFIED: CRITICAL BUG FIX - Changed "" to " " to prevent word concatenation.
             refined_transcript = " ".join(all_refined_chunks)
         
         final_transcript = refined_transcript
@@ -428,7 +456,6 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
     final_notes_content = ""
 
     if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
-        # MODIFIED: Using the new sentence-based chunker for note generation as well.
         chunks = create_chunks_by_sentence(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
         all_notes, context_package = [], ""
         
@@ -450,21 +477,26 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
             all_notes.append(response.text)
             total_tokens += safe_get_token_count(response)
             context_package = _create_enhanced_context_from_notes("\n\n".join(all_notes), chunk_number=i + 1)
+        
         final_notes_content = "\n\n".join(all_notes)
+
     else:
         prompt = get_dynamic_prompt(state, final_transcript)
         response = notes_model.generate_content(prompt)
         final_notes_content = response.text
         total_tokens += safe_get_token_count(response)
 
+    status_ui.update(label="Step 4: Cleaning and De-duplicating...")
+    final_notes_content = deduplicate_notes(final_notes_content)
+
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
-        status_ui.update(label="Step 4: Generating Executive Summary...")
+        status_ui.update(label="Step 5: Generating Executive Summary...")
         summary_prompt = f"Create a concise executive summary from these notes:\n\n{final_notes_content}"
         response = notes_model.generate_content(summary_prompt)
         final_notes_content += f"\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{response.text}"
         total_tokens += safe_get_token_count(response)
 
-    status_ui.update(label="Step 5: Saving to Database...")
+    status_ui.update(label="Step 6: Saving to Database...")
     note_data = {
         'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
         'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript,
@@ -474,7 +506,6 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
         database.save_note(note_data)
     except Exception as db_error:
         st.session_state.app_state.fallback_content = final_notes_content
-        # MODIFIED: Changed from ConnectionError to a more general Exception for semantic correctness.
         raise Exception(f"Failed to save note to database: {db_error}")
     return note_data
 
@@ -584,7 +615,6 @@ def render_input_and_processing_tab(state: AppState):
         st.code(state.error_message)
         if state.fallback_content:
             st.download_button("⬇️ Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt")
-        # MODIFIED: Added a button to clear persistent error messages for better UX.
         if st.button("Clear Error"):
             state.error_message = None
             state.fallback_content = None
