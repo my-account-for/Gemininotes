@@ -36,9 +36,10 @@ try:
 except Exception as e:
     st.session_state.config_error = f"🔴 Error configuring Google AI Client: {e}"
 
+# MODIFIED: Corrected the exception handling from DownloadError to LookupError.
 try:
     nltk.data.find('tokenizers/punkt')
-except nltk.downloader.DownloadError:
+except LookupError:
     st.info("Downloading language model for sentence analysis (NLTK)...")
     nltk.download('punkt')
 
@@ -64,7 +65,7 @@ EXPERT_MEETING_DETAILED_PROMPT = """### **NOTES STRUCTURE**
 - **DO NOT:** Summarize or include introductions about consulting firms.
 - If no intro exists, OMIT this section entirely.
 
-**(2.) Q&A format:**
+**(2.) Q-A format:**
 Structure the main body STRICTLY in Question/Answer format.
 
 **(2.A) Questions:**
@@ -75,7 +76,6 @@ Structure the main body STRICTLY in Question/Answer format.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc."""
 
-# MODIFIED: Replaced with the improved prompt to better capture nuance.
 EXPERT_MEETING_CONCISE_PROMPT = """### **PRIMARY DIRECTIVE: EFFICIENT & NUANCED**
 Your goal is to be **efficient**, not just brief. Efficiency means removing conversational filler ("um," "you know," repetition) but **preserving all substantive information**. Your output should be concise yet information-dense.
 
@@ -86,7 +86,7 @@ Your goal is to be **efficient**, not just brief. Efficiency means removing conv
 - **DO:** Capture ALL details (names, dates, numbers, titles).
 - **DO NOT:** Summarize.
 
-**(2.) Q&A format:**
+**(2.) Q-A format:**
 Structure the main body in Question/Answer format.
 
 **(2.A) Questions:**
@@ -166,6 +166,22 @@ class AppState:
     fallback_content: Optional[str] = None
 
 # --- 4. CORE PROCESSING & UTILITY FUNCTIONS ---
+def sanitize_input(text: str) -> str:
+    """Removes characters and keywords commonly used in prompt injection attacks."""
+    if not isinstance(text, str):
+        return ""
+    # Remove characters that can manipulate prompt structure
+    text = re.sub(r'[{}<>`]', '', text)
+    # Neutralize common instruction-hijacking phrases (case-insensitive)
+    injection_patterns = [
+        r'ignore all previous instructions',
+        r'you are now in.*mode',
+        r'stop being an ai'
+    ]
+    for pattern in injection_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    return text.strip()
+
 def safe_get_token_count(response):
     """Safely get the token count from a response, returning 0 if unavailable."""
     try:
@@ -299,7 +315,8 @@ def deduplicate_notes(full_notes_text: str) -> str:
 
 def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
     meeting_type = state.selected_meeting_type
-    context_section = f"**ADDITIONAL CONTEXT:**\n{state.context_input}" if state.add_context_enabled and state.context_input else ""
+    sanitized_context = sanitize_input(state.context_input)
+    context_section = f"**ADDITIONAL CONTEXT:**\n{sanitized_context}" if state.add_context_enabled and sanitized_context else ""
 
     if meeting_type == "Expert Meeting":
         if state.selected_note_style == "Option 1: Detailed & Strict":
@@ -377,16 +394,20 @@ def process_and_save_task(state: AppState, status_ui):
             all_transcripts, cloud_files, local_files = [], [], []
             try:
                 for i, chunk in enumerate(audio_chunks):
-                    status_ui.update(label=f"Step 1.2: Transcribing audio chunk {i+1}/{len(audio_chunks)}...")
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
-                        chunk.export(temp_f.name, format="wav")
-                        local_files.append(temp_f.name)
-                        cloud_ref = genai.upload_file(path=temp_f.name)
-                        cloud_files.append(cloud_ref.name)
-                        while cloud_ref.state.name == "PROCESSING": time.sleep(2); cloud_ref = genai.get_file(cloud_ref.name)
-                        if cloud_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {i+1} failed processing.")
-                        response = transcription_model.generate_content(["Transcribe this audio.", cloud_ref])
-                        all_transcripts.append(response.text)
+                    try:
+                        status_ui.update(label=f"Step 1.2: Transcribing audio chunk {i+1}/{len(audio_chunks)}...")
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
+                            chunk.export(temp_f.name, format="wav")
+                            local_files.append(temp_f.name)
+                            cloud_ref = genai.upload_file(path=temp_f.name)
+                            cloud_files.append(cloud_ref.name)
+                            while cloud_ref.state.name == "PROCESSING": time.sleep(2); cloud_ref = genai.get_file(cloud_ref.name)
+                            if cloud_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {i+1} cloud processing failed.")
+                            response = transcription_model.generate_content(["Transcribe this audio.", cloud_ref])
+                            all_transcripts.append(response.text)
+                    except Exception as e:
+                        raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
+                
                 raw_transcript = "\n\n".join(all_transcripts).strip()
             finally:
                 for path in local_files: os.remove(path)
@@ -404,13 +425,16 @@ def process_and_save_task(state: AppState, status_ui):
     if not raw_transcript: raise ValueError("Source content is empty.")
     
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
+    
+    s1 = sanitize_input(state.speaker_1)
+    s2 = sanitize_input(state.speaker_2)
 
     if state.refinement_enabled:
         status_ui.update(label="Step 2: Refining Transcript...")
         words = raw_transcript.split()
         
         if len(words) <= CHUNK_WORD_SIZE:
-            speaker_info = f"Speakers are {state.speaker_1} and {state.speaker_2}." if state.speaker_1 and state.speaker_2 else ""
+            speaker_info = f"Speakers are {s1} and {s2}." if s1 and s2 else ""
             refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT:\n{raw_transcript}"
             response = refinement_model.generate_content(refine_prompt)
             refined_transcript = response.text
@@ -428,7 +452,7 @@ def process_and_save_task(state: AppState, status_ui):
                     context_words = last_refined_chunk.split()
                     context = " ".join(context_words[-150:])
                 
-                speaker_info = f"Speakers are {state.speaker_1} and {state.speaker_2}." if state.speaker_1 and state.speaker_2 else ""
+                speaker_info = f"Speakers are {s1} and {s2}." if s1 and s2 else ""
                 
                 if not context:
                     prompt = f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}"
@@ -506,7 +530,7 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
         database.save_note(note_data)
     except Exception as db_error:
         st.session_state.app_state.fallback_content = final_notes_content
-        raise Exception(f"Failed to save note to database: {db_error}")
+        raise Exception(f"Processing succeeded, but failed to save the note to the database. You can download the unsaved note below. Error: {db_error}")
     return note_data
 
 # --- 5. UI RENDERING FUNCTIONS ---
