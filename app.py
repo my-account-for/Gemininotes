@@ -37,9 +37,9 @@ except Exception as e:
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
-# MODIFIED: Chunk size and overlap set as per your request.
-CHUNK_WORD_SIZE = 4000
-CHUNK_WORD_OVERLAP = 200
+# MODIFIED: Chunk size increased as per your request.
+CHUNK_WORD_SIZE = 6000
+CHUNK_WORD_OVERLAP = 300 # Overlap is proportionally increased to maintain context (5%)
 
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
@@ -253,8 +253,6 @@ def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
     
     return "\n".join(context_parts)
 
-# REMOVED: deduplicate_notes function has been removed.
-
 def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
     meeting_type = state.selected_meeting_type
     sanitized_context = sanitize_input(state.context_input)
@@ -380,21 +378,44 @@ def process_and_save_task(state: AppState, status_ui):
                 if not context:
                     prompt = f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}"
                 else:
-                    prompt = f"""You are continuing to refine a long transcript. Below is the tail end of the previously refined section. Your task is to continue the refinement process seamlessly on the new chunk provided.
-Ensure there is no abrupt break in formatting or style. Do NOT repeat the context in your output. Your response should start directly with the refined version of the new chunk.
+                    # MODIFICATION 1: Simplified prompt. 
+                    # We removed the confusing 'Do NOT repeat' instruction. We will now handle the overlap in our code.
+                    prompt = f"""You are continuing to refine a long transcript. Below is the tail end of the previously refined section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition.
 {speaker_info}
 ---
-PREVIOUSLY REFINED CONTEXT (FOR CONTINUITY ONLY - DO NOT REPEAT THIS IN YOUR OUTPUT):
+CONTEXT FROM PREVIOUSLY REFINED CHUNK (FOR CONTINUITY ONLY):
 ...{context}
 ---
-NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
+NEW TRANSCRIPT CHUNK TO REFINE:
 {chunk}"""
                 
                 response = refinement_model.generate_content(prompt)
                 all_refined_chunks.append(response.text)
                 total_tokens += safe_get_token_count(response)
             
-            refined_transcript = " ".join(all_refined_chunks)
+            # MODIFICATION 2: Intelligent stitching of refined chunks.
+            # Instead of a simple join, we now handle the overlap properly to prevent text loss.
+            if all_refined_chunks:
+                final_refined_words = all_refined_chunks[0].split()
+                for i in range(1, len(all_refined_chunks)):
+                    # Get the original raw chunk to calculate the overlap proportion
+                    original_chunk_words = chunks[i].split()
+                    if not original_chunk_words:
+                        continue
+                        
+                    # Calculate the proportion of overlap in the *input* text
+                    overlap_proportion = CHUNK_WORD_OVERLAP / len(original_chunk_words)
+                    
+                    # Apply this proportion to the *output* text to find the stitch point
+                    refined_chunk_words = all_refined_chunks[i].split()
+                    estimated_overlap_in_refined = int(len(refined_chunk_words) * overlap_proportion)
+                    
+                    # Append only the new part of the refined chunk
+                    final_refined_words.extend(refined_chunk_words[estimated_overlap_in_refined:])
+                
+                refined_transcript = " ".join(final_refined_words)
+            else:
+                refined_transcript = "" # Handle case where no chunks were processed
         
         final_transcript = refined_transcript
 
@@ -402,6 +423,7 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
     words = final_transcript.split()
     final_notes_content = ""
 
+    # NOTE: The CHUNK_WORD_SIZE now applies to note generation as well.
     if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
         chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
         all_notes, context_package = [], ""
@@ -432,8 +454,6 @@ NEW TRANSCRIPT CHUNK TO REFINE AND APPEND:
         response = notes_model.generate_content(prompt)
         final_notes_content = response.text
         total_tokens += safe_get_token_count(response)
-
-    # REMOVED: De-duplication step removed.
 
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
         status_ui.update(label="Step 4: Generating Executive Summary...")
