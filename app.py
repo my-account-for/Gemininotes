@@ -37,9 +37,8 @@ except Exception as e:
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
-# MODIFIED: Chunk size increased as per your request.
 CHUNK_WORD_SIZE = 6000
-CHUNK_WORD_OVERLAP = 300 # Overlap is proportionally increased to maintain context (5%)
+CHUNK_WORD_OVERLAP = 300 
 
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
@@ -104,24 +103,16 @@ Your primary directive is **100% completeness and accuracy**. You will process t
 {chunk_text}
 """
 
-PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task. 
-
-⚠️ CRITICAL: You must ONLY extract factual information from the actual transcript provided. DO NOT invent, assume, or create any content that is not explicitly stated in the transcript.
+PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task from a long transcript.
 
 ### **CONTEXT FROM PREVIOUS PROCESSING**
+Below is a summary of the notes generated from the previous transcript chunk. Use this to understand the flow of the conversation.
 {context_package}
 
 ### **CONTINUATION INSTRUCTIONS**
-1.  **LOCATE YOUR STARTING POINT:** Carefully review the context. Your first task is to find where the "Last complete Q&A processed" ends within the new transcript chunk below.
-2.  **RESUME PROCESSING:** Begin your work from the **first new question and answer** that immediately follows the context.
-3.  **PROCESS NEW CONTENT ONLY:** Process only the new Q&A pairs that appear in the remainder of the transcript.
-4.  **MAINTAIN FORMAT:** Maintain the same formatting style as established in previous chunks.
-
-### **QUALITY CONTROL & ERROR HANDLING**
--   NEVER create fictional questions or answers.
--   NEVER expand on topics not explicitly covered in the transcript.
--   If a Q&A pair seems incomplete, note it but do not fabricate the missing parts.
--   **CRITICAL GUARDRAIL:** If you cannot reliably find your starting point or if the new chunk is too ambiguous to continue, you MUST output **only** the following text and stop: `Error: Could not resume processing from context.`
+1.  **PROCESS THE ENTIRE CHUNK:** Your task is to process the **entire** new transcript chunk provided below.
+2.  **HANDLE OVERLAP:** The beginning of this new chunk overlaps with the end of the previous one. Process it naturally. Your output will be automatically de-duplicated later.
+3.  **MAINTAIN FORMAT:** Continue to use the exact same Q&A formatting as established in the base instructions.
 
 ---
 {base_instructions}
@@ -129,8 +120,7 @@ PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine conti
 
 **MEETING TRANSCRIPT (NEW CHUNK):**
 {chunk_text}
-
-**REMINDER**: Extract ONLY what is actually said in the transcript above. Do not invent content. If you are uncertain where to begin, use the error message."""
+"""
 
 
 # --- 3. STATE & DATA MODELS ---
@@ -207,20 +197,34 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
 def db_get_sectors() -> dict:
     return database.get_sectors()
 
+# --- MODIFICATION START: ROBUST CHUNKING LOGIC ---
 def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List[str]:
+    """Creates overlapping chunks of text, ensuring the final fragment is always included."""
+    if not text:
+        return []
+    
     words = text.split()
     if len(words) <= chunk_size:
         return [text]
+
+    if chunk_size <= overlap:
+        raise ValueError("Chunk size must be greater than overlap.")
+
+    chunks = []
+    step = chunk_size - overlap
     
-    chunks, start = [], 0
-    while start < len(words):
-        if chunk_size <= overlap:
-            raise ValueError("Chunk size must be greater than overlap to prevent infinite loops.")
-        end = start + chunk_size
-        chunks.append(" ".join(words[start:end]))
-        if end >= len(words): break
-        start += (chunk_size - overlap)
+    # Use a for loop with a step, which is more robust for this task
+    for i in range(0, len(words), step):
+        chunk = words[i : i + chunk_size]
+        chunks.append(" ".join(chunk))
+        # This check ensures that if the text ends perfectly on a chunk boundary,
+        # we don't create an extra, unnecessary overlapping chunk.
+        if (i + chunk_size) >= len(words):
+            break
+            
     return chunks
+# --- MODIFICATION END ---
+
 
 def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
     """Create richer context from previous notes"""
@@ -378,8 +382,6 @@ def process_and_save_task(state: AppState, status_ui):
                 if not context:
                     prompt = f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}"
                 else:
-                    # MODIFICATION 1: Simplified prompt. 
-                    # We removed the confusing 'Do NOT repeat' instruction. We will now handle the overlap in our code.
                     prompt = f"""You are continuing to refine a long transcript. Below is the tail end of the previously refined section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition.
 {speaker_info}
 ---
@@ -393,29 +395,23 @@ NEW TRANSCRIPT CHUNK TO REFINE:
                 all_refined_chunks.append(response.text)
                 total_tokens += safe_get_token_count(response)
             
-            # MODIFICATION 2: Intelligent stitching of refined chunks.
-            # Instead of a simple join, we now handle the overlap properly to prevent text loss.
             if all_refined_chunks:
                 final_refined_words = all_refined_chunks[0].split()
                 for i in range(1, len(all_refined_chunks)):
-                    # Get the original raw chunk to calculate the overlap proportion
                     original_chunk_words = chunks[i].split()
                     if not original_chunk_words:
                         continue
                         
-                    # Calculate the proportion of overlap in the *input* text
                     overlap_proportion = CHUNK_WORD_OVERLAP / len(original_chunk_words)
                     
-                    # Apply this proportion to the *output* text to find the stitch point
                     refined_chunk_words = all_refined_chunks[i].split()
                     estimated_overlap_in_refined = int(len(refined_chunk_words) * overlap_proportion)
                     
-                    # Append only the new part of the refined chunk
                     final_refined_words.extend(refined_chunk_words[estimated_overlap_in_refined:])
                 
                 refined_transcript = " ".join(final_refined_words)
             else:
-                refined_transcript = "" # Handle case where no chunks were processed
+                refined_transcript = ""
         
         final_transcript = refined_transcript
 
@@ -423,10 +419,11 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     words = final_transcript.split()
     final_notes_content = ""
 
-    # NOTE: The CHUNK_WORD_SIZE now applies to note generation as well.
     if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
         chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
-        all_notes, context_package = [], ""
+        
+        all_notes_chunks = []
+        context_package = ""
         
         if state.selected_note_style == "Option 1: Detailed & Strict":
             prompt_base = EXPERT_MEETING_DETAILED_PROMPT
@@ -437,17 +434,42 @@ NEW TRANSCRIPT CHUNK TO REFINE:
             status_ui.update(label=f"Step 3: Generating Notes (Chunk {i+1}/{len(chunks)})...")
             prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION
             prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
-            response = notes_model.generate_content(prompt)
             
-            if "Error: Could not resume processing from context." in response.text:
-                st.warning(f"Warning: Model could not process chunk {i+1} due to context ambiguity. It will be skipped.")
-                continue
-
-            all_notes.append(response.text)
+            response = notes_model.generate_content(prompt)
             total_tokens += safe_get_token_count(response)
-            context_package = _create_enhanced_context_from_notes("\n\n".join(all_notes), chunk_number=i + 1)
+            
+            current_notes_text = response.text
+            all_notes_chunks.append(current_notes_text)
+            
+            cumulative_notes_for_context = "\n\n".join(all_notes_chunks)
+            context_package = _create_enhanced_context_from_notes(cumulative_notes_for_context, chunk_number=i + 1)
         
-        final_notes_content = "\n\n".join(all_notes)
+        if not all_notes_chunks:
+             final_notes_content = ""
+        else:
+            final_notes_content = all_notes_chunks[0]
+            for i in range(1, len(all_notes_chunks)):
+                prev_notes = all_notes_chunks[i-1]
+                current_notes = all_notes_chunks[i]
+
+                last_q_match = list(re.finditer(r"(\*\*.*?\*\*)", prev_notes))
+                if not last_q_match:
+                    final_notes_content += "\n\n" + current_notes
+                    continue
+
+                last_question = last_q_match[-1].group(1)
+                
+                stitch_point = current_notes.find(last_question)
+
+                if stitch_point != -1:
+                    next_q_match = re.search(r"(\*\*.*?\*\*)", current_notes[stitch_point + len(last_question):])
+                    if next_q_match:
+                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_question) + next_q_match.start():]
+                    else:
+                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_question):]
+                else:
+                    st.warning(f"Could not find stitch point for chunk {i+1}. Appending full chunk; check for duplicates.")
+                    final_notes_content += "\n\n" + current_notes
 
     else:
         prompt = get_dynamic_prompt(state, final_transcript)
@@ -602,7 +624,6 @@ def render_output_and_history_tab(state: AppState):
     
     edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
     
-    # --- MODIFICATION START: ADDED DOWNLOAD BUTTONS ---
     dl1, dl2, dl3 = st.columns(3)
     
     dl1.download_button(
@@ -630,7 +651,6 @@ def render_output_and_history_tab(state: AppState):
             mime="text/plain",
             use_container_width=True
         )
-    # --- MODIFICATION END ---
     
     with st.expander("View Source Transcripts"):
         if active_note.get('refined_transcript'): 
