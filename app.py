@@ -602,9 +602,41 @@ def render_output_and_history_tab(state: AppState):
     
     edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
     
+    # --- MODIFICATION START: ADDED DOWNLOAD BUTTONS ---
+    dl1, dl2, dl3 = st.columns(3)
+    
+    dl1.download_button(
+        label="⬇️ Download Processed Output",
+        data=edited_content,
+        file_name=f"SynthNote_Output_{active_note.get('id', 'note')}.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
+    
+    if active_note.get('refined_transcript'):
+        dl2.download_button(
+            label="⬇️ Download Refined Transcript",
+            data=active_note['refined_transcript'],
+            file_name=f"RefinedTranscript_{active_note.get('id', 'note')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    
+    if active_note.get('raw_transcript'):
+        dl3.download_button(
+            label="⬇️ Download Raw Transcript",
+            data=active_note['raw_transcript'],
+            file_name=f"RawTranscript_{active_note.get('id', 'note')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    # --- MODIFICATION END ---
+    
     with st.expander("View Source Transcripts"):
-        if active_note['refined_transcript']: st.text_area("Refined Transcript", value=active_note['refined_transcript'], height=200, disabled=True, key=f"refined_tx_{active_note['id']}")
-        if active_note['raw_transcript']: st.text_area("Raw Source", value=active_note['raw_transcript'], height=200, disabled=True, key=f"raw_tx_{active_note['id']}")
+        if active_note.get('refined_transcript'): 
+            st.text_area("Refined Transcript", value=active_note['refined_transcript'], height=200, disabled=True, key=f"refined_tx_{active_note['id']}")
+        if active_note.get('raw_transcript'): 
+            st.text_area("Raw Source", value=active_note['raw_transcript'], height=200, disabled=True, key=f"raw_tx_{active_note['id']}")
             
     st.divider()
     st.subheader("📊 Analytics & History")
