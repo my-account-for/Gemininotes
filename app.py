@@ -512,14 +512,10 @@ def render_cockpit_and_history_tab(state: AppState):
     with col1:
         st.markdown("##### 📄 Source Document")
         if state.active_note_pdf_bytes:
-            # Since st.pdf is hypothetical, we'll use a placeholder.
-            # In a real app with Streamlit 1.49.0, you would use:
-            # page_num = st.number_input(...)
-            # st.pdf(state.active_note_pdf_bytes, page=page_num, height=700)
             st.info("Displaying source PDF. Use the input below to jump to a page.")
             page_num = st.number_input("Go to Page", min_value=1, step=1, key=f"pg_{active_note['id']}")
             st.image("https://upload.wikimedia.org/wikipedia/commons/8/87/PDF_file_icon.svg", caption=f"Placeholder for PDF page {page_num}", width=150)
-            st.caption("With Streamlit 1.49+, this would be a fully rendered PDF viewer.")
+            st.caption("With a future Streamlit version, this would be a fully rendered PDF viewer.")
         else:
             st.text_area("Refined Transcript", value=active_note.get('refined_transcript', 'N/A'), height=600, disabled=True)
     
@@ -596,8 +592,13 @@ def render_knowledge_explorer_tab(state: AppState):
     c1.metric("Total Notes", summary['total_notes'])
     c2.metric("Avg. Time / Note", f"{summary['avg_time']:.1f}s")
     c3.metric("Total Tokens", f"{summary['total_tokens']:,}")
-    # Hypothetical st.metric with sparklines from Streamlit 1.49.0
-    st.metric(label="Notes Processed (Last 14 Days)", value=sum(daily_counts.values()), sparkline=np.array(list(daily_counts.values())))
+    
+    # --- FIX IMPLEMENTED HERE ---
+    # Replace the hypothetical sparkline with a real st.bar_chart
+    st.markdown("##### Notes Processed (Last 14 Days)")
+    if daily_counts:
+        chart_df = pd.DataFrame(daily_counts.items(), columns=['Date', 'Count'])
+        st.bar_chart(chart_df, x='Date', y='Count', use_container_width=True)
 
 # --- 6. MAIN APPLICATION RUNNER ---
 def run_app():
