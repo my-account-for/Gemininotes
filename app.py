@@ -379,8 +379,11 @@ def render_input_and_processing_tab(state: AppState):
             progress_bar.progress((i) / total_items, text=f"Processing {i+1}/{total_items}: '{item['name']}'");
             with st.status(f"Processing: {item['name']}", expanded=True) as status:
                 try:
-                    if item['type'] == 'file': state.input_method = "Upload File"; state.uploaded_file = item['data']
-                    else: state.input_method = "Paste Text"; state.uploaded_file = None
+                    # THE BUG FIX: Set the state correctly before processing each item
+                    if item['type'] == 'file': 
+                        state.input_method = "Upload File"; state.uploaded_file = item['data']
+                    else: 
+                        state.input_method = "Paste Text"; state.uploaded_file = None
                     final_note = process_and_save_task(state, status)
                     state.active_note_id = final_note['id']
                     status.update(label="✅ Success!", state="complete")
