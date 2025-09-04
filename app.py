@@ -210,23 +210,26 @@ def extract_entities(note_id: str, note_content: str, status_ui):
         if isinstance(entities, list): database.save_entities(note_id, entities)
     except Exception as e: st.warning(f"Could not extract/save entities: {e}", icon="⚠️")
 
-def process_and_save_task(state: AppState, source_item: Dict, status_ui):
+def process_and_save_task(state: AppState, status_ui):
     start_time = time.time()
     notes_model = genai.GenerativeModel(AVAILABLE_MODELS[state.notes_model])
     refinement_model = genai.GenerativeModel(AVAILABLE_MODELS[state.refinement_model])
     transcription_model = genai.GenerativeModel(AVAILABLE_MODELS[state.transcription_model])
     
     status_ui.update(label="Step 1: Preparing Source Content...")
-    raw_transcript, file_name, pdf_bytes = "", source_item['name'], None
+    raw_transcript, file_name, pdf_bytes = "", "Pasted Text", None
+    
+    uploaded_file_obj = state.uploaded_file
 
-    if source_item['type'] == 'file':
-        uploaded_file_obj = source_item['data']
+    if state.input_method == "Upload File" and uploaded_file_obj:
         file_name = uploaded_file_obj.name
         if file_name.lower().endswith('.pdf'): pdf_bytes = uploaded_file_obj.getvalue()
+
         file_type, _ = get_file_content(uploaded_file_obj)
         if file_type == "audio_file":
             status_ui.update(label="Step 1.1: Processing Audio...")
-            audio_bytes = uploaded_file_obj.getvalue(); audio = AudioSegment.from_file(io.BytesIO(audio_bytes)); chunk_length_ms = 5 * 60 * 1000; audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]; all_transcripts, cloud_files, local_files = [], [], []
+            audio_bytes = uploaded_file_obj.getvalue()
+            audio = AudioSegment.from_file(io.BytesIO(audio_bytes)); chunk_length_ms = 5 * 60 * 1000; audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]; all_transcripts, cloud_files, local_files = [], [], []
             try:
                 for i, chunk in enumerate(audio_chunks):
                     try:
@@ -245,7 +248,7 @@ def process_and_save_task(state: AppState, source_item: Dict, status_ui):
                     except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
         elif file_type is None or file_type.startswith("Error:"): raise ValueError(file_type or "Failed to read file content.")
         else: raw_transcript = file_type
-    elif source_item['type'] == 'text': raw_transcript = source_item['data']
+    elif state.input_method == "Paste Text": raw_transcript = state.text_input
 
     if not raw_transcript: raise ValueError("Source content is empty.")
     
@@ -369,6 +372,7 @@ def render_input_and_processing_tab(state: AppState):
         st.button("Generate Notes", type="primary", use_container_width=True, disabled=not state.text_input.strip(), on_click=set_processing_flag)
     
     if state.processing:
+        items_to_process = []
         if state.input_method == "Paste Text": 
             items_to_process = [{'type': 'text', 'name': f"Pasted Text @ {datetime.now().strftime('%H:%M:%S')}", 'data': st.session_state.text_to_process}]
         else: 
@@ -379,8 +383,9 @@ def render_input_and_processing_tab(state: AppState):
             progress_bar.progress((i) / total_items, text=f"Processing {i+1}/{total_items}: '{item['name']}'");
             with st.status(f"Processing: {item['name']}", expanded=True) as status:
                 try:
-                    state.uploaded_file = item.get('data') # Will be None for text type
+                    state.uploaded_file = item.get('data') 
                     state.text_input = item.get('data', '') if item['type'] == 'text' else ''
+                    state.input_method = "Upload File" if item['type'] == 'file' else "Paste Text"
                     
                     final_note = process_and_save_task(state, status)
                     state.active_note_id = final_note['id']
