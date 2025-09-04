@@ -373,7 +373,8 @@ def render_input_and_processing_tab(state: AppState):
     if state.processing:
         if state.input_method == "Paste Text": items_to_process = [{'type': 'text', 'name': f"Pasted Text @ {datetime.now().strftime('%H:%M:%S')}"}]
         else: items_to_process = state.processing_queue[:]
-        total_items = len(items_to_process); progress_bar = st.progress(0, text=f"Starting batch for {total_items} item(s)...")
+        
+        total_items = len(items_to_process); progress_bar = st.progress(0, text=f"Starting processing for {total_items} item(s)...")
         for i, item in enumerate(items_to_process):
             progress_bar.progress((i) / total_items, text=f"Processing {i+1}/{total_items}: '{item['name']}'");
             with st.status(f"Processing: {item['name']}", expanded=True) as status:
@@ -386,7 +387,7 @@ def render_input_and_processing_tab(state: AppState):
                 except Exception as e:
                     state.error_message = f"Error on '{item['name']}':\n{e}"; status.update(label=f"❌ Error", state="error"); st.error(state.error_message); break
         
-        if not state.error_message: progress_bar.progress(1.0, text="✅ Batch complete!"); st.toast(f"Successfully processed {total_items} item(s).", icon="🎉", duration=5000)
+        if not state.error_message: progress_bar.progress(1.0, text="✅ Processing complete!"); st.toast(f"Successfully processed {total_items} item(s).", icon="🎉", duration=5000)
         state.processing_queue = []; state.processing = False; time.sleep(1); st.rerun()
 
 def render_cockpit_and_history_tab(state: AppState):
