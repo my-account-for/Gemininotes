@@ -230,8 +230,10 @@ def process_and_save_task(state: AppState, status_ui):
             status_ui.update(label="Step 1.1: Processing Audio...")
             audio_bytes = uploaded_file_obj.getvalue()
             audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+            
             chunk_length_ms = 5 * 60 * 1000
             audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
+            
             all_transcripts, cloud_files, local_files = [], [], []
             try:
                 for i, chunk in enumerate(audio_chunks):
@@ -397,7 +399,8 @@ def render_cockpit_and_history_tab(state: AppState):
     with col1:
         st.markdown("##### 📄 Source Document")
         if state.active_note_pdf_bytes:
-            st.info("Displaying source PDF. Use input below to jump to page."); page_num = st.number_input("Go to Page", min_value=1, step=1, key=f"pg_{active_note['id']}"); st.image("https://upload.wikimedia.org/wikipedia/commons/8/87/PDF_file_icon.svg", caption=f"Placeholder for PDF page {page_num}", width=150)
+            st.info("Source document was a PDF. A viewer will be here in a future Streamlit version.")
+            st.image("https://upload.wikimedia.org/wikipedia/commons/8/87/PDF_file_icon.svg", caption=f"Source: {active_note['file_name']}", width=150)
         else: st.text_area("Refined Transcript", value=active_note.get('refined_transcript', 'N/A'), height=600, disabled=True)
     with col2: st.markdown("##### 🧠 AI-Generated Notes"); edited_content = st_ace(value=active_note['content'], language='markdown', theme='tomorrow_night_eighties', height=700, key=f"output_ace_{active_note['id']}", readonly=False)
     st.divider()
