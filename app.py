@@ -179,7 +179,6 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
         if ext == ".pdf":
             reader = PyPDF2.PdfReader(file_bytes_io)
             if reader.is_encrypted: return "Error: PDF is encrypted.", name
-            # --- VISIONARY UPGRADE: PREPEND PAGE NUMBERS TO PDF TEXT FOR CITATIONS ---
             content = ""
             for i, page in enumerate(reader.pages):
                 page_text = page.extract_text()
@@ -443,7 +442,7 @@ def render_input_and_processing_tab(state: AppState):
             for f in uploaded_files:
                 if not any(item.name == f.name for item in state.processing_queue):
                     state.processing_queue.append(f)
-            st.toast(f"Added {len(uploaded_files)} file(s) to the queue.", icon="✅")
+            st.toast(f"Added {len(uploaded_files)} file(s) to the queue.", icon="✅", duration=2000)
 
     st.subheader("Step 2: Review Queue")
     if not state.processing_queue:
@@ -513,17 +512,20 @@ def render_cockpit_and_history_tab(state: AppState):
     with col1:
         st.markdown("##### 📄 Source Document")
         if state.active_note_pdf_bytes:
-            # Hypothetical st.pdf component - rendering as image for demonstration
+            # Since st.pdf is hypothetical, we'll use a placeholder.
+            # In a real app with Streamlit 1.49.0, you would use:
+            # page_num = st.number_input(...)
+            # st.pdf(state.active_note_pdf_bytes, page=page_num, height=700)
             st.info("Displaying source PDF. Use the input below to jump to a page.")
             page_num = st.number_input("Go to Page", min_value=1, step=1, key=f"pg_{active_note['id']}")
-            st.text(f"[Imagine PDF is rendered here, showing page {page_num}]")
-            st.image("https://upload.wikimedia.org/wikipedia/commons/8/87/PDF_file_icon.svg", width=100)
+            st.image("https://upload.wikimedia.org/wikipedia/commons/8/87/PDF_file_icon.svg", caption=f"Placeholder for PDF page {page_num}", width=150)
+            st.caption("With Streamlit 1.49+, this would be a fully rendered PDF viewer.")
         else:
             st.text_area("Refined Transcript", value=active_note.get('refined_transcript', 'N/A'), height=600, disabled=True)
     
     with col2:
         st.markdown("##### 🧠 AI-Generated Notes")
-        st_ace(value=active_note['content'], language='markdown', theme='github', height=700, key=f"output_ace_{active_note['id']}", readonly=True)
+        st_ace(value=active_note['content'], language='markdown', theme='tomorrow_night_eighties', height=700, key=f"output_ace_{active_note['id']}", readonly=True)
     
     st.subheader("💬 Chat with this Document")
     for msg in state.chat_history: st.chat_message(msg["role"]).write(msg["content"])
@@ -571,13 +573,14 @@ def render_knowledge_explorer_tab(state: AppState):
     st.subheader("🌐 Cross-Document Search")
     st.write("Click a cell in the table above to search for that entity across all other notes.")
 
-    selection = st.session_state.entity_editor.get("selection", {"rows": [], "columns": []})
-    if selection and selection["rows"]:
-        search_term = df.iloc[selection["rows"][0]][df.columns[selection["columns"][0]]]
-        if "last_search" not in st.session_state or st.session_state.last_search != search_term:
-            st.session_state.last_search = search_term
-            with st.spinner(f"Searching for '{search_term}'..."):
-                state.knowledge_explorer_search_results = database.search_notes_by_entity(search_term, exclude_note_id=active_note_id)
+    if 'entity_editor' in st.session_state:
+        selection = st.session_state.entity_editor.get("selection", {"rows": [], "columns": []})
+        if selection and selection["rows"] and not df.empty:
+            search_term = df.iloc[selection["rows"][0]][df.columns[selection["columns"][0]]]
+            if "last_search" not in st.session_state or st.session_state.last_search != search_term:
+                st.session_state.last_search = search_term
+                with st.spinner(f"Searching for '{search_term}'..."):
+                    state.knowledge_explorer_search_results = database.search_notes_by_entity(search_term, exclude_note_id=active_note_id)
                 st.rerun()
     
     if "last_search" in st.session_state and st.session_state.last_search:
@@ -593,7 +596,7 @@ def render_knowledge_explorer_tab(state: AppState):
     c1.metric("Total Notes", summary['total_notes'])
     c2.metric("Avg. Time / Note", f"{summary['avg_time']:.1f}s")
     c3.metric("Total Tokens", f"{summary['total_tokens']:,}")
-    # Hypothetical st.metric with sparklines
+    # Hypothetical st.metric with sparklines from Streamlit 1.49.0
     st.metric(label="Notes Processed (Last 14 Days)", value=sum(daily_counts.values()), sparkline=np.array(list(daily_counts.values())))
 
 # --- 6. MAIN APPLICATION RUNNER ---
