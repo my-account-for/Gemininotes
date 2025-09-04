@@ -230,45 +230,32 @@ def process_and_save_task(state: AppState, status_ui):
             status_ui.update(label="Step 1.1: Processing Audio...")
             audio_bytes = uploaded_file_obj.getvalue()
             audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-            
             chunk_length_ms = 5 * 60 * 1000
             audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
-            
             all_transcripts, cloud_files, local_files = [], [], []
             try:
                 for i, chunk in enumerate(audio_chunks):
                     try:
                         status_ui.update(label=f"Step 1.2: Transcribing audio chunk {i+1}/{len(audio_chunks)}...")
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
-                            chunk.export(temp_f.name, format="wav")
-                            local_files.append(temp_f.name)
-                            cloud_ref = genai.upload_file(path=temp_f.name)
-                            cloud_files.append(cloud_ref.name)
+                            chunk.export(temp_f.name, format="wav"); local_files.append(temp_f.name); cloud_ref = genai.upload_file(path=temp_f.name); cloud_files.append(cloud_ref.name)
                             while cloud_ref.state.name == "PROCESSING": time.sleep(2); cloud_ref = genai.get_file(cloud_ref.name)
                             if cloud_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {i+1} cloud processing failed.")
-                            response = transcription_model.generate_content(["Transcribe this audio.", cloud_ref])
-                            all_transcripts.append(response.text)
-                    except Exception as e:
-                        raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
-                
+                            response = transcription_model.generate_content(["Transcribe this audio.", cloud_ref]); all_transcripts.append(response.text)
+                    except Exception as e: raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
                 raw_transcript = "\n\n".join(all_transcripts).strip()
             finally:
                 for path in local_files: os.remove(path)
                 for cloud_name in cloud_files: 
                     try: genai.delete_file(cloud_name)
                     except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
-        
-        elif file_type is None or file_type.startswith("Error:"):
-            raise ValueError(file_type or "Failed to read file content.")
-        else:
-            raw_transcript = file_type
-    elif state.input_method == "Paste Text":
-        raw_transcript = state.text_input
+        elif file_type is None or file_type.startswith("Error:"): raise ValueError(file_type or "Failed to read file content.")
+        else: raw_transcript = file_type
+    elif state.input_method == "Paste Text": raw_transcript = state.text_input
 
     if not raw_transcript: raise ValueError("Source content is empty.")
     
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
-    
     s1 = sanitize_input(state.speaker_1); s2 = sanitize_input(state.speaker_2)
 
     if state.refinement_enabled:
@@ -325,7 +312,6 @@ def process_and_save_task(state: AppState, status_ui):
     extract_entities(note_id, final_notes_content, status_ui)
     return note_data
 
-# --- 5. UI RENDERING FUNCTIONS ---
 def on_sector_change():
     state = st.session_state.app_state; all_sectors = db_get_sectors(); state.earnings_call_topics = all_sectors.get(state.selected_sector, "")
 
@@ -380,27 +366,18 @@ def render_input_and_processing_tab(state: AppState):
     if state.input_method == "Upload File":
         if st.button("Process Entire Queue", type="primary", use_container_width=True, disabled=not state.processing_queue): state.processing = True; state.error_message = None; st.rerun()
     else:
-        if st.button("Generate Notes", type="primary", use_container_width=True, disabled=not state.text_input.strip()):
-            state.processing = True; state.error_message = None; st.rerun()
+        if st.button("Generate Notes", type="primary", use_container_width=True, disabled=not state.text_input.strip()): state.processing = True; state.error_message = None; st.rerun()
     
     if state.processing:
         if state.input_method == "Paste Text": items_to_process = [{'type': 'text', 'name': f"Pasted Text @ {datetime.now().strftime('%H:%M:%S')}"}]
         else: items_to_process = state.processing_queue[:]
-        
         total_items = len(items_to_process); progress_bar = st.progress(0, text=f"Starting batch for {total_items} item(s)...")
         for i, item in enumerate(items_to_process):
             progress_bar.progress((i) / total_items, text=f"Processing {i+1}/{total_items}: '{item['name']}'");
             with st.status(f"Processing: {item['name']}", expanded=True) as status:
                 try:
-                    # --- BUG FIX ---
-                    # Explicitly set the state that the processing function relies on
-                    if item['type'] == 'file':
-                        state.input_method = "Upload File"
-                        state.uploaded_file = item['data']
-                    else:
-                        state.input_method = "Paste Text"
-                        state.uploaded_file = None
-                    
+                    if item['type'] == 'file': state.input_method = "Upload File"; state.uploaded_file = item['data']
+                    else: state.input_method = "Paste Text"; state.uploaded_file = None
                     final_note = process_and_save_task(state, status)
                     state.active_note_id = final_note['id']
                     status.update(label="✅ Success!", state="complete")
