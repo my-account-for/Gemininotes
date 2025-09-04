@@ -127,7 +127,7 @@ class AppState:
     earnings_call_topics: str = ""
     existing_notes_input: str = ""
     text_input: str = ""
-    uploaded_file: Optional[Any] = None # Restored for original logic
+    uploaded_file: Optional[Any] = None
     processing: bool = False
     active_note_id: Optional[str] = None
     error_message: Optional[str] = None
@@ -210,8 +210,6 @@ def extract_entities(note_id: str, note_content: str, status_ui):
         if isinstance(entities, list): database.save_entities(note_id, entities)
     except Exception as e: st.warning(f"Could not extract/save entities: {e}", icon="⚠️")
 
-
-# --- LOGIC RESTORED: THE ORIGINAL, FULL-LENGTH PROCESSING FUNCTION ---
 def process_and_save_task(state: AppState, status_ui):
     start_time = time.time()
     notes_model = genai.GenerativeModel(AVAILABLE_MODELS[state.notes_model])
@@ -221,14 +219,16 @@ def process_and_save_task(state: AppState, status_ui):
     status_ui.update(label="Step 1: Preparing Source Content...")
     raw_transcript, file_name, pdf_bytes = "", "Pasted Text", None
     
-    if state.input_method == "Upload File" and state.uploaded_file:
-        file_name = state.uploaded_file.name
-        if file_name.lower().endswith('.pdf'): pdf_bytes = state.uploaded_file.getvalue()
+    uploaded_file_obj = state.uploaded_file
 
-        file_type, _ = get_file_content(state.uploaded_file)
+    if state.input_method == "Upload File" and uploaded_file_obj:
+        file_name = uploaded_file_obj.name
+        if file_name.lower().endswith('.pdf'): pdf_bytes = uploaded_file_obj.getvalue()
+
+        file_type, _ = get_file_content(uploaded_file_obj)
         if file_type == "audio_file":
             status_ui.update(label="Step 1.1: Processing Audio...")
-            audio_bytes = state.uploaded_file.getvalue()
+            audio_bytes = uploaded_file_obj.getvalue()
             audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
             
             chunk_length_ms = 5 * 60 * 1000
@@ -269,151 +269,60 @@ def process_and_save_task(state: AppState, status_ui):
     
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
     
-    s1 = sanitize_input(state.speaker_1)
-    s2 = sanitize_input(state.speaker_2)
+    s1 = sanitize_input(state.speaker_1); s2 = sanitize_input(state.speaker_2)
 
     if state.refinement_enabled:
-        status_ui.update(label="Step 2: Refining Transcript...")
-        words = raw_transcript.split()
-        
+        status_ui.update(label="Step 2: Refining Transcript..."); words = raw_transcript.split()
         if len(words) <= CHUNK_WORD_SIZE:
             speaker_info = f"Speakers are {s1} and {s2}." if s1 and s2 else ""
             refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT:\n{raw_transcript}"
-            response = refinement_model.generate_content(refine_prompt)
-            refined_transcript = response.text
-            total_tokens += safe_get_token_count(response)
+            response = refinement_model.generate_content(refine_prompt); refined_transcript = response.text; total_tokens += safe_get_token_count(response)
         else:
-            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
-            all_refined_chunks = []
-            
+            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP); all_refined_chunks = []
             for i, chunk in enumerate(chunks):
                 status_ui.update(label=f"Step 2: Refining Transcript (Chunk {i+1}/{len(chunks)})...")
-                
-                context = ""
-                if i > 0 and all_refined_chunks:
-                    last_refined_chunk = all_refined_chunks[-1]
-                    context_words = last_refined_chunk.split()
-                    context = " ".join(context_words[-150:])
-                
+                context = " ".join(all_refined_chunks[-1].split()[-150:]) if i > 0 and all_refined_chunks else ""
                 speaker_info = f"Speakers are {s1} and {s2}." if s1 and s2 else ""
-                
-                if not context:
-                    prompt = f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}"
-                else:
-                    prompt = f"""You are continuing to refine a long transcript. Below is the tail end of the previously refined section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition.
-{speaker_info}
----
-CONTEXT FROM PREVIOUSLY REFINED CHUNK (FOR CONTINUITY ONLY):
-...{context}
----
-NEW TRANSCRIPT CHUNK TO REFINE:
-{chunk}"""
-                
-                response = refinement_model.generate_content(prompt)
-                all_refined_chunks.append(response.text)
-                total_tokens += safe_get_token_count(response)
-            
+                prompt = f"""You are continuing to refine a long transcript... CONTEXT: ...{context}\n---NEW TRANSCRIPT CHUNK TO REFINE:\n{chunk}""" if context else f"You are refining a transcript...TRANSCRIPT CHUNK TO REFINE:\n{chunk}"
+                response = refinement_model.generate_content(prompt); all_refined_chunks.append(response.text); total_tokens += safe_get_token_count(response)
             if all_refined_chunks:
                 final_refined_words = all_refined_chunks[0].split()
                 for i in range(1, len(all_refined_chunks)):
                     original_chunk_words = chunks[i].split()
-                    if not original_chunk_words:
-                        continue
-                        
-                    overlap_proportion = CHUNK_WORD_OVERLAP / len(original_chunk_words)
-                    
-                    refined_chunk_words = all_refined_chunks[i].split()
-                    estimated_overlap_in_refined = int(len(refined_chunk_words) * overlap_proportion)
-                    
+                    if not original_chunk_words: continue
+                    overlap_proportion = CHUNK_WORD_OVERLAP / len(original_chunk_words); refined_chunk_words = all_refined_chunks[i].split(); estimated_overlap_in_refined = int(len(refined_chunk_words) * overlap_proportion)
                     final_refined_words.extend(refined_chunk_words[estimated_overlap_in_refined:])
-                
                 refined_transcript = " ".join(final_refined_words)
-            else:
-                refined_transcript = ""
-        
         final_transcript = refined_transcript if refined_transcript and refined_transcript.strip() else raw_transcript
 
-    status_ui.update(label="Step 3: Generating Notes...")
-    words = final_transcript.split()
-    final_notes_content = ""
-
+    status_ui.update(label="Step 3: Generating Notes..."); words = final_transcript.split(); final_notes_content = ""
     if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
-        chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
-        
-        all_notes_chunks = []
-        context_package = ""
-        
-        if state.selected_note_style == "Option 1: Detailed & Strict":
-            prompt_base = EXPERT_MEETING_DETAILED_PROMPT
-        else:
-            prompt_base = EXPERT_MEETING_CONCISE_PROMPT
-
+        chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP); all_notes_chunks = []; context_package = ""
+        prompt_base = EXPERT_MEETING_DETAILED_PROMPT if state.selected_note_style == "Option 1: Detailed & Strict" else EXPERT_MEETING_CONCISE_PROMPT
         for i, chunk in enumerate(chunks):
-            status_ui.update(label=f"Step 3: Generating Notes (Chunk {i+1}/{len(chunks)})...")
-            prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION
-            prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
-            
-            response = notes_model.generate_content(prompt)
-            total_tokens += safe_get_token_count(response)
-            
-            current_notes_text = response.text
-            all_notes_chunks.append(current_notes_text)
-            
-            cumulative_notes_for_context = "\n\n".join(all_notes_chunks)
-            context_package = _create_enhanced_context_from_notes(cumulative_notes_for_context, chunk_number=i + 1)
-        
-        if not all_notes_chunks:
-             final_notes_content = ""
-        else:
+            status_ui.update(label=f"Step 3: Generating Notes (Chunk {i+1}/{len(chunks)})..."); prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION; prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
+            response = notes_model.generate_content(prompt); total_tokens += safe_get_token_count(response); current_notes_text = response.text; all_notes_chunks.append(current_notes_text)
+            context_package = _create_enhanced_context_from_notes("\n\n".join(all_notes_chunks), chunk_number=i + 1)
+        if all_notes_chunks:
             final_notes_content = all_notes_chunks[0]
             for i in range(1, len(all_notes_chunks)):
-                prev_notes = all_notes_chunks[i-1]
-                current_notes = all_notes_chunks[i]
-
-                last_q_match = list(re.finditer(r"(\*\*.*?\*\*)", prev_notes))
-                if not last_q_match:
-                    final_notes_content += "\n\n" + current_notes
-                    continue
-
-                last_question = last_q_match[-1].group(1)
-                
-                stitch_point = current_notes.find(last_question)
-
+                prev_notes = all_notes_chunks[i-1]; current_notes = all_notes_chunks[i]; last_q_match = list(re.finditer(r"(\*\*.*?\*\*)", prev_notes))
+                if not last_q_match: final_notes_content += "\n\n" + current_notes; continue
+                last_question = last_q_match[-1].group(1); stitch_point = current_notes.find(last_question)
                 if stitch_point != -1:
                     next_q_match = re.search(r"(\*\*.*?\*\*)", current_notes[stitch_point + len(last_question):])
-                    if next_q_match:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_question) + next_q_match.start():]
-                    else:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_question):]
-                else:
-                    final_notes_content += "\n\n" + current_notes
-
+                    if next_q_match: final_notes_content += "\n\n" + current_notes[stitch_point + len(last_question) + next_q_match.start():]
+                    else: final_notes_content += "\n\n" + current_notes[stitch_point + len(last_question):]
+                else: final_notes_content += "\n\n" + current_notes
     else:
-        prompt = get_dynamic_prompt(state, final_transcript)
-        response = notes_model.generate_content(prompt)
-        final_notes_content = response.text
-        total_tokens += safe_get_token_count(response)
-
+        prompt = get_dynamic_prompt(state, final_transcript); response = notes_model.generate_content(prompt); final_notes_content = response.text; total_tokens += safe_get_token_count(response)
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
-        status_ui.update(label="Step 4: Generating Executive Summary...")
-        summary_prompt = f"Create a concise executive summary from these notes:\n\n{final_notes_content}"
-        response = notes_model.generate_content(summary_prompt)
-        final_notes_content += f"\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{response.text}"
-        total_tokens += safe_get_token_count(response)
-
-    status_ui.update(label="Step 5: Saving to Database...")
-    note_id = str(uuid.uuid4())
-    note_data = {
-        'id': note_id, 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
-        'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript,
-        'refined_transcript': refined_transcript, 'token_usage': total_tokens, 
-        'processing_time': time.time() - start_time, 'pdf_blob': pdf_bytes
-    }
-    database.save_note(note_data)
+        status_ui.update(label="Step 4: Generating Executive Summary..."); summary_prompt = f"Create a concise executive summary from these notes:\n\n{final_notes_content}"; response = notes_model.generate_content(summary_prompt); final_notes_content += f"\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{response.text}"; total_tokens += safe_get_token_count(response)
     
-    # INTEGRATION: Call entity extraction after saving
+    status_ui.update(label="Step 5: Saving to Database..."); note_id = str(uuid.uuid4())
+    note_data = {'id': note_id, 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type, 'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript, 'refined_transcript': refined_transcript, 'token_usage': total_tokens, 'processing_time': time.time() - start_time, 'pdf_blob': pdf_bytes}; database.save_note(note_data)
+    
     extract_entities(note_id, final_notes_content, status_ui)
-    
     return note_data
 
 # --- 5. UI RENDERING FUNCTIONS ---
@@ -422,37 +331,26 @@ def on_sector_change():
 
 def render_input_and_processing_tab(state: AppState):
     state.input_method = pills("Input Method", ["Upload File", "Paste Text"], index=["Upload File", "Paste Text"].index(state.input_method))
-    
-    # Logic for Upload File
     if state.input_method == "Upload File":
         st.subheader("Step 1: Upload Documents"); st.info("Upload multiple files to create a batch processing queue.")
-        uploaded_files = st.file_uploader("Upload Files", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'], accept_multiple_files=True)
+        uploaded_files = st.file_uploader("Upload Files", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'], accept_multiple_files=True, key="file_uploader")
         if st.button("➕ Add to Processing Queue"):
             for f in uploaded_files:
-                if not any(item['name'] == f.name for item in state.processing_queue if item['type'] == 'file'): 
-                    state.processing_queue.append({'type': 'file', 'data': f, 'name': f.name})
+                if not any(item['name'] == f.name for item in state.processing_queue if item['type'] == 'file'): state.processing_queue.append({'type': 'file', 'data': f, 'name': f.name})
             st.toast(f"Added {len(uploaded_files)} file(s) to the queue.", icon="✅")
         st.subheader("Step 2: Review Queue")
         if not state.processing_queue: st.caption("Your queue is empty.")
         else: 
             st.dataframe(pd.DataFrame({"File Name": [f['name'] for f in state.processing_queue if f['type'] == 'file']}), use_container_width=True, hide_index=True)
             if st.button("Clear Queue"): state.processing_queue = []; st.rerun()
+    else: st.subheader("Input Text"); state.text_input = st.text_area("Paste source transcript here:", height=300, key="text_input_main")
     
-    # Logic for Paste Text
-    else: 
-        st.subheader("Input Text")
-        state.text_input = st.text_area("Paste source transcript here:", height=300, key="text_input_main")
-    
-    # Unified Configuration UI for both input methods
     st.subheader("Configuration")
     with st.expander("⚙️ Processing Configuration", expanded=True):
         state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type))
-        if state.selected_meeting_type == "Expert Meeting": 
-            state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
+        if state.selected_meeting_type == "Expert Meeting": state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
         elif state.selected_meeting_type == "Earnings Call":
-            state.earnings_call_mode = st.radio("Mode", EARNINGS_CALL_MODES, horizontal=True, index=EARNINGS_CALL_MODES.index(state.earnings_call_mode))
-            all_sectors = db_get_sectors()
-            sector_options = ["Other / Manual Topics"] + sorted(list(all_sectors.keys()))
+            state.earnings_call_mode = st.radio("Mode", EARNINGS_CALL_MODES, horizontal=True, index=EARNINGS_CALL_MODES.index(state.earnings_call_mode)); all_sectors = db_get_sectors(); sector_options = ["Other / Manual Topics"] + sorted(list(all_sectors.keys()));
             try: current_sector_index = sector_options.index(state.selected_sector)
             except ValueError: current_sector_index = 0
             state.selected_sector = st.selectbox("Sector (for Topic Templates)", sector_options, index=current_sector_index, on_change=on_sector_change, key="sector_selector")
@@ -486,25 +384,21 @@ def render_input_and_processing_tab(state: AppState):
             state.processing = True; state.error_message = None; st.rerun()
     
     if state.processing:
-        # Prepare queue based on input method
-        if state.input_method == "Paste Text":
-            pasted_item = {'type': 'text', 'data': state.text_input, 'name': f"Pasted Text - {datetime.now().strftime('%H:%M:%S')}"}
-            items_to_process = [pasted_item]
-        else:
-            items_to_process = state.processing_queue[:]
-
-        total_items = len(items_to_process)
-        progress_bar = st.progress(0, text=f"Starting batch for {total_items} item(s)...")
-
+        if state.input_method == "Paste Text": items_to_process = [{'type': 'text', 'name': f"Pasted Text @ {datetime.now().strftime('%H:%M:%S')}"}]
+        else: items_to_process = state.processing_queue[:]
+        
+        total_items = len(items_to_process); progress_bar = st.progress(0, text=f"Starting batch for {total_items} item(s)...")
         for i, item in enumerate(items_to_process):
             progress_bar.progress((i) / total_items, text=f"Processing {i+1}/{total_items}: '{item['name']}'");
             with st.status(f"Processing: {item['name']}", expanded=True) as status:
                 try:
-                    # Set the state for the processing function
+                    # --- BUG FIX ---
+                    # Explicitly set the state that the processing function relies on
                     if item['type'] == 'file':
+                        state.input_method = "Upload File"
                         state.uploaded_file = item['data']
                     else:
-                        state.text_input = item['data']
+                        state.input_method = "Paste Text"
                         state.uploaded_file = None
                     
                     final_note = process_and_save_task(state, status)
@@ -513,9 +407,7 @@ def render_input_and_processing_tab(state: AppState):
                 except Exception as e:
                     state.error_message = f"Error on '{item['name']}':\n{e}"; status.update(label=f"❌ Error", state="error"); st.error(state.error_message); break
         
-        if not state.error_message:
-            progress_bar.progress(1.0, text="✅ Batch complete!"); st.toast(f"Successfully processed {total_items} item(s).", icon="🎉", duration=5000)
-        
+        if not state.error_message: progress_bar.progress(1.0, text="✅ Batch complete!"); st.toast(f"Successfully processed {total_items} item(s).", icon="🎉", duration=5000)
         state.processing_queue = []; state.processing = False; time.sleep(1); st.rerun()
 
 def render_cockpit_and_history_tab(state: AppState):
@@ -566,11 +458,13 @@ def render_knowledge_explorer_tab(state: AppState):
     if 'entity_editor' in st.session_state:
         selection = st.session_state.entity_editor.get("selection", {"rows": [], "columns": []})
         if selection and selection["rows"] and not df.empty:
-            search_term = df.iloc[selection["rows"][0]][df.columns[selection["columns"][0]]]
-            if "last_search" not in st.session_state or st.session_state.last_search != search_term:
-                st.session_state.last_search = search_term
-                with st.spinner(f"Searching for '{search_term}'..."): state.knowledge_explorer_search_results = database.search_notes_by_entity(search_term, exclude_note_id=active_note_id)
-                st.rerun()
+            try:
+                search_term = df.iloc[selection["rows"][0]][df.columns[selection["columns"][0]]]
+                if "last_search" not in st.session_state or st.session_state.last_search != search_term:
+                    st.session_state.last_search = search_term
+                    with st.spinner(f"Searching for '{search_term}'..."): state.knowledge_explorer_search_results = database.search_notes_by_entity(search_term, exclude_note_id=active_note_id)
+                    st.rerun()
+            except IndexError: pass
     if "last_search" in st.session_state and st.session_state.last_search:
         results = state.knowledge_explorer_search_results; st.markdown(f"Found **{len(results)}** other note(s) mentioning **'{st.session_state.last_search}'**:")
         for note in results:
