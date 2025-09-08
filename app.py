@@ -683,9 +683,8 @@ def render_output_and_history_tab(state: AppState):
         # Display assistant response
         with st.chat_message("assistant"):
             try:
-                chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
-                chat_model = genai.GenerativeModel(chat_model_name)
-
+                # --- START FIX ---
+                # 1. Define the system prompt that instructs the model.
                 system_prompt = f"""You are an expert analyst. Your task is to answer questions based *only* on the provided document content.
 Your answers must be grounded in the text. If the information is not present in the document, you must state that the answer cannot be found in the provided content. Do not use external knowledge.
 
@@ -694,20 +693,32 @@ DOCUMENT CONTENT:
 {edited_content}
 ---
 """
-                messages_for_api = [
-                    {'role': 'user', 'parts': [system_prompt]},
-                    {'role': 'model', 'parts': ["Understood. I will answer based only on the provided document."]}
-                ]
+                # 2. Select the chat model and provide the system prompt in the constructor.
+                chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
+                chat_model = genai.GenerativeModel(
+                    chat_model_name,
+                    system_instruction=system_prompt
+                )
 
+                # 3. Build the chat history from session state for the API call.
+                messages_for_api = []
                 for message in st.session_state.chat_histories[active_note['id']]:
                     role = "model" if message["role"] == "assistant" else "user"
                     messages_for_api.append({'role': role, 'parts': [message['content']]})
-
-                response = chat_model.generate_content(messages_for_api, stream=True)
-
+                
+                # Start a chat session with the existing history
+                chat = chat_model.start_chat(history=messages_for_api[:-1]) # History is all but the last message
+                
+                # Send the last message (the new user prompt)
+                response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
+                # --- END FIX ---
+                
                 message_placeholder = st.empty()
                 full_response = ""
                 for chunk in response:
+                    # Handle potential errors in the stream
+                    if not chunk.parts:
+                        continue
                     full_response += chunk.text
                     message_placeholder.markdown(full_response + "▌")
                 message_placeholder.markdown(full_response)
@@ -715,9 +726,13 @@ DOCUMENT CONTENT:
             except Exception as e:
                 full_response = f"Sorry, an error occurred: {str(e)}"
                 st.error(full_response)
+                # Remove the user's message from history if the API call failed
+                st.session_state.chat_histories[active_note['id']].pop()
 
-        # Add assistant response to chat history
-        st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
+
+        # Add assistant response to chat history only if there wasn't an error
+        if 'full_response' in locals() and not full_response.startswith("Sorry"):
+            st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
     # --- END: CHAT FUNCTIONALITY ---
 
 
