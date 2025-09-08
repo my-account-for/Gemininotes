@@ -683,7 +683,6 @@ def render_output_and_history_tab(state: AppState):
         # Display assistant response
         with st.chat_message("assistant"):
             try:
-                # --- START FIX ---
                 # 1. Define the system prompt that instructs the model.
                 system_prompt = f"""You are an expert analyst. Your task is to answer questions based *only* on the provided document content.
 Your answers must be grounded in the text. If the information is not present in the document, you must state that the answer cannot be found in the provided content. Do not use external knowledge.
@@ -705,14 +704,13 @@ DOCUMENT CONTENT:
                 for message in st.session_state.chat_histories[active_note['id']]:
                     role = "model" if message["role"] == "assistant" else "user"
                     messages_for_api.append({'role': role, 'parts': [message['content']]})
-                
+
                 # Start a chat session with the existing history
                 chat = chat_model.start_chat(history=messages_for_api[:-1]) # History is all but the last message
-                
+
                 # Send the last message (the new user prompt)
                 response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
-                # --- END FIX ---
-                
+
                 message_placeholder = st.empty()
                 full_response = ""
                 for chunk in response:
@@ -727,8 +725,8 @@ DOCUMENT CONTENT:
                 full_response = f"Sorry, an error occurred: {str(e)}"
                 st.error(full_response)
                 # Remove the user's message from history if the API call failed
-                st.session_state.chat_histories[active_note['id']].pop()
-
+                if st.session_state.chat_histories[active_note['id']]:
+                    st.session_state.chat_histories[active_note['id']].pop()
 
         # Add assistant response to chat history only if there wasn't an error
         if 'full_response' in locals() and not full_response.startswith("Sorry"):
@@ -738,7 +736,17 @@ DOCUMENT CONTENT:
 
     st.divider()
     st.subheader("📊 Analytics & History")
-    summary = database.get_analytics_summary()
+    summary_tuple = database.get_analytics_summary()
+
+    # --- START: BUG FIX for TypeError ---
+    # The database returns a tuple, but the UI code expects a dictionary.
+    # This block converts the tuple into the expected dictionary format.
+    summary = {
+        'total_notes': summary_tuple[0] if summary_tuple else 0,
+        'avg_time': summary_tuple[1] if summary_tuple and summary_tuple[1] is not None else 0.0,
+        'total_tokens': summary_tuple[2] if summary_tuple and summary_tuple[2] is not None else 0
+    }
+    # --- END: BUG FIX for TypeError ---
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Notes in DB", summary['total_notes'])
