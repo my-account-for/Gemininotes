@@ -738,15 +738,15 @@ DOCUMENT CONTENT:
     st.subheader("📊 Analytics & History")
     summary_tuple = database.get_analytics_summary()
 
-    # --- START: BUG FIX for TypeError ---
-    # The database returns a tuple, but the UI code expects a dictionary.
-    # This block converts the tuple into the expected dictionary format.
+    # --- START: ROBUST BUG FIX for IndexError ---
+    # This block safely handles cases where the database returns an incomplete
+    # tuple (e.g., when the database is empty).
     summary = {
-        'total_notes': summary_tuple[0] if summary_tuple else 0,
-        'avg_time': summary_tuple[1] if summary_tuple and summary_tuple[1] is not None else 0.0,
-        'total_tokens': summary_tuple[2] if summary_tuple and summary_tuple[2] is not None else 0
+        'total_notes': summary_tuple[0] if summary_tuple and len(summary_tuple) > 0 and summary_tuple[0] is not None else 0,
+        'avg_time': summary_tuple[1] if summary_tuple and len(summary_tuple) > 1 and summary_tuple[1] is not None else 0.0,
+        'total_tokens': summary_tuple[2] if summary_tuple and len(summary_tuple) > 2 and summary_tuple[2] is not None else 0
     }
-    # --- END: BUG FIX for TypeError ---
+    # --- END: ROBUST BUG FIX for IndexError ---
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Notes in DB", summary['total_notes'])
