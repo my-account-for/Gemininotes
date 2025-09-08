@@ -132,9 +132,9 @@ class AppState:
     earnings_call_mode: str = "Generate New Notes"
     selected_sector: str = "IT Services"
     notes_model: str = "Gemini 2.5 Pro"
-    refinement_model: str = "Gemini 2.5 Flash Lite"
-    transcription_model: str = "Gemini 2.5 Flash"
-    chat_model: str = "Gemini 1.5 Flash"
+    refinement_model: str =  "Gemini 2.5 Flash Lite"
+    transcription_model: str =  "Gemini 2.5 Flash"
+    chat_model: str = "Gemini 2.5 Pro"
     refinement_enabled: bool = True
     add_context_enabled: bool = False
     context_input: str = ""
@@ -198,7 +198,6 @@ def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
 def db_get_sectors() -> dict:
     return database.get_sectors()
 
-# --- MODIFICATION START: ROBUST CHUNKING LOGIC ---
 def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List[str]:
     """Creates overlapping chunks of text, ensuring the final fragment is always included."""
     if not text:
@@ -214,17 +213,13 @@ def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List
     chunks = []
     step = chunk_size - overlap
 
-    # Use a for loop with a step, which is more robust for this task
     for i in range(0, len(words), step):
         chunk = words[i : i + chunk_size]
         chunks.append(" ".join(chunk))
-        # This check ensures that if the text ends perfectly on a chunk boundary,
-        # we don't create an extra, unnecessary overlapping chunk.
         if (i + chunk_size) >= len(words):
             break
 
     return chunks
-# --- MODIFICATION END ---
 
 
 def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
@@ -614,77 +609,70 @@ def render_output_and_history_tab(state: AppState):
     notes = database.get_all_notes()
     if not notes:
         st.info("No notes generated. Go to the 'Input & Generate' tab to create one.")
-        return
+        # We should still render the analytics section even if there are no notes
+    else:
+        if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
+            state.active_note_id = notes[0]['id']
 
-    if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
-        state.active_note_id = notes[0]['id']
+        active_note = next((n for n in notes if n['id'] == state.active_note_id), notes[0])
 
-    active_note = next((n for n in notes if n['id'] == state.active_note_id), notes[0])
+        st.markdown(f"**Viewing Note for:** `{active_note['file_name']}`")
+        st.caption(f"ID: {active_note['id']} | Generated: {datetime.fromisoformat(active_note['created_at']).strftime('%Y-%m-%d %H:%M')}")
 
-    st.markdown(f"**Viewing Note for:** `{active_note['file_name']}`")
-    st.caption(f"ID: {active_note['id']} | Generated: {datetime.fromisoformat(active_note['created_at']).strftime('%Y-%m-%d %H:%M')}")
+        edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
 
-    edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
+        dl1, dl2, dl3 = st.columns(3)
 
-    dl1, dl2, dl3 = st.columns(3)
-
-    dl1.download_button(
-        label="⬇️ Download Processed Output",
-        data=edited_content,
-        file_name=f"SynthNote_Output_{active_note.get('id', 'note')}.txt",
-        mime="text/plain",
-        use_container_width=True
-    )
-
-    if active_note.get('refined_transcript'):
-        dl2.download_button(
-            label="⬇️ Download Refined Transcript",
-            data=active_note['refined_transcript'],
-            file_name=f"RefinedTranscript_{active_note.get('id', 'note')}.txt",
+        dl1.download_button(
+            label="⬇️ Download Processed Output",
+            data=edited_content,
+            file_name=f"SynthNote_Output_{active_note.get('id', 'note')}.txt",
             mime="text/plain",
             use_container_width=True
         )
 
-    if active_note.get('raw_transcript'):
-        dl3.download_button(
-            label="⬇️ Download Raw/Transcribed Text",
-            data=active_note['raw_transcript'],
-            file_name=f"RawTranscript_{active_note.get('id', 'note')}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
-
-    with st.expander("View Source Transcripts"):
         if active_note.get('refined_transcript'):
-            st.text_area("Refined Transcript", value=active_note['refined_transcript'], height=200, disabled=True, key=f"refined_tx_{active_note['id']}")
+            dl2.download_button(
+                label="⬇️ Download Refined Transcript",
+                data=active_note['refined_transcript'],
+                file_name=f"RefinedTranscript_{active_note.get('id', 'note')}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+
         if active_note.get('raw_transcript'):
-            st.text_area("Raw Source / Original Transcription", value=active_note['raw_transcript'], height=200, disabled=True, key=f"raw_tx_{active_note['id']}")
+            dl3.download_button(
+                label="⬇️ Download Raw/Transcribed Text",
+                data=active_note['raw_transcript'],
+                file_name=f"RawTranscript_{active_note.get('id', 'note')}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
 
-    # --- START: CHAT FUNCTIONALITY ---
-    st.divider()
-    st.subheader("💬 Chat with this Note")
+        with st.expander("View Source Transcripts"):
+            if active_note.get('refined_transcript'):
+                st.text_area("Refined Transcript", value=active_note['refined_transcript'], height=200, disabled=True, key=f"refined_tx_{active_note['id']}")
+            if active_note.get('raw_transcript'):
+                st.text_area("Raw Source / Original Transcription", value=active_note['raw_transcript'], height=200, disabled=True, key=f"raw_tx_{active_note['id']}")
 
-    # Initialize chat history for the active note if it doesn't exist
-    st.session_state.chat_histories.setdefault(active_note['id'], [])
+        # --- START: CHAT FUNCTIONALITY ---
+        st.divider()
+        st.subheader("💬 Chat with this Note")
 
-    # Display chat messages from history
-    for message in st.session_state.chat_histories[active_note['id']]:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+        st.session_state.chat_histories.setdefault(active_note['id'], [])
 
-    # Accept user input
-    if prompt := st.chat_input("Ask a question about the note content..."):
-        # Add user message to chat history
-        st.session_state.chat_histories[active_note['id']].append({"role": "user", "content": prompt})
-        # Display user message in chat message container
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        for message in st.session_state.chat_histories[active_note['id']]:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-        # Display assistant response
-        with st.chat_message("assistant"):
-            try:
-                # 1. Define the system prompt that instructs the model.
-                system_prompt = f"""You are an expert analyst. Your task is to answer questions based *only* on the provided document content.
+        if prompt := st.chat_input("Ask a question about the note content..."):
+            st.session_state.chat_histories[active_note['id']].append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                try:
+                    system_prompt = f"""You are an expert analyst. Your task is to answer questions based *only* on the provided document content.
 Your answers must be grounded in the text. If the information is not present in the document, you must state that the answer cannot be found in the provided content. Do not use external knowledge.
 
 DOCUMENT CONTENT:
@@ -692,78 +680,81 @@ DOCUMENT CONTENT:
 {edited_content}
 ---
 """
-                # 2. Select the chat model and provide the system prompt in the constructor.
-                chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
-                chat_model = genai.GenerativeModel(
-                    chat_model_name,
-                    system_instruction=system_prompt
-                )
+                    chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
+                    chat_model = genai.GenerativeModel(
+                        chat_model_name,
+                        system_instruction=system_prompt
+                    )
 
-                # 3. Build the chat history from session state for the API call.
-                messages_for_api = []
-                for message in st.session_state.chat_histories[active_note['id']]:
-                    role = "model" if message["role"] == "assistant" else "user"
-                    messages_for_api.append({'role': role, 'parts': [message['content']]})
+                    messages_for_api = []
+                    for message in st.session_state.chat_histories[active_note['id']]:
+                        role = "model" if message["role"] == "assistant" else "user"
+                        messages_for_api.append({'role': role, 'parts': [message['content']]})
 
-                # Start a chat session with the existing history
-                chat = chat_model.start_chat(history=messages_for_api[:-1]) # History is all but the last message
+                    chat = chat_model.start_chat(history=messages_for_api[:-1])
+                    response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
 
-                # Send the last message (the new user prompt)
-                response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
+                    message_placeholder = st.empty()
+                    full_response = ""
+                    for chunk in response:
+                        if not chunk.parts:
+                            continue
+                        full_response += chunk.text
+                        message_placeholder.markdown(full_response + "▌")
+                    message_placeholder.markdown(full_response)
 
-                message_placeholder = st.empty()
-                full_response = ""
-                for chunk in response:
-                    # Handle potential errors in the stream
-                    if not chunk.parts:
-                        continue
-                    full_response += chunk.text
-                    message_placeholder.markdown(full_response + "▌")
-                message_placeholder.markdown(full_response)
+                except Exception as e:
+                    full_response = f"Sorry, an error occurred: {str(e)}"
+                    st.error(full_response)
+                    if st.session_state.chat_histories[active_note['id']]:
+                        st.session_state.chat_histories[active_note['id']].pop()
 
-            except Exception as e:
-                full_response = f"Sorry, an error occurred: {str(e)}"
-                st.error(full_response)
-                # Remove the user's message from history if the API call failed
-                if st.session_state.chat_histories[active_note['id']]:
-                    st.session_state.chat_histories[active_note['id']].pop()
-
-        # Add assistant response to chat history only if there wasn't an error
-        if 'full_response' in locals() and not full_response.startswith("Sorry"):
-            st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
-    # --- END: CHAT FUNCTIONALITY ---
+            if 'full_response' in locals() and not full_response.startswith("Sorry"):
+                st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
+        # --- END: CHAT FUNCTIONALITY ---
 
 
     st.divider()
     st.subheader("📊 Analytics & History")
-    summary_tuple = database.get_analytics_summary()
+    raw_summary_data = database.get_analytics_summary()
 
-    # --- START: ROBUST BUG FIX for IndexError ---
-    # This block safely handles cases where the database returns an incomplete
-    # tuple (e.g., when the database is empty).
-    summary = {
-        'total_notes': summary_tuple[0] if summary_tuple and len(summary_tuple) > 0 and summary_tuple[0] is not None else 0,
-        'avg_time': summary_tuple[1] if summary_tuple and len(summary_tuple) > 1 and summary_tuple[1] is not None else 0.0,
-        'total_tokens': summary_tuple[2] if summary_tuple and len(summary_tuple) > 2 and summary_tuple[2] is not None else 0
-    }
-    # --- END: ROBUST BUG FIX for IndexError ---
+    # --- START: DEFINITIVE BUG FIX for Analytics Data Handling ---
+    # This block robustly handles various data formats returned by the database
+    # to prevent TypeError, IndexError, and other related crashes.
+    summary_dict = {}
+    if isinstance(raw_summary_data, dict):
+        summary_dict = raw_summary_data
+    elif isinstance(raw_summary_data, tuple) and raw_summary_data:
+        if isinstance(raw_summary_data[0], dict):
+            summary_dict = raw_summary_data[0]
+        else:
+            summary_dict['total_notes'] = raw_summary_data[0] if len(raw_summary_data) > 0 else 0
+            summary_dict['avg_time'] = raw_summary_data[1] if len(raw_summary_data) > 1 else 0.0
+            summary_dict['total_tokens'] = raw_summary_data[2] if len(raw_summary_data) > 2 else 0
+
+    # Use .get() for safe access with default values
+    total_notes = summary_dict.get('total_notes', 0) or 0
+    avg_time = summary_dict.get('avg_time', 0.0) or 0.0
+    total_tokens = summary_dict.get('total_tokens', 0) or 0
+    # --- END: DEFINITIVE BUG FIX ---
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Notes in DB", summary['total_notes'])
-    c2.metric("Avg. Time / Note", f"{summary['avg_time']:.1f}s")
-    c3.metric("Total Tokens (Est.)", f"{summary['total_tokens']:,}")
+    c1.metric("Total Notes in DB", total_notes)
+    c2.metric("Avg. Time / Note", f"{avg_time:.1f}s")
+    c3.metric("Total Tokens (Est.)", f"{total_tokens:,}")
 
-    for note in notes:
-        with st.container(border=True):
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.markdown(f"**File:** `{note['file_name']}` ({note['meeting_type']})")
-                st.caption(f"ID: {note['id']} | {datetime.fromisoformat(note['created_at']).strftime('%Y-%m-%d %H:%M')}")
-            with col2:
-                if st.button("Set as Active", key=f"view_{note['id']}", use_container_width=True):
-                    state.active_note_id = note['id']
-                    st.rerun()
-            with st.expander("Preview"): st.markdown(note['content'])
+    if notes:
+        for note in notes:
+            with st.container(border=True):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.markdown(f"**File:** `{note['file_name']}` ({note['meeting_type']})")
+                    st.caption(f"ID: {note['id']} | {datetime.fromisoformat(note['created_at']).strftime('%Y-%m-%d %H:%M')}")
+                with col2:
+                    if st.button("Set as Active", key=f"view_{note['id']}", use_container_width=True):
+                        state.active_note_id = note['id']
+                        st.rerun()
+                with st.expander("Preview"): st.markdown(note['content'])
 
 # --- 6. MAIN APPLICATION RUNNER ---
 def run_app():
