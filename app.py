@@ -631,30 +631,44 @@ def render_output_and_history_tab(state: AppState):
             use_container_width=True
         )
 
-        if active_note.get('refined_transcript'):
+        # Determine what transcript to show and download
+        final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
+        transcript_source = "Refined" if active_note.get('refined_transcript') else "Transcribed from Audio"
+
+        if final_transcript:
             dl2.download_button(
-                label="⬇️ Download Refined Transcript",
-                data=active_note['refined_transcript'],
-                file_name=f"RefinedTranscript_{active_note.get('id', 'note')}.txt",
+                label=f"⬇️ Download {transcript_source} Transcript",
+                data=final_transcript,
+                file_name=f"{transcript_source.replace(' ', '')}_Transcript_{active_note.get('id', 'note')}.txt",
                 mime="text/plain",
                 use_container_width=True
             )
+        else:
+            dl2.write("No transcript available")
 
-        if active_note.get('raw_transcript'):
+        if active_note.get('raw_transcript') and active_note.get('refined_transcript'):
+            # Only show raw if both exist and refinement happened
             dl3.download_button(
-                label="⬇️ Download Raw/Transcribed Text",
+                label="⬇️ Download Original Raw Transcription",
                 data=active_note['raw_transcript'],
-                file_name=f"RawTranscript_{active_note.get('id', 'note')}.txt",
+                file_name=f"OriginalRawTranscript_{active_note.get('id', 'note')}.txt",
                 mime="text/plain",
                 use_container_width=True
             )
+        else:
+            dl3.empty()  # Hide third column if not needed
 
-        with st.expander("View Source Transcripts"):
-            if active_note.get('refined_transcript'):
-                st.text_area("Refined Transcript", value=active_note['refined_transcript'], height=200, disabled=True, key=f"refined_tx_{active_note['id']}")
-            if active_note.get('raw_transcript'):
-                st.text_area("Raw Source / Original Transcription", value=active_note['raw_transcript'], height=200, disabled=True, key=f"raw_tx_{active_note['id']}")
-
+        with st.expander("View Source Transcripts", expanded=False):
+            if final_transcript:
+                st.text_area(
+                    f"{transcript_source} Transcript",
+                    value=final_transcript,
+                    height=300,
+                    disabled=True,
+                    key=f"final_tx_{active_note['id']}"
+                )
+            else:
+                st.info("No transcript available (possibly failed transcription or text input).")
         # --- START: CHAT FUNCTIONALITY ---
         st.divider()
         st.subheader("💬 Chat with this Note")
