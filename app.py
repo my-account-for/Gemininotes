@@ -144,6 +144,7 @@ class AppState:
     existing_notes_input: str = ""
     text_input: str = ""
     uploaded_file: Optional[Any] = None
+    audio_recording: Optional[Any] = None # New for st.audio_input
     processing: bool = False
     active_note_id: Optional[str] = None
     error_message: Optional[str] = None
@@ -175,24 +176,38 @@ def safe_get_token_count(response):
     return 0
 
 @st.cache_data(ttl=3600)
-def get_file_content(uploaded_file) -> Tuple[Optional[str], str]:
-    name = uploaded_file.name
-    file_bytes = io.BytesIO(uploaded_file.getvalue())
-    ext = os.path.splitext(name)[1].lower()
+def get_file_content(uploaded_file, audio_recording=None) -> Tuple[Optional[str], str, Optional[bytes]]:
+    """
+    Returns: (text_content_or_indicator, file_name, pdf_bytes_if_pdf)
+    """
+    # Priority 1: Audio Recording
+    if audio_recording:
+        return "audio_file", "Microphone Recording.wav", None
 
-    try:
-        if ext == ".pdf":
-            reader = PyPDF2.PdfReader(file_bytes)
-            if reader.is_encrypted: return "Error: PDF is encrypted.", name
-            content = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-            return (content, name) if content else ("Error: No text found in PDF.", name)
-        elif ext in [".txt", ".md"]:
-            return file_bytes.read().decode("utf-8"), name
-        elif ext in [".wav", ".mp3", ".m4a", ".ogg", ".flac"]:
-            return "audio_file", name
-    except Exception as e:
-        return f"Error: Could not process file {name}. Details: {str(e)}", name
-    return None, name
+    # Priority 2: Uploaded File
+    if uploaded_file:
+        name = uploaded_file.name
+        file_bytes_io = io.BytesIO(uploaded_file.getvalue())
+        ext = os.path.splitext(name)[1].lower()
+
+        try:
+            if ext == ".pdf":
+                reader = PyPDF2.PdfReader(file_bytes_io)
+                if reader.is_encrypted: return "Error: PDF is encrypted.", name, None
+                content = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+                # Return PDF bytes for st.pdf display later
+                return (content, name, uploaded_file.getvalue()) if content else ("Error: No text found in PDF.", name, None)
+            
+            elif ext in [".txt", ".md"]:
+                return file_bytes_io.read().decode("utf-8"), name, None
+            
+            elif ext in [".wav", ".mp3", ".m4a", ".ogg", ".flac"]:
+                return "audio_file", name, None
+        
+        except Exception as e:
+            return f"Error: Could not process file {name}. Details: {str(e)}", name, None
+            
+    return None, "Unknown", None
 
 @st.cache_data
 def db_get_sectors() -> dict:
@@ -276,9 +291,11 @@ def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
 
 def validate_inputs(state: AppState) -> Optional[str]:
     if state.input_method == "Paste Text" and not state.text_input.strip():
-        return "Please paste a transcript or switch to file upload."
-    if state.input_method == "Upload File" and not state.uploaded_file:
-        return "Please upload a file or switch to pasting text."
+        return "Please paste a transcript."
+    
+    if state.input_method == "Upload / Record":
+        if not state.uploaded_file and not state.audio_recording:
+             return "Please upload a file or record audio."
 
     if state.uploaded_file:
         size_mb = state.uploaded_file.size / (1024 * 1024)
@@ -300,13 +317,23 @@ def process_and_save_task(state: AppState, status_ui):
 
     status_ui.update(label="Step 1: Preparing Source Content...")
     raw_transcript, file_name = "", "Pasted Text"
+    pdf_bytes_data = None
 
-    if state.input_method == "Upload File" and state.uploaded_file:
-        file_type, name = get_file_content(state.uploaded_file)
+    # Handle input (File, Recording, or Text)
+    if state.input_method == "Upload / Record":
+        file_type, name, pdf_bytes = get_file_content(state.uploaded_file, state.audio_recording)
         file_name = name
+        pdf_bytes_data = pdf_bytes # Store for saving later
+
         if file_type == "audio_file":
             status_ui.update(label="Step 1.1: Processing Audio...")
-            audio_bytes = state.uploaded_file.getvalue()
+            
+            # Determine source
+            if state.audio_recording:
+                audio_bytes = state.audio_recording.getvalue()
+            else:
+                audio_bytes = state.uploaded_file.getvalue()
+                
             audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
 
             chunk_length_ms = 5 * 60 * 1000
@@ -339,7 +366,7 @@ def process_and_save_task(state: AppState, status_ui):
         elif file_type is None or file_type.startswith("Error:"):
             raise ValueError(file_type or "Failed to read file content.")
         else:
-            raw_transcript = file_type
+            raw_transcript = file_type # Text extracted from PDF or TXT
     elif state.input_method == "Paste Text":
         raw_transcript = state.text_input
 
@@ -481,10 +508,14 @@ NEW TRANSCRIPT CHUNK TO REFINE:
         total_tokens += safe_get_token_count(response)
 
     status_ui.update(label="Step 5: Saving to Database...")
+    
+    # Pass pdf_blob if available
     note_data = {
         'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
         'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript,
-        'refined_transcript': refined_transcript, 'token_usage': total_tokens, 'processing_time': time.time() - start_time
+        'refined_transcript': refined_transcript, 'token_usage': total_tokens, 
+        'processing_time': time.time() - start_time,
+        'pdf_blob': pdf_bytes_data # Save PDF bytes
     }
     try:
         database.save_note(note_data)
@@ -500,13 +531,19 @@ def on_sector_change():
     state.earnings_call_topics = all_sectors.get(state.selected_sector, "")
 
 def render_input_and_processing_tab(state: AppState):
-    state.input_method = pills("Input Method", ["Paste Text", "Upload File"], index=["Paste Text", "Upload File"].index(state.input_method))
+    # v1.51.0 style input pills
+    state.input_method = pills("Input Method", ["Paste Text", "Upload / Record"], index=["Paste Text", "Upload / Record"].index(state.input_method))
 
     if state.input_method == "Paste Text":
         state.text_input = st.text_area("Paste source transcript here:", value=state.text_input, height=250, key="text_input_main")
         state.uploaded_file = None
+        state.audio_recording = None
     else:
+        # File Upload
         state.uploaded_file = st.file_uploader("Upload a File (PDF, TXT, MP3, etc.)", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'])
+        st.markdown("**OR**")
+        # v1.46.0/1.51.0 Audio Input
+        state.audio_recording = st.audio_input("Record Microphone")
 
     st.subheader("Configuration")
     state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type))
@@ -527,8 +564,8 @@ def render_input_and_processing_tab(state: AppState):
         state.selected_sector = st.selectbox("Sector (for Topic Templates)", sector_options, index=current_sector_index, on_change=on_sector_change, key="sector_selector")
         state.earnings_call_topics = st.text_area("Topic Instructions", value=state.earnings_call_topics, height=150, placeholder="Select a sector to load a template, or enter topics manually.")
 
-        with st.expander("✏️ Manage Sector Templates", expanded=False):
-            st.write("Add, edit, or delete the sector templates used in the dropdown above.")
+        # Clean settings management using st.popover (v1.46.0)
+        with st.popover("✏️ Manage Sector Templates", use_container_width=True):
             st.markdown("**Edit or Delete an Existing Sector**")
             sector_to_edit = st.selectbox("Select Sector to Edit", sorted(list(all_sectors.keys())))
 
@@ -536,9 +573,11 @@ def render_input_and_processing_tab(state: AppState):
                 topics_for_edit = st.text_area("Sector Topics", value=all_sectors[sector_to_edit], key=f"topics_{sector_to_edit}")
                 col1, col2 = st.columns([1,1])
                 if col1.button("💾 Save Changes", key=f"save_{sector_to_edit}"):
-                    database.save_sector(sector_to_edit, topics_for_edit); db_get_sectors.clear(); st.toast(f"✅ Sector '{sector_to_edit}' updated!", icon="💾"); st.rerun()
+                    database.save_sector(sector_to_edit, topics_for_edit); db_get_sectors.clear(); 
+                    st.toast(f"Sector '{sector_to_edit}' updated!", icon="✅"); st.rerun()
                 if col2.button("❌ Delete Sector", type="primary", key=f"delete_{sector_to_edit}"):
-                    database.delete_sector(sector_to_edit); db_get_sectors.clear(); state.selected_sector = "Other / Manual Topics"; on_sector_change(); st.toast(f"🗑️ Sector '{sector_to_edit}' deleted!", icon="🗑️"); st.rerun()
+                    database.delete_sector(sector_to_edit); db_get_sectors.clear(); state.selected_sector = "Other / Manual Topics"; on_sector_change(); 
+                    st.toast(f"Sector '{sector_to_edit}' deleted!", icon="🗑️"); st.rerun()
 
             st.divider()
             st.markdown("**Add a New Sector**")
@@ -547,14 +586,16 @@ def render_input_and_processing_tab(state: AppState):
 
             if st.button("➕ Add New Sector"):
                 if new_sector_name and new_sector_topics:
-                    database.save_sector(new_sector_name, new_sector_topics); db_get_sectors.clear(); st.toast(f"✅ Sector '{new_sector_name}' added!", icon="➕"); st.rerun()
+                    database.save_sector(new_sector_name, new_sector_topics); db_get_sectors.clear(); 
+                    st.toast(f"Sector '{new_sector_name}' added!", icon="✅"); st.rerun()
                 else:
                     st.warning("Please provide both a name and topics for the new sector.")
 
         if state.earnings_call_mode == "Enrich Existing Notes":
             state.existing_notes_input = st.text_area("Paste Existing Notes to Enrich:", value=state.existing_notes_input)
 
-    with st.expander("⚙️ Advanced Settings & Models"):
+    # Cleaner UI for Advanced Settings using Popover (v1.46.0)
+    with st.popover("⚙️ Advanced Settings & Models", use_container_width=True):
         state.refinement_enabled = st.toggle("Enable Transcript Refinement", value=state.refinement_enabled)
         state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
         if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
@@ -564,10 +605,9 @@ def render_input_and_processing_tab(state: AppState):
         state.speaker_2 = c2.text_input("Speaker 2 Name (Optional)", value=state.speaker_2)
 
         st.markdown("**Model Selection**")
-        m1, m2, m3 = st.columns(3)
-        state.notes_model = m1.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
-        state.refinement_model = m2.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
-        state.transcription_model = m3.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
+        state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
+        state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
+        state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
         state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
 
     st.subheader("Prompt Preview")
@@ -606,20 +646,40 @@ def render_input_and_processing_tab(state: AppState):
 
 def render_output_and_history_tab(state: AppState):
     st.subheader("📄 Active Note")
+    
     notes = database.get_all_notes()
+    
     if not notes:
         st.info("No notes generated. Go to the 'Input & Generate' tab to create one.")
-        # We should still render the analytics section even if there are no notes
     else:
         if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
             state.active_note_id = notes[0]['id']
 
-        active_note = next((n for n in notes if n['id'] == state.active_note_id), notes[0])
+        # Fetch FULL data (including PDF Blob if exists)
+        active_note = database.get_note_by_id(state.active_note_id)
+        
+        if not active_note:
+            active_note = database.get_note_by_id(notes[0]['id'])
 
         st.markdown(f"**Viewing Note for:** `{active_note['file_name']}`")
         st.caption(f"ID: {active_note['id']} | Generated: {datetime.fromisoformat(active_note['created_at']).strftime('%Y-%m-%d %H:%M')}")
 
-        edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
+        # Split view if PDF exists (v1.49.0 st.pdf)
+        pdf_data = active_note.get('pdf_blob')
+        
+        if pdf_data:
+            col_note, col_pdf = st.columns([1, 1])
+            with col_note:
+                edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
+            with col_pdf:
+                st.markdown("**Source PDF**")
+                st.pdf(pdf_data, height=600)
+        else:
+            edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
+
+        # v1.51.0 Feedback
+        st.write("Rate this result:")
+        st.feedback("thumbs", key=f"fb_{active_note['id']}")
 
         dl1, dl2, dl3 = st.columns(3)
 
@@ -631,7 +691,6 @@ def render_output_and_history_tab(state: AppState):
             use_container_width=True
         )
 
-        # Determine what transcript to show and download
         final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
         transcript_source = "Refined" if active_note.get('refined_transcript') else "Transcribed from Audio"
 
@@ -647,7 +706,6 @@ def render_output_and_history_tab(state: AppState):
             dl2.write("No transcript available")
 
         if active_note.get('raw_transcript') and active_note.get('refined_transcript'):
-            # Only show raw if both exist and refinement happened
             dl3.download_button(
                 label="⬇️ Download Original Raw Transcription",
                 data=active_note['raw_transcript'],
@@ -656,7 +714,7 @@ def render_output_and_history_tab(state: AppState):
                 use_container_width=True
             )
         else:
-            dl3.empty()  # Hide third column if not needed
+            dl3.empty()
 
         with st.expander("View Source Transcripts", expanded=False):
             if final_transcript:
@@ -668,8 +726,9 @@ def render_output_and_history_tab(state: AppState):
                     key=f"final_tx_{active_note['id']}"
                 )
             else:
-                st.info("No transcript available (possibly failed transcription or text input).")
-        # --- START: CHAT FUNCTIONALITY ---
+                st.info("No transcript available.")
+        
+        # --- CHAT ---
         st.divider()
         st.subheader("💬 Chat with this Note")
 
@@ -687,32 +746,22 @@ def render_output_and_history_tab(state: AppState):
             with st.chat_message("assistant"):
                 try:
                     system_prompt = f"""You are an expert analyst. Your task is to answer questions based *only* on the provided document content.
-Your answers must be grounded in the text. If the information is not present in the document, you must state that the answer cannot be found in the provided content. Do not use external knowledge.
-
 DOCUMENT CONTENT:
 ---
 {edited_content}
 ---
 """
                     chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
-                    chat_model = genai.GenerativeModel(
-                        chat_model_name,
-                        system_instruction=system_prompt
-                    )
-
-                    messages_for_api = []
-                    for message in st.session_state.chat_histories[active_note['id']]:
-                        role = "model" if message["role"] == "assistant" else "user"
-                        messages_for_api.append({'role': role, 'parts': [message['content']]})
-
+                    chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
+                    messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in st.session_state.chat_histories[active_note['id']]]
+                    
                     chat = chat_model.start_chat(history=messages_for_api[:-1])
                     response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
 
                     message_placeholder = st.empty()
                     full_response = ""
                     for chunk in response:
-                        if not chunk.parts:
-                            continue
+                        if not chunk.parts: continue
                         full_response += chunk.text
                         message_placeholder.markdown(full_response + "▌")
                     message_placeholder.markdown(full_response)
@@ -725,16 +774,12 @@ DOCUMENT CONTENT:
 
             if 'full_response' in locals() and not full_response.startswith("Sorry"):
                 st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
-        # --- END: CHAT FUNCTIONALITY ---
 
 
     st.divider()
     st.subheader("📊 Analytics & History")
     raw_summary_data = database.get_analytics_summary()
 
-    # --- START: DEFINITIVE BUG FIX for Analytics Data Handling ---
-    # This block robustly handles various data formats returned by the database
-    # to prevent TypeError, IndexError, and other related crashes.
     summary_dict = {}
     if isinstance(raw_summary_data, dict):
         summary_dict = raw_summary_data
@@ -746,33 +791,32 @@ DOCUMENT CONTENT:
             summary_dict['avg_time'] = raw_summary_data[1] if len(raw_summary_data) > 1 else 0.0
             summary_dict['total_tokens'] = raw_summary_data[2] if len(raw_summary_data) > 2 else 0
 
-    # Use .get() for safe access with default values
-    total_notes = summary_dict.get('total_notes', 0) or 0
-    avg_time = summary_dict.get('avg_time', 0.0) or 0.0
-    total_tokens = summary_dict.get('total_tokens', 0) or 0
-    # --- END: DEFINITIVE BUG FIX ---
-
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Notes in DB", total_notes)
-    c2.metric("Avg. Time / Note", f"{avg_time:.1f}s")
-    c3.metric("Total Tokens (Est.)", f"{total_tokens:,}")
+    c1.metric("Total Notes", summary_dict.get('total_notes', 0))
+    c2.metric("Avg. Time / Note", f"{summary_dict.get('avg_time', 0.0):.1f}s")
+    c3.metric("Total Tokens", f"{summary_dict.get('total_tokens', 0):,}")
 
     if notes:
         for note in notes:
             with st.container(border=True):
                 col1, col2 = st.columns([4, 1])
                 with col1:
-                    st.markdown(f"**File:** `{note['file_name']}` ({note['meeting_type']})")
+                    st.markdown(f"**File:** `{note['file_name']}`")
+                    # v1.47.0 st.badge
+                    st.badge(note['meeting_type'])
                     st.caption(f"ID: {note['id']} | {datetime.fromisoformat(note['created_at']).strftime('%Y-%m-%d %H:%M')}")
                 with col2:
-                    if st.button("Set as Active", key=f"view_{note['id']}", use_container_width=True):
+                    if st.button("View", key=f"view_{note['id']}", use_container_width=True):
                         state.active_note_id = note['id']
                         st.rerun()
-                with st.expander("Preview"): st.markdown(note['content'])
 
 # --- 6. MAIN APPLICATION RUNNER ---
 def run_app():
-    st.set_page_config(page_title="SynthNotes AI", layout="wide")
+    st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
+    
+    # v1.46.0 st.logo
+    st.logo("https://placehold.co/64x64?text=SN", link="https://streamlit.io")
+    
     st.title("SynthNotes AI")
 
     if "config_error" in st.session_state:
