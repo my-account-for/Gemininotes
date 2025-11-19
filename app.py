@@ -43,7 +43,7 @@ CHUNK_WORD_OVERLAP = 300
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
     "Gemini 2.0 Flash": "gemini-2.0-flash-lite", "Gemini 2.5 Flash": "gemini-2.5-flash",
-    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite", "Gemini 2.5 Pro": "gemini-2.5-pro",
+    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite", "Gemini 2.5 Pro": "gemini-2.5-pro","Gemini 3.0 Pro": "gemini-3-pro-preview",
 }
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
@@ -131,10 +131,10 @@ class AppState:
     selected_note_style: str = "Option 2: Less Verbose"
     earnings_call_mode: str = "Generate New Notes"
     selected_sector: str = "IT Services"
-    notes_model: str = "Gemini 2.5 Pro"
+    notes_model: str = "Gemini 3.0 Pro"
     refinement_model: str =  "Gemini 2.5 Flash Lite"
     transcription_model: str =  "Gemini 2.5 Flash"
-    chat_model: str = "Gemini 2.5 Pro"
+    chat_model: str = "Gemini 3.0 Pro"
     refinement_enabled: bool = True
     add_context_enabled: bool = False
     context_input: str = ""
