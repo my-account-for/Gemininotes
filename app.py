@@ -195,7 +195,7 @@ def get_file_content(uploaded_file, audio_recording=None) -> Tuple[Optional[str]
                 reader = PyPDF2.PdfReader(file_bytes_io)
                 if reader.is_encrypted: return "Error: PDF is encrypted.", name, None
                 content = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-                # Return PDF bytes for st.pdf display later
+                # Return PDF bytes for storage (even if we don't display them anymore)
                 return (content, name, uploaded_file.getvalue()) if content else ("Error: No text found in PDF.", name, None)
             
             elif ext in [".txt", ".md"]:
@@ -664,18 +664,11 @@ def render_output_and_history_tab(state: AppState):
         st.markdown(f"**Viewing Note for:** `{active_note['file_name']}`")
         st.caption(f"ID: {active_note['id']} | Generated: {datetime.fromisoformat(active_note['created_at']).strftime('%Y-%m-%d %H:%M')}")
 
-        # Split view if PDF exists (v1.49.0 st.pdf)
-        pdf_data = active_note.get('pdf_blob')
-        
-        if pdf_data:
-            col_note, col_pdf = st.columns([1, 1])
-            with col_note:
-                edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
-            with col_pdf:
-                st.markdown("**Source PDF**")
-                st.pdf(pdf_data, height=600)
-        else:
-            edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
+        # ---------------------------------------------------------------------
+        # FIX APPLIED HERE: Removed st.pdf and side-by-side columns logic
+        # The code now simply renders the editor full width.
+        # ---------------------------------------------------------------------
+        edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
 
         # v1.51.0 Feedback
         st.write("Rate this result:")
