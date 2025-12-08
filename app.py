@@ -131,10 +131,10 @@ class AppState:
     selected_note_style: str = "Option 2: Less Verbose"
     earnings_call_mode: str = "Generate New Notes"
     selected_sector: str = "IT Services"
-    notes_model: str = "Gemini 3.0 Pro"
+    notes_model: str = "Gemini 2.5 Pro"
     refinement_model: str =  "Gemini 2.5 Flash Lite"
     transcription_model: str =  "Gemini 2.5 Flash"
-    chat_model: str = "Gemini 3.0 Pro"
+    chat_model: str = "Gemini 2.5 Pro"
     refinement_enabled: bool = True
     add_context_enabled: bool = False
     context_input: str = ""
