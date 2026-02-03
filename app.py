@@ -113,6 +113,8 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 1.  **PROCESS THE ENTIRE CHUNK:** Your task is to process the **entire** new transcript chunk provided below.
 2.  **HANDLE OVERLAP:** The beginning of this new chunk overlaps with the end of the previous one. Process it naturally. Your output will be automatically de-duplicated later.
 3.  **MAINTAIN FORMAT:** Continue to use the exact same Q&A formatting as established in the base instructions.
+4.  **NO META-COMMENTARY:** NEVER produce statements about the transcript itself, such as "the transcript does not contain an answer," "no relevant information in this section," "the chunk starts mid-conversation," or similar. If a chunk begins mid-answer, capture that content as a continuation of the relevant Q&A. Always extract and document whatever substantive content exists.
+5.  **MID-CHUNK STARTS:** If the chunk starts in the middle of an answer or a speaker's response, begin your notes by capturing that content under the most relevant question from context. Do not skip or discard partial content.
 
 ---
 {base_instructions}
@@ -122,6 +124,30 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 {chunk_text}
 """
 
+PROOFREAD_PROMPT = """You are an expert proofreader for meeting notes. You have the **original transcript** and the **generated notes**. Your task is to produce a corrected, polished final version of the notes.
+
+### YOUR TASKS (in priority order):
+
+1.  **Fix misinterpreted words**: Cross-reference the notes against the transcript. Correct any words that were misheard, misspelled, or misinterpreted — especially company names, proper nouns, technical terms, industry jargon, acronyms, and numbers.
+
+2.  **Remove processing artifacts**: Delete any meta-commentary or error statements that are not part of the actual meeting content. Examples: "the transcript does not contain an answer," "no relevant information found," "this section appears incomplete," or any similar artifacts from chunked processing.
+
+3.  **Verify completeness**: Check that every substantive point, data point, name, number, percentage, monetary value, example, and nuanced opinion from the transcript is reflected in the notes. If anything is missing, add it under the appropriate Q&A section following the same formatting.
+
+4.  **Clean up stitching seams**: Fix any formatting inconsistencies, duplicated content, or awkward transitions that may have resulted from stitching multiple chunks together.
+
+5.  **Preserve all correct content**: Do NOT summarize, shorten, or remove any existing correct content. Your role is to fix and add, never to reduce. The final output must be at least as detailed as the input notes.
+
+### OUTPUT:
+Return ONLY the complete, corrected notes. Do not include any commentary about your changes or a preamble.
+
+---
+**ORIGINAL TRANSCRIPT:**
+{transcript}
+---
+**GENERATED NOTES TO PROOFREAD:**
+{notes}
+"""
 
 # --- 3. STATE & DATA MODELS ---
 @dataclass
@@ -488,14 +514,21 @@ NEW TRANSCRIPT CHUNK TO REFINE:
         final_notes_content = response.text
         total_tokens += safe_get_token_count(response)
 
+    if state.selected_meeting_type == "Expert Meeting":
+        status_ui.update(label="Step 4: Proofreading & Cleaning Notes...")
+        proofread_prompt = PROOFREAD_PROMPT.format(transcript=final_transcript, notes=final_notes_content)
+        response = notes_model.generate_content(proofread_prompt)
+        final_notes_content = response.text
+        total_tokens += safe_get_token_count(response)
+
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
-        status_ui.update(label="Step 4: Generating Executive Summary...")
+        status_ui.update(label="Step 5: Generating Executive Summary...")
         summary_prompt = f"Create a concise executive summary from these notes:\n\n{final_notes_content}"
         response = notes_model.generate_content(summary_prompt)
         final_notes_content += f"\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{response.text}"
         total_tokens += safe_get_token_count(response)
 
-    status_ui.update(label="Step 5: Saving to Database...")
+    status_ui.update(label="Step 6: Saving to Database...")
     
     # Pass pdf_blob if available
     note_data = {
