@@ -125,6 +125,15 @@ def _get_note_by_id_op(conn, note_id: str):
 def get_note_by_id(note_id: str):
     return safe_db_operation(_get_note_by_id_op, note_id)
 
+def _delete_note_op(conn, note_id: str):
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM entities WHERE note_id = ?", (note_id,))
+    cursor.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+    conn.commit()
+
+def delete_note(note_id: str):
+    safe_db_operation(_delete_note_op, note_id)
+
 
 # --- Analytics ---
 
