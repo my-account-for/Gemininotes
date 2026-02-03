@@ -388,7 +388,8 @@ def process_and_save_task(state: AppState, status_ui):
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
         else:
-            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+            all_words = raw_transcript.split()
+            chunks = [" ".join(all_words[i:i + CHUNK_WORD_SIZE]) for i in range(0, len(all_words), CHUNK_WORD_SIZE)]
             all_refined_chunks = []
 
             for i, chunk in enumerate(chunks):
@@ -398,7 +399,7 @@ def process_and_save_task(state: AppState, status_ui):
                 if i > 0 and all_refined_chunks:
                     last_refined_chunk = all_refined_chunks[-1]
                     context_words = last_refined_chunk.split()
-                    context = " ".join(context_words[-150:])
+                    context = " ".join(context_words[-CHUNK_WORD_OVERLAP:])
 
                 speaker_info = f"Speakers are {s1} and {s2}." if s1 and s2 else ""
 
@@ -419,20 +420,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
                 total_tokens += safe_get_token_count(response)
 
             if all_refined_chunks:
-                final_refined_words = all_refined_chunks[0].split()
-                for i in range(1, len(all_refined_chunks)):
-                    original_chunk_words = chunks[i].split()
-                    if not original_chunk_words:
-                        continue
-
-                    overlap_proportion = CHUNK_WORD_OVERLAP / len(original_chunk_words)
-
-                    refined_chunk_words = all_refined_chunks[i].split()
-                    estimated_overlap_in_refined = int(len(refined_chunk_words) * overlap_proportion)
-
-                    final_refined_words.extend(refined_chunk_words[estimated_overlap_in_refined:])
-
-                refined_transcript = " ".join(final_refined_words)
+                refined_transcript = "\n\n".join(all_refined_chunks)
             else:
                 refined_transcript = ""
 
