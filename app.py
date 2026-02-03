@@ -49,6 +49,14 @@ MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Inter
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
+MEETING_TYPE_HELP = {
+    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations",
+    "Earnings Call": "Financial data, management commentary, guidance, and analyst Q&A",
+    "Management Meeting": "Decisions, action items, owners, and key discussion points",
+    "Internal Discussion": "Perspectives, ideas, reasoning, conclusions, and next steps",
+    "Custom": "Provide your own formatting instructions via the context field",
+}
+
 # --- PROMPT CONSTANTS ---
 
 EXPERT_MEETING_DETAILED_PROMPT = """### **NOTES STRUCTURE**
@@ -687,6 +695,7 @@ def on_sector_change():
     state.earnings_call_topics = all_sectors.get(state.selected_sector, "")
 
 def render_input_and_processing_tab(state: AppState):
+    # --- Source Input ---
     state.input_method = pills("Input Method", ["Paste Text", "Upload / Record"], index=["Paste Text", "Upload / Record"].index(state.input_method))
 
     if state.input_method == "Paste Text":
@@ -694,9 +703,11 @@ def render_input_and_processing_tab(state: AppState):
         state.uploaded_file = None
         state.audio_recording = None
     else:
-        state.uploaded_file = st.file_uploader("Upload a File (PDF, TXT, MP3, etc.)", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'])
-        st.markdown("**OR**")
-        state.audio_recording = st.audio_input("Record Microphone")
+        col_upload, col_record = st.columns(2)
+        with col_upload:
+            state.uploaded_file = st.file_uploader("Upload a File", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'], help="PDF, TXT, MP3, M4A, WAV, OGG, FLAC")
+        with col_record:
+            state.audio_recording = st.audio_input("Record Microphone")
 
     # --- Word count preview ---
     preview_text = ""
@@ -721,8 +732,11 @@ def render_input_and_processing_tab(state: AppState):
         if ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac']:
             st.caption("Audio file — word count available after transcription")
 
+    st.divider()
+
+    # --- Configuration ---
     st.subheader("Configuration")
-    state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type))
+    state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type), help=MEETING_TYPE_HELP.get(state.selected_meeting_type, ""))
 
     if state.selected_meeting_type == "Expert Meeting":
         state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
@@ -769,26 +783,30 @@ def render_input_and_processing_tab(state: AppState):
         if state.earnings_call_mode == "Enrich Existing Notes":
             state.existing_notes_input = st.text_area("Paste Existing Notes to Enrich:", value=state.existing_notes_input)
 
-    # Advanced Settings
-    with st.popover("Advanced Settings & Models", use_container_width=True):
-        state.refinement_enabled = st.toggle("Enable Transcript Refinement", value=state.refinement_enabled)
-        state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
-        if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
+    elif state.selected_meeting_type == "Custom":
+        state.context_input = st.text_area("Custom Instructions", value=state.context_input, height=120, placeholder="Describe how you want the notes structured...")
 
-        state.speakers = st.text_input("Participants (comma-separated, Optional)", value=state.speakers, placeholder="e.g., John Smith (Analyst), Jane Doe (CEO)")
+    # --- Settings row ---
+    col_settings, col_participants = st.columns(2)
+    with col_settings:
+        with st.popover("Advanced Settings & Models", use_container_width=True):
+            st.markdown("**Processing**")
+            state.refinement_enabled = st.toggle("Enable Transcript Refinement", value=state.refinement_enabled)
+            if state.selected_meeting_type != "Custom":
+                state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
+                if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
 
-        st.markdown("**Model Selection**")
-        state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
-        state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
-        state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
-        state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
+            st.divider()
+            st.markdown("**Model Selection**")
+            state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
+            state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
+            state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
+            state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
+    with col_participants:
+        state.speakers = st.text_input("Participants (Optional)", value=state.speakers, placeholder="e.g., John Smith (Analyst), Jane Doe (CEO)")
 
-    st.subheader("Prompt Preview")
-    prompt_preview = get_dynamic_prompt(state, "[...transcript content...]")
-    st_ace(value=prompt_preview, language='markdown', theme='github', height=200, readonly=True, key="prompt_preview_ace")
-
+    # --- Generate ---
     st.divider()
-    st.subheader("Generate")
     validation_error = validate_inputs(state)
 
     if st.button("Generate Notes", type="primary", use_container_width=True, disabled=bool(validation_error)):
@@ -796,12 +814,19 @@ def render_input_and_processing_tab(state: AppState):
 
     if validation_error: st.warning(f"Please fix the following: {validation_error}")
 
+    # --- Prompt Preview (collapsed) ---
+    with st.expander("Prompt Preview", expanded=False):
+        prompt_preview = get_dynamic_prompt(state, "[...transcript content...]")
+        st_ace(value=prompt_preview, language='markdown', theme='github', height=200, readonly=True, key="prompt_preview_ace")
+
+    # --- Processing ---
     if state.processing:
         with st.status("Processing your request...", expanded=True) as status:
             try:
                 final_note = process_and_save_task(state, status)
                 state.active_note_id = final_note['id']
-                status.update(label="Success! View your note in the 'Output & History' tab.", state="complete")
+                status.update(label="Done! Switch to the Output & History tab to view your note.", state="complete")
+                st.toast("Notes generated successfully!", icon="\u2705")
             except Exception as e:
                 state.error_message = f"An error occurred during processing:\n{e}"
                 status.update(label=f"Error: {e}", state="error")
@@ -818,94 +843,119 @@ def render_input_and_processing_tab(state: AppState):
             st.rerun()
 
 def render_output_and_history_tab(state: AppState):
-    st.subheader("Active Note")
-
     notes = database.get_all_notes()
 
     if not notes:
-        st.info("No notes generated. Go to the 'Input & Generate' tab to create one.")
-    else:
-        if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
-            state.active_note_id = notes[0]['id']
+        st.markdown("""
+### No notes yet
 
-        active_note = database.get_note_by_id(state.active_note_id)
+1. Switch to the **Input & Generate** tab
+2. Paste text, upload a file (PDF, TXT), or record audio
+3. Pick a meeting type and click **Generate Notes**
 
-        if not active_note:
-            active_note = database.get_note_by_id(notes[0]['id'])
+Your generated notes, transcripts, and chat history will appear here.
+        """)
+        return
 
-        st.markdown(f"**Viewing Note for:** `{active_note['file_name']}`")
-        st.caption(f"ID: {active_note['id']} | Generated: {datetime.fromisoformat(active_note['created_at']).strftime('%Y-%m-%d %H:%M')}")
+    # --- Active Note ---
+    if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
+        state.active_note_id = notes[0]['id']
 
-        # --- Side-by-side Notes & Transcript ---
-        final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
-        transcript_source = "Refined" if active_note.get('refined_transcript') else "Raw"
+    active_note = database.get_note_by_id(state.active_note_id)
+    if not active_note:
+        active_note = database.get_note_by_id(notes[0]['id'])
 
-        col_notes, col_transcript = st.columns([3, 2])
-        with col_notes:
-            st.markdown("**Generated Notes**")
+    # --- Note header with metadata ---
+    st.markdown(f"### {active_note['file_name']}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.markdown(f"**Type**")
+    m1.badge(active_note['meeting_type'])
+    m2.metric("Processing Time", f"{active_note.get('processing_time', 0):.1f}s")
+    m3.metric("Tokens Used", f"{active_note.get('token_usage', 0):,}")
+    m4.caption(f"Generated\n\n{datetime.fromisoformat(active_note['created_at']).strftime('%b %d, %Y %H:%M')}")
+
+    # --- Side-by-side Notes & Transcript ---
+    final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
+    transcript_source = "Refined" if active_note.get('refined_transcript') else "Raw"
+
+    col_notes, col_transcript = st.columns([3, 2])
+    with col_notes:
+        view_mode = pills("View", ["Editor", "Preview"], index=0, key=f"view_mode_{active_note['id']}")
+        if view_mode == "Editor":
             edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
-        with col_transcript:
-            st.markdown(f"**{transcript_source} Transcript**")
-            if final_transcript:
-                st.text_area("", value=final_transcript, height=583, disabled=True, label_visibility="collapsed", key=f"side_tx_{active_note['id']}")
-            else:
-                st.info("No transcript available.")
+        else:
+            edited_content = active_note['content']
+            with st.container(height=600, border=True):
+                st.markdown(edited_content)
+    with col_transcript:
+        st.markdown(f"**{transcript_source} Transcript**")
+        if final_transcript:
+            st.text_area("", value=final_transcript, height=600, disabled=True, label_visibility="collapsed", key=f"side_tx_{active_note['id']}")
+        else:
+            st.info("No transcript available.")
 
-        # Feedback
-        st.write("Rate this result:")
-        st.feedback("thumbs", key=f"fb_{active_note['id']}")
+    # --- Downloads & Feedback ---
+    dl1, dl2, dl3, dl4 = st.columns(4)
 
-        dl1, dl2, dl3 = st.columns(3)
+    dl1.download_button(
+        label="Download Notes (.txt)",
+        data=edited_content,
+        file_name=f"SynthNote_{active_note.get('file_name', 'note')}.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
+    dl2.download_button(
+        label="Download Notes (.md)",
+        data=edited_content,
+        file_name=f"SynthNote_{active_note.get('file_name', 'note')}.md",
+        mime="text/markdown",
+        use_container_width=True
+    )
 
-        dl1.download_button(
-            label="Download Processed Output",
-            data=edited_content,
-            file_name=f"SynthNote_Output_{active_note.get('id', 'note')}.txt",
+    if final_transcript:
+        dl3.download_button(
+            label=f"Download {transcript_source} Transcript",
+            data=final_transcript,
+            file_name=f"{transcript_source}_Transcript_{active_note.get('file_name', 'note')}.txt",
             mime="text/plain",
             use_container_width=True
         )
+    else:
+        dl3.empty()
 
-        if final_transcript:
-            dl2.download_button(
-                label=f"Download {transcript_source} Transcript",
-                data=final_transcript,
-                file_name=f"{transcript_source}_Transcript_{active_note.get('id', 'note')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-        else:
-            dl2.write("No transcript available")
+    if active_note.get('raw_transcript') and active_note.get('refined_transcript'):
+        dl4.download_button(
+            label="Download Raw Transcript",
+            data=active_note['raw_transcript'],
+            file_name=f"Raw_Transcript_{active_note.get('file_name', 'note')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    else:
+        dl4.empty()
 
-        if active_note.get('raw_transcript') and active_note.get('refined_transcript'):
-            dl3.download_button(
-                label="Download Original Raw Transcription",
-                data=active_note['raw_transcript'],
-                file_name=f"OriginalRawTranscript_{active_note.get('id', 'note')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-        else:
-            dl3.empty()
+    st.feedback("thumbs", key=f"fb_{active_note['id']}")
 
-        # --- CHAT ---
-        st.divider()
-        st.subheader("Chat with this Note")
+    # --- CHAT ---
+    st.divider()
+    st.subheader("Chat with this Note")
+    st.caption("Ask questions about the content. The model has access to both the notes and the source transcript for verbatim lookups.")
 
-        st.session_state.chat_histories.setdefault(active_note['id'], [])
+    st.session_state.chat_histories.setdefault(active_note['id'], [])
 
-        for message in st.session_state.chat_histories[active_note['id']]:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+    for message in st.session_state.chat_histories[active_note['id']]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-        if prompt := st.chat_input("Ask a question about the note content..."):
-            st.session_state.chat_histories[active_note['id']].append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
+    if prompt := st.chat_input("Ask a question about the note content..."):
+        st.session_state.chat_histories[active_note['id']].append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-            with st.chat_message("assistant"):
-                try:
-                    transcript_context = final_transcript[:30000] if final_transcript else "Not available."
-                    system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
+        with st.chat_message("assistant"):
+            try:
+                transcript_context = final_transcript[:30000] if final_transcript else "Not available."
+                system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
 If the user asks for verbatim quotes or exact wording, refer to the TRANSCRIPT section. For analysis and summary questions, use the NOTES section.
 
 MEETING NOTES:
@@ -917,35 +967,35 @@ SOURCE TRANSCRIPT:
 {transcript_context}
 ---
 """
-                    chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
-                    chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
-                    messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in st.session_state.chat_histories[active_note['id']]]
+                chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
+                chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
+                messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in st.session_state.chat_histories[active_note['id']]]
 
-                    chat = chat_model.start_chat(history=messages_for_api[:-1])
-                    response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
+                chat = chat_model.start_chat(history=messages_for_api[:-1])
+                response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
 
-                    message_placeholder = st.empty()
-                    full_response = ""
-                    for chunk in response:
-                        if not chunk.parts: continue
-                        full_response += chunk.text
-                        message_placeholder.markdown(full_response + "▌")
-                    message_placeholder.markdown(full_response)
+                message_placeholder = st.empty()
+                full_response = ""
+                for chunk in response:
+                    if not chunk.parts: continue
+                    full_response += chunk.text
+                    message_placeholder.markdown(full_response + "\u258c")
+                message_placeholder.markdown(full_response)
 
-                except Exception as e:
-                    full_response = f"Sorry, an error occurred: {str(e)}"
-                    st.error(full_response)
-                    if st.session_state.chat_histories[active_note['id']]:
-                        st.session_state.chat_histories[active_note['id']].pop()
+            except Exception as e:
+                full_response = f"Sorry, an error occurred: {str(e)}"
+                st.error(full_response)
+                if st.session_state.chat_histories[active_note['id']]:
+                    st.session_state.chat_histories[active_note['id']].pop()
 
-            if 'full_response' in locals() and not full_response.startswith("Sorry"):
-                st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
+        if 'full_response' in locals() and not full_response.startswith("Sorry"):
+            st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
 
-
+    # --- Analytics ---
     st.divider()
-    st.subheader("Analytics & History")
-    raw_summary_data = database.get_analytics_summary()
+    st.subheader("History")
 
+    raw_summary_data = database.get_analytics_summary()
     summary_dict = {}
     if isinstance(raw_summary_data, dict):
         summary_dict = raw_summary_data
@@ -962,22 +1012,51 @@ SOURCE TRANSCRIPT:
     c2.metric("Avg. Time / Note", f"{summary_dict.get('avg_time', 0.0):.1f}s")
     c3.metric("Total Tokens", f"{summary_dict.get('total_tokens', 0):,}")
 
-    if notes:
-        for note in notes:
-            with st.container(border=True):
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    st.markdown(f"**File:** `{note['file_name']}`")
-                    st.badge(note['meeting_type'])
-                    st.caption(f"ID: {note['id']} | {datetime.fromisoformat(note['created_at']).strftime('%Y-%m-%d %H:%M')}")
-                with col2:
-                    if st.button("View", key=f"view_{note['id']}", use_container_width=True):
-                        state.active_note_id = note['id']
-                        st.rerun()
-                    if st.button("Delete", key=f"del_{note['id']}", use_container_width=True):
+    # --- Search & Filter ---
+    filter_col1, filter_col2 = st.columns([3, 1])
+    with filter_col1:
+        search_query = st.text_input("Search notes", placeholder="Filter by file name...", label_visibility="collapsed")
+    with filter_col2:
+        type_filter = st.selectbox("Type", ["All"] + MEETING_TYPES, label_visibility="collapsed")
+
+    filtered_notes = notes
+    if search_query:
+        filtered_notes = [n for n in filtered_notes if search_query.lower() in n.get('file_name', '').lower()]
+    if type_filter != "All":
+        filtered_notes = [n for n in filtered_notes if n.get('meeting_type') == type_filter]
+
+    if not filtered_notes:
+        st.caption("No notes match your search.")
+
+    for note in filtered_notes:
+        is_active = note['id'] == state.active_note_id
+        with st.container(border=True):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                label = f"**{note['file_name']}**"
+                if is_active:
+                    label += "  \u2190 viewing"
+                st.markdown(label)
+                st.badge(note['meeting_type'])
+                # Content snippet
+                content_text = note.get('content', '')
+                if content_text:
+                    snippet = content_text[:120].replace('\n', ' ').strip()
+                    if len(content_text) > 120:
+                        snippet += "..."
+                    st.caption(snippet)
+                st.caption(datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M'))
+            with col2:
+                if st.button("View", key=f"view_{note['id']}", use_container_width=True, disabled=is_active):
+                    state.active_note_id = note['id']
+                    st.rerun()
+                with st.popover("Delete", use_container_width=True):
+                    st.caption("This action cannot be undone.")
+                    if st.button("Confirm delete", key=f"confirm_del_{note['id']}", type="primary", use_container_width=True):
                         database.delete_note(note['id'])
                         if state.active_note_id == note['id']:
                             state.active_note_id = None
+                        st.toast(f"Note '{note['file_name']}' deleted.")
                         st.rerun()
 
 # --- 6. MAIN APPLICATION RUNNER ---
