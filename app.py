@@ -45,9 +45,19 @@ AVAILABLE_MODELS = {
     "Gemini 2.0 Flash": "gemini-2.0-flash-lite", "Gemini 2.5 Flash": "gemini-2.5-flash",
     "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite", "Gemini 2.5 Pro": "gemini-2.5-pro","Gemini 3.0 Flash": "gemini-3-flash-preview", "Gemini 3.0 Pro": "gemini-3-pro-preview",
 }
-MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Custom"]
+MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Internal Discussion", "Custom"]
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
+
+MEETING_TYPE_HELP = {
+    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations",
+    "Earnings Call": "Financial data, management commentary, guidance, and analyst Q&A",
+    "Management Meeting": "Decisions, action items, owners, and key discussion points",
+    "Internal Discussion": "Perspectives, ideas, reasoning, conclusions, and next steps",
+    "Custom": "Provide your own formatting instructions via the context field",
+}
+
+# --- PROMPT CONSTANTS ---
 
 EXPERT_MEETING_DETAILED_PROMPT = """### **NOTES STRUCTURE**
 
@@ -94,8 +104,75 @@ Structure the main body in Question/Answer format.
     -   **Key Examples & Analogies:** If the speaker uses a specific example to illustrate a point, capture it, even if it's a few sentences long.
     -   **Cause & Effect:** Retain any reasoning provided (e.g., "...because of the new regulations," "...which led to a decrease in...")."""
 
-PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze an expert consultation transcript chunk and generate detailed, factual notes.
-Your primary directive is **100% completeness and accuracy**. You will process the transcript sequentially. For every Question/Answer pair you identify, you must generate notes following the structure below.
+EARNINGS_CALL_PROMPT = """### **NOTES STRUCTURE: EARNINGS CALL**
+
+You are analyzing an earnings call transcript. Generate comprehensive, structured notes that capture all financial data, management commentary, and forward-looking guidance.
+
+**(1.) Call Overview:**
+- Company name, quarter/period, date, and key participants (CEO, CFO, etc.).
+- Headline numbers: Revenue, EPS, net income, and any key metrics highlighted by management.
+
+**(2.) Management Commentary:**
+Structure by the topics provided below. For each topic, use **bold headings** and bullet points.
+
+{topic_instructions}
+
+**(3.) Analyst Q&A:**
+For each question-answer exchange:
+- **Analyst name/firm (if stated):** The question in bold.
+- Bullet-point the management response with all specifics preserved.
+
+**PRIORITY #1: CAPTURE ALL FINANCIAL DATA.** Revenue, margins, EPS, guidance ranges, growth rates, basis points, dollar amounts — every number matters.
+**PRIORITY #2: CAPTURE FORWARD GUIDANCE.** Any forward-looking statements, guidance ranges, management expectations, or outlook commentary.
+**PRIORITY #3: PRESERVE MANAGEMENT TONE.** Note confidence, caution, hedging language, or changes from prior quarter tone.
+**PRIORITY #4: CAPTURE SEGMENT/VERTICAL DETAIL.** Business segment breakdowns, geographic splits, and vertical-specific commentary."""
+
+MANAGEMENT_MEETING_PROMPT = """### **NOTES STRUCTURE: MANAGEMENT MEETING**
+
+Structure the notes to capture decisions, action items, and key discussion points.
+
+**(1.) Meeting Overview (Conditional):**
+- If the transcript begins with an agenda or introductions, capture attendees, date, and agenda items as bullet points.
+
+**(2.) Discussion Topics:**
+Structure the body by topic/agenda item using **bold headings**.
+
+For each topic:
+- **Key Points:** Bullet-point the main arguments, data, and perspectives shared.
+- **Decisions Made:** Clearly state any decisions reached, who made them, and the rationale.
+- **Action Items:** List each action item with the responsible person and any stated deadline.
+- **Open Questions:** Note unresolved issues or items deferred for follow-up.
+
+**PRIORITY #1: CAPTURE ALL DECISIONS AND ACTION ITEMS.** These are the most critical outputs.
+**PRIORITY #2: CAPTURE ALL DATA.** Names, numbers, dates, metrics, and specific references.
+**PRIORITY #3: PRESERVE CONTEXT.** Include the reasoning behind decisions and any dissenting views."""
+
+INTERNAL_DISCUSSION_PROMPT = """### **NOTES STRUCTURE: INTERNAL DISCUSSION**
+
+Structure the notes to capture the flow of ideas, key arguments, and conclusions.
+
+**(1.) Discussion Context (Conditional):**
+- If the discussion has a stated purpose or background, capture it as bullet points at the top.
+
+**(2.) Discussion Flow:**
+Structure the body by topic or theme using **bold headings**.
+
+For each topic:
+- Capture each participant's key contributions and perspectives as bullet points.
+- Note areas of agreement and disagreement.
+- Highlight any data, examples, or evidence cited.
+- Flag any concerns, risks, or caveats raised.
+
+**(3.) Conclusions & Next Steps:**
+- Summarize any conclusions reached.
+- List follow-up items or next steps with owners if identified.
+
+**PRIORITY #1: CAPTURE ALL PERSPECTIVES.** Include different viewpoints even if they disagree.
+**PRIORITY #2: CAPTURE ALL DATA.** Names, numbers, references, and specific examples.
+**PRIORITY #3: PRESERVE REASONING.** Include the "why" behind opinions and conclusions."""
+
+PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze a meeting transcript chunk and generate detailed, factual notes.
+Your primary directive is **100% completeness and accuracy**. Process the transcript sequentially and generate notes following the structure below.
 ---
 {base_instructions}
 ---
@@ -112,7 +189,9 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 ### **CONTINUATION INSTRUCTIONS**
 1.  **PROCESS THE ENTIRE CHUNK:** Your task is to process the **entire** new transcript chunk provided below.
 2.  **HANDLE OVERLAP:** The beginning of this new chunk overlaps with the end of the previous one. Process it naturally. Your output will be automatically de-duplicated later.
-3.  **MAINTAIN FORMAT:** Continue to use the exact same Q&A formatting as established in the base instructions.
+3.  **MAINTAIN FORMAT:** Continue to use the exact same formatting as established in the base instructions.
+4.  **NO META-COMMENTARY:** NEVER produce statements about the transcript itself, such as "the transcript does not contain an answer," "no relevant information in this section," "the chunk starts mid-conversation," or similar. If a chunk begins mid-answer, capture that content as a continuation of the relevant section. Always extract and document whatever substantive content exists.
+5.  **MID-CHUNK STARTS:** If the chunk starts in the middle of a response, begin your notes by capturing that content under the most relevant heading from context. Do not skip or discard partial content.
 
 ---
 {base_instructions}
@@ -121,6 +200,57 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 **MEETING TRANSCRIPT (NEW CHUNK):**
 {chunk_text}
 """
+
+PROOFREAD_PROMPT = """You are an expert proofreader for meeting notes. You have the **original transcript** and the **generated notes**. Your task is to produce a corrected, polished final version of the notes.
+
+### YOUR TASKS (in priority order):
+
+1.  **Fix misinterpreted words**: Cross-reference the notes against the transcript. Correct any words that were misheard, misspelled, or misinterpreted — especially company names, proper nouns, technical terms, industry jargon, acronyms, and numbers.
+
+2.  **Remove processing artifacts**: Delete any meta-commentary or error statements that are not part of the actual meeting content. Examples: "the transcript does not contain an answer," "no relevant information found," "this section appears incomplete," or any similar artifacts from chunked processing.
+
+3.  **Verify completeness**: Check that every substantive point, data point, name, number, percentage, monetary value, example, and nuanced opinion from the transcript is reflected in the notes. If anything is missing, add it under the appropriate section following the same formatting.
+
+4.  **Clean up stitching seams**: Fix any formatting inconsistencies, duplicated content, or awkward transitions that may have resulted from stitching multiple chunks together.
+
+5.  **Preserve all correct content**: Do NOT summarize, shorten, or remove any existing correct content. Your role is to fix and add, never to reduce. The final output must be at least as detailed as the input notes.
+
+### OUTPUT:
+Return ONLY the complete, corrected notes. Do not include any commentary about your changes or a preamble.
+
+---
+**ORIGINAL TRANSCRIPT:**
+{transcript}
+---
+**GENERATED NOTES TO PROOFREAD:**
+{notes}
+"""
+
+EXECUTIVE_SUMMARY_PROMPT = """Generate a structured executive summary from the following meeting notes.
+
+### STRUCTURE:
+1. **Key Takeaways** (3-5 bullet points): The most important findings, decisions, or insights from the meeting.
+2. **Critical Data Points**: All significant numbers, metrics, percentages, and financial figures mentioned.
+3. **Notable Quotes/Positions**: Any strong opinions, definitive statements, or notable positions taken by participants.
+4. **Risks & Concerns**: Any risks, challenges, or concerns raised during the meeting.
+5. **Action Items / Next Steps**: Any follow-ups, commitments, or next steps identified.
+
+### RULES:
+- Be specific — include actual numbers, names, and dates rather than vague references.
+- Keep each section concise but complete.
+- Do not introduce information not present in the notes.
+
+---
+**MEETING NOTES:**
+{notes}
+"""
+
+REFINEMENT_INSTRUCTIONS = {
+    "Expert Meeting": "Pay special attention to industry jargon, technical terms, company names, and domain-specific terminology. Preserve all proper nouns exactly.",
+    "Earnings Call": "Pay special attention to financial terminology (EPS, EBITDA, basis points, margin, guidance, revenue, etc.), company names, ticker symbols, analyst names, and numerical data. Preserve all figures exactly as spoken.",
+    "Management Meeting": "Pay special attention to names of attendees, action item owners, project names, deadlines, and organizational terminology.",
+    "Internal Discussion": "Pay special attention to participant names, project/product names, technical terms, and any referenced documents or systems.",
+}
 
 
 # --- 3. STATE & DATA MODELS ---
@@ -138,13 +268,12 @@ class AppState:
     refinement_enabled: bool = True
     add_context_enabled: bool = False
     context_input: str = ""
-    speaker_1: str = ""
-    speaker_2: str = ""
+    speakers: str = ""
     earnings_call_topics: str = ""
     existing_notes_input: str = ""
     text_input: str = ""
     uploaded_file: Optional[Any] = None
-    audio_recording: Optional[Any] = None # New for st.audio_input
+    audio_recording: Optional[Any] = None
     processing: bool = False
     active_note_id: Optional[str] = None
     error_message: Optional[str] = None
@@ -152,14 +281,16 @@ class AppState:
 
 # --- 4. CORE PROCESSING & UTILITY FUNCTIONS ---
 def sanitize_input(text: str) -> str:
-    """Removes characters and keywords commonly used in prompt injection attacks."""
+    """Removes keywords commonly used in prompt injection attacks."""
     if not isinstance(text, str):
         return ""
-    text = re.sub(r'[{}<>`]', '', text)
     injection_patterns = [
         r'ignore all previous instructions',
         r'you are now in.*mode',
-        r'stop being an ai'
+        r'stop being an ai',
+        r'disregard.*(?:above|prior|previous)',
+        r'new instructions:',
+        r'system:\s*override',
     ]
     for pattern in injection_patterns:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE)
@@ -171,9 +302,39 @@ def safe_get_token_count(response):
         if hasattr(response, 'usage_metadata') and response.usage_metadata:
             return getattr(response.usage_metadata, 'total_token_count', 0)
     except (AttributeError, ValueError):
-        st.warning("Could not retrieve token count from API response.")
         pass
     return 0
+
+def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False):
+    """Wrapper around generate_content with exponential backoff for transient API failures."""
+    for attempt in range(max_retries):
+        try:
+            return model.generate_content(prompt_or_contents, stream=stream)
+        except Exception as e:
+            error_str = str(e).lower()
+            is_transient = any(kw in error_str for kw in [
+                '429', '503', '500', 'deadline', 'timeout', 'unavailable', 'resource_exhausted'
+            ])
+            if is_transient and attempt < max_retries - 1:
+                time.sleep(2 ** (attempt + 1))
+                continue
+            raise
+
+def stream_and_collect(response, placeholder=None):
+    """Consume a streaming response, optionally displaying progress. Returns (full_text, token_count)."""
+    full_text = ""
+    for chunk in response:
+        if chunk.parts:
+            full_text += chunk.text
+            if placeholder:
+                word_count = len(full_text.split())
+                lines = full_text.strip().split('\n')
+                preview = '\n'.join(lines[-4:])
+                placeholder.caption(f"Streaming... {word_count:,} words generated\n{preview}")
+    if placeholder:
+        placeholder.empty()
+    token_count = safe_get_token_count(response)
+    return full_text, token_count
 
 @st.cache_data(ttl=3600)
 def get_file_content(uploaded_file, audio_recording=None) -> Tuple[Optional[str], str, Optional[bytes]]:
@@ -195,18 +356,17 @@ def get_file_content(uploaded_file, audio_recording=None) -> Tuple[Optional[str]
                 reader = PyPDF2.PdfReader(file_bytes_io)
                 if reader.is_encrypted: return "Error: PDF is encrypted.", name, None
                 content = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-                # Return PDF bytes for storage (even if we don't display them anymore)
                 return (content, name, uploaded_file.getvalue()) if content else ("Error: No text found in PDF.", name, None)
-            
+
             elif ext in [".txt", ".md"]:
                 return file_bytes_io.read().decode("utf-8"), name, None
-            
+
             elif ext in [".wav", ".mp3", ".m4a", ".ogg", ".flac"]:
                 return "audio_file", name, None
-        
+
         except Exception as e:
             return f"Error: Could not process file {name}. Details: {str(e)}", name, None
-            
+
     return None, "Unknown", None
 
 @st.cache_data
@@ -242,57 +402,68 @@ def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
     if not notes_text or not notes_text.strip():
         return ""
 
-    questions = re.findall(r"(\*\*.*?\*\*)", notes_text)
+    headings = re.findall(r"(\*\*.*?\*\*)", notes_text)
 
-    if not questions:
+    if not headings:
         return ""
 
-    context_questions = questions[-3:] if len(questions) >= 3 else questions
+    context_headings = headings[-3:] if len(headings) >= 3 else headings
 
     context_parts = [
         f"**Chunk #{chunk_number} Context Summary:**",
-        f"- Total questions processed so far: {len(questions)}",
-        f"- Recent question topics: {', '.join(q.strip('*') for q in context_questions[-2:])}",
-        f"- Last complete Q&A processed: {questions[-1]}"
+        f"- Total sections processed so far: {len(headings)}",
+        f"- Recent topics: {', '.join(q.strip('*') for q in context_headings[-2:])}",
+        f"- Last section processed: {headings[-1]}"
     ]
 
-    last_question = questions[-1]
+    last_heading = headings[-1]
     answer_match = re.search(
-        re.escape(last_question) + r"(.*?)(?=\*\*|$)",
+        re.escape(last_heading) + r"(.*?)(?=\*\*|$)",
         notes_text,
         re.DOTALL
     )
     if answer_match:
-        last_answer = answer_match.group(1).strip()
-        context_parts.append(f"- Last answer content:\n{last_answer[:300]}...")
+        last_content = answer_match.group(1).strip()
+        context_parts.append(f"- Last section content:\n{last_content[:300]}...")
 
     return "\n".join(context_parts)
 
+def _get_base_prompt_for_type(state):
+    """Returns the base prompt instructions for the selected meeting type."""
+    mt = state.selected_meeting_type
+    if mt == "Expert Meeting":
+        if state.selected_note_style == "Option 1: Detailed & Strict":
+            return EXPERT_MEETING_DETAILED_PROMPT
+        else:
+            return EXPERT_MEETING_CONCISE_PROMPT
+    elif mt == "Earnings Call":
+        topic_instructions = state.earnings_call_topics or "Identify logical themes and use them as bold headings."
+        return EARNINGS_CALL_PROMPT.format(topic_instructions=topic_instructions)
+    elif mt == "Management Meeting":
+        return MANAGEMENT_MEETING_PROMPT
+    elif mt == "Internal Discussion":
+        return INTERNAL_DISCUSSION_PROMPT
+    elif mt == "Custom":
+        sanitized = sanitize_input(state.context_input)
+        if sanitized:
+            return f"Follow the user's instructions to generate meeting notes.\n\n**USER INSTRUCTIONS:**\n{sanitized}"
+        return "Generate comprehensive meeting notes capturing all key points, decisions, data, and action items. Use **bold headings** to organize by topic and bullet points for details."
+    return ""
+
 def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
-    meeting_type = state.selected_meeting_type
+    base = _get_base_prompt_for_type(state)
     sanitized_context = sanitize_input(state.context_input)
     context_section = f"**ADDITIONAL CONTEXT:**\n{sanitized_context}" if state.add_context_enabled and sanitized_context else ""
 
-    if meeting_type == "Expert Meeting":
-        if state.selected_note_style == "Option 1: Detailed & Strict":
-            prompt_base = EXPERT_MEETING_DETAILED_PROMPT
-        else:
-            prompt_base = EXPERT_MEETING_CONCISE_PROMPT
-        return f"{prompt_base}\n\n{context_section}\n\n**MEETING TRANSCRIPT CHUNK:**\n{transcript_chunk}"
-    elif meeting_type == "Earnings Call":
-        topic_instructions = state.earnings_call_topics or "Identify logical themes and use them as bold headings."
-        if state.earnings_call_mode == "Enrich Existing Notes":
-            return f"Enrich the following existing notes based on the new transcript chunk. Focus on these topics: {topic_instructions}\n\n**EXISTING NOTES:**\n{state.existing_notes_input}\n\n**NEW TRANSCRIPT CHUNK:**\n{transcript_chunk}"
-        else:
-            return f"Generate detailed earnings call notes based on the transcript chunk. Structure your notes under these topics: {topic_instructions}\n\n{context_section}\n\n**TRANSCRIPT CHUNK:**\n{transcript_chunk}"
-    elif meeting_type == "Custom":
-        return f"CUSTOM PROMPT: Please follow user instructions.\n\n{context_section}\n\n**TRANSCRIPT:**\n{transcript_chunk}"
-    return f"Error: Unknown meeting type '{meeting_type}'"
+    if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes":
+        return f"Enrich the following existing notes based on the new transcript. Maintain the same structure and format.\n\n{base}\n\n**EXISTING NOTES:**\n{state.existing_notes_input}\n\n**NEW TRANSCRIPT:**\n{transcript_chunk}"
+
+    return f"{base}\n\n{context_section}\n\n**MEETING TRANSCRIPT:**\n{transcript_chunk}"
 
 def validate_inputs(state: AppState) -> Optional[str]:
     if state.input_method == "Paste Text" and not state.text_input.strip():
         return "Please paste a transcript."
-    
+
     if state.input_method == "Upload / Record":
         if not state.uploaded_file and not state.audio_recording:
              return "Please upload a file or record audio."
@@ -323,17 +494,16 @@ def process_and_save_task(state: AppState, status_ui):
     if state.input_method == "Upload / Record":
         file_type, name, pdf_bytes = get_file_content(state.uploaded_file, state.audio_recording)
         file_name = name
-        pdf_bytes_data = pdf_bytes # Store for saving later
+        pdf_bytes_data = pdf_bytes
 
         if file_type == "audio_file":
             status_ui.update(label="Step 1.1: Processing Audio...")
-            
-            # Determine source
+
             if state.audio_recording:
                 audio_bytes = state.audio_recording.getvalue()
             else:
                 audio_bytes = state.uploaded_file.getvalue()
-                
+
             audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
 
             chunk_length_ms = 5 * 60 * 1000
@@ -351,7 +521,7 @@ def process_and_save_task(state: AppState, status_ui):
                             cloud_files.append(cloud_ref.name)
                             while cloud_ref.state.name == "PROCESSING": time.sleep(2); cloud_ref = genai.get_file(cloud_ref.name)
                             if cloud_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {i+1} cloud processing failed.")
-                            response = transcription_model.generate_content(["Transcribe this audio.", cloud_ref])
+                            response = generate_with_retry(transcription_model, ["Transcribe this audio.", cloud_ref])
                             all_transcripts.append(response.text)
                     except Exception as e:
                         raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
@@ -366,7 +536,7 @@ def process_and_save_task(state: AppState, status_ui):
         elif file_type is None or file_type.startswith("Error:"):
             raise ValueError(file_type or "Failed to read file content.")
         else:
-            raw_transcript = file_type # Text extracted from PDF or TXT
+            raw_transcript = file_type
     elif state.input_method == "Paste Text":
         raw_transcript = state.text_input
 
@@ -374,21 +544,23 @@ def process_and_save_task(state: AppState, status_ui):
 
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
 
-    s1 = sanitize_input(state.speaker_1)
-    s2 = sanitize_input(state.speaker_2)
+    speakers = sanitize_input(state.speakers)
+    speaker_info = f"Participants: {speakers}." if speakers else ""
+    refinement_extra = REFINEMENT_INSTRUCTIONS.get(state.selected_meeting_type, "")
 
+    # --- Step 2: Refinement ---
     if state.refinement_enabled:
         status_ui.update(label="Step 2: Refining Transcript...")
         words = raw_transcript.split()
 
         if len(words) <= CHUNK_WORD_SIZE:
-            speaker_info = f"Speakers are {s1} and {s2}." if s1 and s2 else ""
-            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT:\n{raw_transcript}"
-            response = refinement_model.generate_content(refine_prompt)
+            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n\nTRANSCRIPT:\n{raw_transcript}"
+            response = generate_with_retry(refinement_model, refine_prompt)
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
         else:
-            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+            all_words = raw_transcript.split()
+            chunks = [" ".join(all_words[i:i + CHUNK_WORD_SIZE]) for i in range(0, len(all_words), CHUNK_WORD_SIZE)]
             all_refined_chunks = []
 
             for i, chunk in enumerate(chunks):
@@ -398,15 +570,13 @@ def process_and_save_task(state: AppState, status_ui):
                 if i > 0 and all_refined_chunks:
                     last_refined_chunk = all_refined_chunks[-1]
                     context_words = last_refined_chunk.split()
-                    context = " ".join(context_words[-150:])
-
-                speaker_info = f"Speakers are {s1} and {s2}." if s1 and s2 else ""
+                    context = " ".join(context_words[-CHUNK_WORD_OVERLAP:])
 
                 if not context:
-                    prompt = f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}"
+                    prompt = f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}"
                 else:
                     prompt = f"""You are continuing to refine a long transcript. Below is the tail end of the previously refined section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition.
-{speaker_info}
+{speaker_info} {refinement_extra}
 ---
 CONTEXT FROM PREVIOUSLY REFINED CHUNK (FOR CONTINUITY ONLY):
 ...{context}
@@ -414,54 +584,39 @@ CONTEXT FROM PREVIOUSLY REFINED CHUNK (FOR CONTINUITY ONLY):
 NEW TRANSCRIPT CHUNK TO REFINE:
 {chunk}"""
 
-                response = refinement_model.generate_content(prompt)
+                response = generate_with_retry(refinement_model, prompt)
                 all_refined_chunks.append(response.text)
                 total_tokens += safe_get_token_count(response)
 
             if all_refined_chunks:
-                final_refined_words = all_refined_chunks[0].split()
-                for i in range(1, len(all_refined_chunks)):
-                    original_chunk_words = chunks[i].split()
-                    if not original_chunk_words:
-                        continue
-
-                    overlap_proportion = CHUNK_WORD_OVERLAP / len(original_chunk_words)
-
-                    refined_chunk_words = all_refined_chunks[i].split()
-                    estimated_overlap_in_refined = int(len(refined_chunk_words) * overlap_proportion)
-
-                    final_refined_words.extend(refined_chunk_words[estimated_overlap_in_refined:])
-
-                refined_transcript = " ".join(final_refined_words)
+                refined_transcript = "\n\n".join(all_refined_chunks)
             else:
                 refined_transcript = ""
 
         final_transcript = refined_transcript
 
+    # --- Step 3: Generate Notes ---
     status_ui.update(label="Step 3: Generating Notes...")
     words = final_transcript.split()
     final_notes_content = ""
 
-    if state.selected_meeting_type == "Expert Meeting" and len(words) > CHUNK_WORD_SIZE:
+    if len(words) > CHUNK_WORD_SIZE:
         chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
 
         all_notes_chunks = []
         context_package = ""
-
-        if state.selected_note_style == "Option 1: Detailed & Strict":
-            prompt_base = EXPERT_MEETING_DETAILED_PROMPT
-        else:
-            prompt_base = EXPERT_MEETING_CONCISE_PROMPT
+        prompt_base = _get_base_prompt_for_type(state)
 
         for i, chunk in enumerate(chunks):
             status_ui.update(label=f"Step 3: Generating Notes (Chunk {i+1}/{len(chunks)})...")
             prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION
             prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
 
-            response = notes_model.generate_content(prompt)
-            total_tokens += safe_get_token_count(response)
+            stream_placeholder = st.empty()
+            response = generate_with_retry(notes_model, prompt, stream=True)
+            current_notes_text, tokens = stream_and_collect(response, stream_placeholder)
+            total_tokens += tokens
 
-            current_notes_text = response.text
             all_notes_chunks.append(current_notes_text)
 
             cumulative_notes_for_context = "\n\n".join(all_notes_chunks)
@@ -480,42 +635,51 @@ NEW TRANSCRIPT CHUNK TO REFINE:
                     final_notes_content += "\n\n" + current_notes
                     continue
 
-                last_question = last_q_match[-1].group(1)
+                last_heading = last_q_match[-1].group(1)
 
-                stitch_point = current_notes.find(last_question)
+                stitch_point = current_notes.find(last_heading)
 
                 if stitch_point != -1:
-                    next_q_match = re.search(r"(\*\*.*?\*\*)", current_notes[stitch_point + len(last_question):])
+                    next_q_match = re.search(r"(\*\*.*?\*\*)", current_notes[stitch_point + len(last_heading):])
                     if next_q_match:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_question) + next_q_match.start():]
+                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading) + next_q_match.start():]
                     else:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_question):]
+                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading):]
                 else:
                     st.warning(f"Could not find stitch point for chunk {i+1}. Appending full chunk; check for duplicates.")
                     final_notes_content += "\n\n" + current_notes
 
     else:
         prompt = get_dynamic_prompt(state, final_transcript)
-        response = notes_model.generate_content(prompt)
-        final_notes_content = response.text
-        total_tokens += safe_get_token_count(response)
+        stream_placeholder = st.empty()
+        response = generate_with_retry(notes_model, prompt, stream=True)
+        final_notes_content, tokens = stream_and_collect(response, stream_placeholder)
+        total_tokens += tokens
 
+    # --- Step 4: Proofread ---
+    status_ui.update(label="Step 4: Proofreading & Cleaning Notes...")
+    proofread_prompt = PROOFREAD_PROMPT.format(transcript=final_transcript, notes=final_notes_content)
+    response = generate_with_retry(notes_model, proofread_prompt)
+    final_notes_content = response.text
+    total_tokens += safe_get_token_count(response)
+
+    # --- Step 5: Executive Summary (Expert Meeting Option 3 only) ---
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
-        status_ui.update(label="Step 4: Generating Executive Summary...")
-        summary_prompt = f"Create a concise executive summary from these notes:\n\n{final_notes_content}"
-        response = notes_model.generate_content(summary_prompt)
-        final_notes_content += f"\n\n---\n\n**EXECUTIVE SUMMARY:**\n\n{response.text}"
+        status_ui.update(label="Step 5: Generating Executive Summary...")
+        summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
+        response = generate_with_retry(notes_model, summary_prompt)
+        final_notes_content += f"\n\n---\n\n{response.text}"
         total_tokens += safe_get_token_count(response)
 
-    status_ui.update(label="Step 5: Saving to Database...")
-    
-    # Pass pdf_blob if available
+    # --- Step 6: Save ---
+    status_ui.update(label="Step 6: Saving to Database...")
+
     note_data = {
         'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
         'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript,
-        'refined_transcript': refined_transcript, 'token_usage': total_tokens, 
+        'refined_transcript': refined_transcript, 'token_usage': total_tokens,
         'processing_time': time.time() - start_time,
-        'pdf_blob': pdf_bytes_data # Save PDF bytes
+        'pdf_blob': pdf_bytes_data
     }
     try:
         database.save_note(note_data)
@@ -531,7 +695,7 @@ def on_sector_change():
     state.earnings_call_topics = all_sectors.get(state.selected_sector, "")
 
 def render_input_and_processing_tab(state: AppState):
-    # v1.51.0 style input pills
+    # --- Source Input ---
     state.input_method = pills("Input Method", ["Paste Text", "Upload / Record"], index=["Paste Text", "Upload / Record"].index(state.input_method))
 
     if state.input_method == "Paste Text":
@@ -539,14 +703,40 @@ def render_input_and_processing_tab(state: AppState):
         state.uploaded_file = None
         state.audio_recording = None
     else:
-        # File Upload
-        state.uploaded_file = st.file_uploader("Upload a File (PDF, TXT, MP3, etc.)", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'])
-        st.markdown("**OR**")
-        # v1.46.0/1.51.0 Audio Input
-        state.audio_recording = st.audio_input("Record Microphone")
+        col_upload, col_record = st.columns(2)
+        with col_upload:
+            state.uploaded_file = st.file_uploader("Upload a File", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'], help="PDF, TXT, MP3, M4A, WAV, OGG, FLAC")
+        with col_record:
+            state.audio_recording = st.audio_input("Record Microphone")
 
+    # --- Word count preview ---
+    preview_text = ""
+    if state.input_method == "Paste Text" and state.text_input:
+        preview_text = state.text_input
+    elif state.input_method == "Upload / Record" and state.uploaded_file:
+        ext = os.path.splitext(state.uploaded_file.name)[1].lower()
+        if ext not in ['.wav', '.mp3', '.m4a', '.ogg', '.flac']:
+            content, _, _ = get_file_content(state.uploaded_file, None)
+            if content and not str(content).startswith("Error:") and content != "audio_file":
+                preview_text = content
+
+    if preview_text:
+        wc = len(preview_text.split())
+        num_chunks = max(1, (wc + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
+        info = f"**{wc:,}** words"
+        if num_chunks > 1:
+            info += f" | **{num_chunks}** chunks"
+        st.caption(info)
+    elif state.input_method == "Upload / Record" and state.uploaded_file:
+        ext = os.path.splitext(state.uploaded_file.name)[1].lower()
+        if ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac']:
+            st.caption("Audio file — word count available after transcription")
+
+    st.divider()
+
+    # --- Configuration ---
     st.subheader("Configuration")
-    state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type))
+    state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type), help=MEETING_TYPE_HELP.get(state.selected_meeting_type, ""))
 
     if state.selected_meeting_type == "Expert Meeting":
         state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
@@ -564,215 +754,248 @@ def render_input_and_processing_tab(state: AppState):
         state.selected_sector = st.selectbox("Sector (for Topic Templates)", sector_options, index=current_sector_index, on_change=on_sector_change, key="sector_selector")
         state.earnings_call_topics = st.text_area("Topic Instructions", value=state.earnings_call_topics, height=150, placeholder="Select a sector to load a template, or enter topics manually.")
 
-        # Clean settings management using st.popover (v1.46.0)
-        with st.popover("✏️ Manage Sector Templates", use_container_width=True):
+        with st.popover("Manage Sector Templates", use_container_width=True):
             st.markdown("**Edit or Delete an Existing Sector**")
             sector_to_edit = st.selectbox("Select Sector to Edit", sorted(list(all_sectors.keys())))
 
             if sector_to_edit:
                 topics_for_edit = st.text_area("Sector Topics", value=all_sectors[sector_to_edit], key=f"topics_{sector_to_edit}")
                 col1, col2 = st.columns([1,1])
-                if col1.button("💾 Save Changes", key=f"save_{sector_to_edit}"):
-                    database.save_sector(sector_to_edit, topics_for_edit); db_get_sectors.clear(); 
-                    st.toast(f"Sector '{sector_to_edit}' updated!", icon="✅"); st.rerun()
-                if col2.button("❌ Delete Sector", type="primary", key=f"delete_{sector_to_edit}"):
-                    database.delete_sector(sector_to_edit); db_get_sectors.clear(); state.selected_sector = "Other / Manual Topics"; on_sector_change(); 
-                    st.toast(f"Sector '{sector_to_edit}' deleted!", icon="🗑️"); st.rerun()
+                if col1.button("Save Changes", key=f"save_{sector_to_edit}"):
+                    database.save_sector(sector_to_edit, topics_for_edit); db_get_sectors.clear();
+                    st.toast(f"Sector '{sector_to_edit}' updated!"); st.rerun()
+                if col2.button("Delete Sector", type="primary", key=f"delete_{sector_to_edit}"):
+                    database.delete_sector(sector_to_edit); db_get_sectors.clear(); state.selected_sector = "Other / Manual Topics"; on_sector_change();
+                    st.toast(f"Sector '{sector_to_edit}' deleted!"); st.rerun()
 
             st.divider()
             st.markdown("**Add a New Sector**")
             new_sector_name = st.text_input("New Sector Name")
             new_sector_topics = st.text_area("Topics for New Sector", key="new_sector_topics")
 
-            if st.button("➕ Add New Sector"):
+            if st.button("Add New Sector"):
                 if new_sector_name and new_sector_topics:
-                    database.save_sector(new_sector_name, new_sector_topics); db_get_sectors.clear(); 
-                    st.toast(f"Sector '{new_sector_name}' added!", icon="✅"); st.rerun()
+                    database.save_sector(new_sector_name, new_sector_topics); db_get_sectors.clear();
+                    st.toast(f"Sector '{new_sector_name}' added!"); st.rerun()
                 else:
                     st.warning("Please provide both a name and topics for the new sector.")
 
         if state.earnings_call_mode == "Enrich Existing Notes":
             state.existing_notes_input = st.text_area("Paste Existing Notes to Enrich:", value=state.existing_notes_input)
 
-    # Cleaner UI for Advanced Settings using Popover (v1.46.0)
-    with st.popover("⚙️ Advanced Settings & Models", use_container_width=True):
-        state.refinement_enabled = st.toggle("Enable Transcript Refinement", value=state.refinement_enabled)
-        state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
-        if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
+    elif state.selected_meeting_type == "Custom":
+        state.context_input = st.text_area("Custom Instructions", value=state.context_input, height=120, placeholder="Describe how you want the notes structured...")
 
-        c1, c2 = st.columns(2)
-        state.speaker_1 = c1.text_input("Speaker 1 Name (Optional)", value=state.speaker_1)
-        state.speaker_2 = c2.text_input("Speaker 2 Name (Optional)", value=state.speaker_2)
+    # --- Settings row ---
+    col_settings, col_participants = st.columns(2)
+    with col_settings:
+        with st.popover("Advanced Settings & Models", use_container_width=True):
+            st.markdown("**Processing**")
+            state.refinement_enabled = st.toggle("Enable Transcript Refinement", value=state.refinement_enabled)
+            if state.selected_meeting_type != "Custom":
+                state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
+                if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
 
-        st.markdown("**Model Selection**")
-        state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
-        state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
-        state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
-        state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
+            st.divider()
+            st.markdown("**Model Selection**")
+            state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
+            state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
+            state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
+            state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
+    with col_participants:
+        state.speakers = st.text_input("Participants (Optional)", value=state.speakers, placeholder="e.g., John Smith (Analyst), Jane Doe (CEO)")
 
-    st.subheader("Prompt Preview")
-    prompt_preview = get_dynamic_prompt(state, "[...transcript content...]")
-    st_ace(value=prompt_preview, language='markdown', theme='github', height=200, readonly=True, key="prompt_preview_ace")
-
+    # --- Generate ---
     st.divider()
-    st.subheader("🚀 Generate")
     validation_error = validate_inputs(state)
 
     if st.button("Generate Notes", type="primary", use_container_width=True, disabled=bool(validation_error)):
         state.processing = True; state.error_message = None; state.fallback_content = None; st.rerun()
 
-    if validation_error: st.warning(f"⚠️ Please fix the following: {validation_error}")
+    if validation_error: st.warning(f"Please fix the following: {validation_error}")
 
+    # --- Prompt Preview (collapsed) ---
+    with st.expander("Prompt Preview", expanded=False):
+        prompt_preview = get_dynamic_prompt(state, "[...transcript content...]")
+        st_ace(value=prompt_preview, language='markdown', theme='github', height=200, readonly=True, key="prompt_preview_ace")
+
+    # --- Processing ---
     if state.processing:
         with st.status("Processing your request...", expanded=True) as status:
             try:
                 final_note = process_and_save_task(state, status)
                 state.active_note_id = final_note['id']
-                status.update(label="✅ Success! View your note in the 'Output & History' tab.", state="complete")
+                status.update(label="Done! Switch to the Output & History tab to view your note.", state="complete")
+                st.toast("Notes generated successfully!", icon="\u2705")
             except Exception as e:
                 state.error_message = f"An error occurred during processing:\n{e}"
-                status.update(label=f"❌ Error: {e}", state="error")
+                status.update(label=f"Error: {e}", state="error")
         state.processing = False
 
     if state.error_message:
         st.error("Last run failed. See details below:")
         st.code(state.error_message)
         if state.fallback_content:
-            st.download_button("⬇️ Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt")
+            st.download_button("Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt")
         if st.button("Clear Error"):
             state.error_message = None
             state.fallback_content = None
             st.rerun()
 
 def render_output_and_history_tab(state: AppState):
-    st.subheader("📄 Active Note")
-    
     notes = database.get_all_notes()
-    
+
     if not notes:
-        st.info("No notes generated. Go to the 'Input & Generate' tab to create one.")
-    else:
-        if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
-            state.active_note_id = notes[0]['id']
+        st.markdown("""
+### No notes yet
 
-        # Fetch FULL data (including PDF Blob if exists)
-        active_note = database.get_note_by_id(state.active_note_id)
-        
-        if not active_note:
-            active_note = database.get_note_by_id(notes[0]['id'])
+1. Switch to the **Input & Generate** tab
+2. Paste text, upload a file (PDF, TXT), or record audio
+3. Pick a meeting type and click **Generate Notes**
 
-        st.markdown(f"**Viewing Note for:** `{active_note['file_name']}`")
-        st.caption(f"ID: {active_note['id']} | Generated: {datetime.fromisoformat(active_note['created_at']).strftime('%Y-%m-%d %H:%M')}")
+Your generated notes, transcripts, and chat history will appear here.
+        """)
+        return
 
-        # ---------------------------------------------------------------------
-        # FIX APPLIED HERE: Removed st.pdf and side-by-side columns logic
-        # The code now simply renders the editor full width.
-        # ---------------------------------------------------------------------
-        edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
+    # --- Active Note ---
+    if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
+        state.active_note_id = notes[0]['id']
 
-        # v1.51.0 Feedback
-        st.write("Rate this result:")
-        st.feedback("thumbs", key=f"fb_{active_note['id']}")
+    active_note = database.get_note_by_id(state.active_note_id)
+    if not active_note:
+        active_note = database.get_note_by_id(notes[0]['id'])
 
-        dl1, dl2, dl3 = st.columns(3)
+    # --- Note header with metadata ---
+    st.markdown(f"### {active_note['file_name']}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.markdown(f"**Type**")
+    m1.badge(active_note['meeting_type'])
+    m2.metric("Processing Time", f"{active_note.get('processing_time', 0):.1f}s")
+    m3.metric("Tokens Used", f"{active_note.get('token_usage', 0):,}")
+    m4.caption(f"Generated\n\n{datetime.fromisoformat(active_note['created_at']).strftime('%b %d, %Y %H:%M')}")
 
-        dl1.download_button(
-            label="⬇️ Download Processed Output",
-            data=edited_content,
-            file_name=f"SynthNote_Output_{active_note.get('id', 'note')}.txt",
+    # --- Side-by-side Notes & Transcript ---
+    final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
+    transcript_source = "Refined" if active_note.get('refined_transcript') else "Raw"
+
+    col_notes, col_transcript = st.columns([3, 2])
+    with col_notes:
+        view_mode = pills("View", ["Editor", "Preview"], index=0, key=f"view_mode_{active_note['id']}")
+        if view_mode == "Editor":
+            edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
+        else:
+            edited_content = active_note['content']
+            with st.container(height=600, border=True):
+                st.markdown(edited_content)
+    with col_transcript:
+        st.markdown(f"**{transcript_source} Transcript**")
+        if final_transcript:
+            st.text_area("", value=final_transcript, height=600, disabled=True, label_visibility="collapsed", key=f"side_tx_{active_note['id']}")
+        else:
+            st.info("No transcript available.")
+
+    # --- Downloads & Feedback ---
+    dl1, dl2, dl3, dl4 = st.columns(4)
+
+    dl1.download_button(
+        label="Download Notes (.txt)",
+        data=edited_content,
+        file_name=f"SynthNote_{active_note.get('file_name', 'note')}.txt",
+        mime="text/plain",
+        use_container_width=True
+    )
+    dl2.download_button(
+        label="Download Notes (.md)",
+        data=edited_content,
+        file_name=f"SynthNote_{active_note.get('file_name', 'note')}.md",
+        mime="text/markdown",
+        use_container_width=True
+    )
+
+    if final_transcript:
+        dl3.download_button(
+            label=f"Download {transcript_source} Transcript",
+            data=final_transcript,
+            file_name=f"{transcript_source}_Transcript_{active_note.get('file_name', 'note')}.txt",
             mime="text/plain",
             use_container_width=True
         )
+    else:
+        dl3.empty()
 
-        final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
-        transcript_source = "Refined" if active_note.get('refined_transcript') else "Transcribed from Audio"
+    if active_note.get('raw_transcript') and active_note.get('refined_transcript'):
+        dl4.download_button(
+            label="Download Raw Transcript",
+            data=active_note['raw_transcript'],
+            file_name=f"Raw_Transcript_{active_note.get('file_name', 'note')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    else:
+        dl4.empty()
 
-        if final_transcript:
-            dl2.download_button(
-                label=f"⬇️ Download {transcript_source} Transcript",
-                data=final_transcript,
-                file_name=f"{transcript_source.replace(' ', '')}_Transcript_{active_note.get('id', 'note')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-        else:
-            dl2.write("No transcript available")
+    st.feedback("thumbs", key=f"fb_{active_note['id']}")
 
-        if active_note.get('raw_transcript') and active_note.get('refined_transcript'):
-            dl3.download_button(
-                label="⬇️ Download Original Raw Transcription",
-                data=active_note['raw_transcript'],
-                file_name=f"OriginalRawTranscript_{active_note.get('id', 'note')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-        else:
-            dl3.empty()
+    # --- CHAT ---
+    st.divider()
+    st.subheader("Chat with this Note")
+    st.caption("Ask questions about the content. The model has access to both the notes and the source transcript for verbatim lookups.")
 
-        with st.expander("View Source Transcripts", expanded=False):
-            if final_transcript:
-                st.text_area(
-                    f"{transcript_source} Transcript",
-                    value=final_transcript,
-                    height=300,
-                    disabled=True,
-                    key=f"final_tx_{active_note['id']}"
-                )
-            else:
-                st.info("No transcript available.")
-        
-        # --- CHAT ---
-        st.divider()
-        st.subheader("💬 Chat with this Note")
+    st.session_state.chat_histories.setdefault(active_note['id'], [])
 
-        st.session_state.chat_histories.setdefault(active_note['id'], [])
+    for message in st.session_state.chat_histories[active_note['id']]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-        for message in st.session_state.chat_histories[active_note['id']]:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+    if prompt := st.chat_input("Ask a question about the note content..."):
+        st.session_state.chat_histories[active_note['id']].append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-        if prompt := st.chat_input("Ask a question about the note content..."):
-            st.session_state.chat_histories[active_note['id']].append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
+        with st.chat_message("assistant"):
+            try:
+                transcript_context = final_transcript[:30000] if final_transcript else "Not available."
+                system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
+If the user asks for verbatim quotes or exact wording, refer to the TRANSCRIPT section. For analysis and summary questions, use the NOTES section.
 
-            with st.chat_message("assistant"):
-                try:
-                    system_prompt = f"""You are an expert analyst. Your task is to answer questions based *only* on the provided document content.
-DOCUMENT CONTENT:
+MEETING NOTES:
 ---
 {edited_content}
 ---
+SOURCE TRANSCRIPT:
+---
+{transcript_context}
+---
 """
-                    chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
-                    chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
-                    messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in st.session_state.chat_histories[active_note['id']]]
-                    
-                    chat = chat_model.start_chat(history=messages_for_api[:-1])
-                    response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
+                chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
+                chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
+                messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in st.session_state.chat_histories[active_note['id']]]
 
-                    message_placeholder = st.empty()
-                    full_response = ""
-                    for chunk in response:
-                        if not chunk.parts: continue
-                        full_response += chunk.text
-                        message_placeholder.markdown(full_response + "▌")
-                    message_placeholder.markdown(full_response)
+                chat = chat_model.start_chat(history=messages_for_api[:-1])
+                response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
 
-                except Exception as e:
-                    full_response = f"Sorry, an error occurred: {str(e)}"
-                    st.error(full_response)
-                    if st.session_state.chat_histories[active_note['id']]:
-                        st.session_state.chat_histories[active_note['id']].pop()
+                message_placeholder = st.empty()
+                full_response = ""
+                for chunk in response:
+                    if not chunk.parts: continue
+                    full_response += chunk.text
+                    message_placeholder.markdown(full_response + "\u258c")
+                message_placeholder.markdown(full_response)
 
-            if 'full_response' in locals() and not full_response.startswith("Sorry"):
-                st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
+            except Exception as e:
+                full_response = f"Sorry, an error occurred: {str(e)}"
+                st.error(full_response)
+                if st.session_state.chat_histories[active_note['id']]:
+                    st.session_state.chat_histories[active_note['id']].pop()
 
+        if 'full_response' in locals() and not full_response.startswith("Sorry"):
+            st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
 
+    # --- Analytics ---
     st.divider()
-    st.subheader("📊 Analytics & History")
-    raw_summary_data = database.get_analytics_summary()
+    st.subheader("History")
 
+    raw_summary_data = database.get_analytics_summary()
     summary_dict = {}
     if isinstance(raw_summary_data, dict):
         summary_dict = raw_summary_data
@@ -789,27 +1012,59 @@ DOCUMENT CONTENT:
     c2.metric("Avg. Time / Note", f"{summary_dict.get('avg_time', 0.0):.1f}s")
     c3.metric("Total Tokens", f"{summary_dict.get('total_tokens', 0):,}")
 
-    if notes:
-        for note in notes:
-            with st.container(border=True):
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    st.markdown(f"**File:** `{note['file_name']}`")
-                    # v1.47.0 st.badge
-                    st.badge(note['meeting_type'])
-                    st.caption(f"ID: {note['id']} | {datetime.fromisoformat(note['created_at']).strftime('%Y-%m-%d %H:%M')}")
-                with col2:
-                    if st.button("View", key=f"view_{note['id']}", use_container_width=True):
-                        state.active_note_id = note['id']
+    # --- Search & Filter ---
+    filter_col1, filter_col2 = st.columns([3, 1])
+    with filter_col1:
+        search_query = st.text_input("Search notes", placeholder="Filter by file name...", label_visibility="collapsed")
+    with filter_col2:
+        type_filter = st.selectbox("Type", ["All"] + MEETING_TYPES, label_visibility="collapsed")
+
+    filtered_notes = notes
+    if search_query:
+        filtered_notes = [n for n in filtered_notes if search_query.lower() in n.get('file_name', '').lower()]
+    if type_filter != "All":
+        filtered_notes = [n for n in filtered_notes if n.get('meeting_type') == type_filter]
+
+    if not filtered_notes:
+        st.caption("No notes match your search.")
+
+    for note in filtered_notes:
+        is_active = note['id'] == state.active_note_id
+        with st.container(border=True):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                label = f"**{note['file_name']}**"
+                if is_active:
+                    label += "  \u2190 viewing"
+                st.markdown(label)
+                st.badge(note['meeting_type'])
+                # Content snippet
+                content_text = note.get('content', '')
+                if content_text:
+                    snippet = content_text[:120].replace('\n', ' ').strip()
+                    if len(content_text) > 120:
+                        snippet += "..."
+                    st.caption(snippet)
+                st.caption(datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M'))
+            with col2:
+                if st.button("View", key=f"view_{note['id']}", use_container_width=True, disabled=is_active):
+                    state.active_note_id = note['id']
+                    st.rerun()
+                with st.popover("Delete", use_container_width=True):
+                    st.caption("This action cannot be undone.")
+                    if st.button("Confirm delete", key=f"confirm_del_{note['id']}", type="primary", use_container_width=True):
+                        database.delete_note(note['id'])
+                        if state.active_note_id == note['id']:
+                            state.active_note_id = None
+                        st.toast(f"Note '{note['file_name']}' deleted.")
                         st.rerun()
 
 # --- 6. MAIN APPLICATION RUNNER ---
 def run_app():
     st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
-    
-    # v1.46.0 st.logo
+
     st.logo("https://placehold.co/64x64?text=SN", link="https://streamlit.io")
-    
+
     st.title("SynthNotes AI")
 
     if "config_error" in st.session_state:
@@ -824,7 +1079,7 @@ def run_app():
             st.session_state.chat_histories = {}
 
 
-        tabs = st.tabs(["📝 Input & Generate", "📄 Output & History"])
+        tabs = st.tabs(["Input & Generate", "Output & History"])
 
         with tabs[0]: render_input_and_processing_tab(st.session_state.app_state)
         with tabs[1]: render_output_and_history_tab(st.session_state.app_state)
