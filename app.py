@@ -313,6 +313,8 @@ Convert the detailed meeting notes below into a short, plain-text research note.
 
 8. FOCUS TOPICS: Focus on: {topics}
 
+{custom_instructions_block}
+
 ### OUTPUT:
 Return ONLY the plain-text note. No preamble, no commentary, no markdown formatting whatsoever.
 
@@ -1300,6 +1302,14 @@ def render_otg_notes_tab(state: AppState):
     with number_col:
         number_focus = pills("Data Emphasis", NUMBER_FOCUS_OPTIONS, index=2, key="otg_number_pills")
 
+    # --- Custom instructions ---
+    custom_instructions = st.text_area(
+        "Additional Instructions (Optional)",
+        placeholder="e.g., Emphasize competitive positioning vs Blinkit, keep the note under 200 words, mention the IPO timeline...",
+        height=80,
+        key="otg_custom_instructions"
+    )
+
     # --- Generate OTG note ---
     st.divider()
 
@@ -1318,11 +1328,13 @@ def render_otg_notes_tab(state: AppState):
                 topics_str = ", ".join(st.session_state.otg_selected_topics)
                 entities_str = ", ".join(st.session_state.otg_selected_entities) if st.session_state.otg_selected_entities else "all entities mentioned"
                 number_instruction = NUMBER_FOCUS_INSTRUCTIONS.get(number_focus, NUMBER_FOCUS_INSTRUCTIONS["Moderate"])
+                custom_block = f"9. ADDITIONAL INSTRUCTIONS FROM THE ANALYST: {custom_instructions}" if custom_instructions.strip() else ""
                 prompt = OTG_CONVERT_PROMPT.format(
                     tone=tone,
                     topics=topics_str,
                     entities=entities_str,
                     number_focus_instruction=number_instruction,
+                    custom_instructions_block=custom_block,
                     notes=st.session_state.otg_input
                 )
                 response = generate_with_retry(otg_model, prompt)
