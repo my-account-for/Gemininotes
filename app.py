@@ -281,33 +281,43 @@ OTG_EXTRACT_PROMPT = """Analyze the following meeting notes and extract structur
 {notes}
 """
 
-OTG_CONVERT_PROMPT = """You are an expert equity research analyst writing concise, opinionated channel check notes for institutional investors.
+OTG_CONVERT_PROMPT = """You are writing informal channel check notes — the kind an equity research analyst sends to their team after speaking with industry contacts.
 
-### YOUR TASK:
-Convert the detailed meeting notes below into a concise, narrative-style research note. This is NOT a summary — it is an **opinionated interpretation** of the key findings.
+### TASK:
+Convert the detailed meeting notes below into a short, plain-text research note.
 
-### STYLE RULES:
-1. **Opening line**: Start with a one-line context header describing what this channel check is about (e.g., "Channel checks on [sector/topic]").
-2. **Introduction**: One sentence describing who you spoke with and what their role/expertise is, without naming them. Use phrasing like "We spoke with a former [Company] employee responsible for [area]..." or "We spoke with [number] experts with experience across [area]..."
-3. **Attribution**: Throughout the note, attribute key claims and findings to the expert(s). Use phrases like "the expert noted," "according to our contact," "the former employee highlighted," "our expert believes," "she/he mentioned," "the expert estimates." This makes it clear the findings are sourced from the conversation, not the analyst's own opinion.
-4. **Body**: Write 4-8 flowing paragraphs that capture the key takeaways. Each paragraph should make a clear point. Do NOT use bullet points, Q&A format, or numbered lists. Write in narrative prose.
-5. **Tone**: Your tone must be **{tone}**. This means:
-   - Very Positive: Highlight strengths, competitive advantages, growth potential. Frame challenges as temporary or manageable.
-   - Positive: Generally constructive. Acknowledge risks but emphasize opportunities and positive trends.
-   - Neutral: Balanced. Present facts and findings objectively without favoring positive or negative interpretation.
-   - Negative: Highlight risks, challenges, structural problems. Frame positive developments as insufficient or temporary.
-   - Very Negative: Emphasize fundamental weaknesses, unsustainable practices, competitive threats. Frame the situation as deeply problematic.
-6. **Data emphasis**: {number_focus_instruction}
-7. **Length**: 300-600 words. Be concise but substantive.
-8. **No names**: Do not name the expert. Use "the expert," "our contact," or "the former employee."
-9. **Focus topics**: Focus primarily on the following topics from the notes: {topics}
-10. **Focus entities**: Center your analysis around these entities: {entities}. Other entities may be mentioned for context but keep the narrative focused on the selected ones.
+### STYLE (follow exactly):
+
+1. TITLE: A short, natural title on the first line. Examples: "Channel checks on Quick commerce", "Checks on Hero Motocorp", "Hero demand checks". Keep it simple — no formatting, no colons.
+
+2. INTRO: One sentence starting with "We spoke with..." describing who you spoke with (role/expertise, NOT their name) and what you wanted to understand. Then on the same line or next: "Following were the KTAs:"
+
+3. BODY: Write 4-7 short paragraphs of plain flowing text. Each paragraph makes one clear point.
+   - ABSOLUTELY NO markdown formatting. No bold (**), no bullets (-), no numbered lists, no headers (#). Just plain text paragraphs.
+   - Use simple, direct language. Write like you're sending a quick note to your team, not writing a formal report.
+   - Attribute findings to the source naturally: "The expert estimates...", "She didn't share...", "Dealers felt...", "Managers mentioned...", "Our checks highlight...", "He pointed out..."
+   - Weave in your own analyst commentary where relevant: "We will need to monitor...", "This makes it tricky because...", "We have observed earlier that..."
+
+4. TONE: {tone}
+   - Very Positive: Frame findings constructively. Strengths, growth, advantages. Challenges are temporary.
+   - Positive: Generally constructive. Risks acknowledged but opportunities emphasized.
+   - Neutral: Balanced. Facts presented objectively.
+   - Negative: Risks and structural problems emphasized. Positive developments are insufficient.
+   - Very Negative: Fundamental weaknesses, unsustainable practices. Deeply problematic framing.
+
+5. DATA: {number_focus_instruction}
+
+6. LENGTH: 150-350 words. Short and direct. Do not pad.
+
+7. FOCUS ENTITIES: Center the note around: {entities}. Other entities can appear for context.
+
+8. FOCUS TOPICS: Focus on: {topics}
 
 ### OUTPUT:
-Return ONLY the final research note. No preamble, no "Here is the note," no commentary.
+Return ONLY the plain-text note. No preamble, no commentary, no markdown formatting whatsoever.
 
 ---
-**SOURCE NOTES:**
+SOURCE NOTES:
 {notes}
 """
 
