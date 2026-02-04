@@ -21,6 +21,9 @@ from streamlit_pills import pills
 from streamlit_ace import st_ace
 import re
 import tempfile
+import html as html_module
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import streamlit.components.v1 as components
 
 # --- Local Imports ---
 import database
@@ -336,6 +339,30 @@ def stream_and_collect(response, placeholder=None):
     token_count = safe_get_token_count(response)
     return full_text, token_count
 
+def copy_to_clipboard_button(text: str, button_label: str = "Copy Notes"):
+    """Render a button that copies text to the clipboard using the browser Clipboard API."""
+    escaped = html_module.escape(text).replace("`", "\\`").replace("$", "\\$")
+    components.html(
+        f"""
+        <button onclick="copyText()" style="
+            background-color:#FF4B4B; color:white; border:none; padding:0.4rem 1rem;
+            border-radius:0.3rem; cursor:pointer; font-size:0.875rem; width:100%;
+        ">{button_label}</button>
+        <script>
+        function copyText() {{
+            const text = `{escaped}`;
+            const decoded = new DOMParser().parseFromString(text, 'text/html').body.textContent;
+            navigator.clipboard.writeText(decoded).then(() => {{
+                const btn = document.querySelector('button');
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = '{button_label}', 2000);
+            }});
+        }}
+        </script>
+        """,
+        height=45,
+    )
+
 @st.cache_data(ttl=3600)
 def get_file_content(uploaded_file, audio_recording=None) -> Tuple[Optional[str], str, Optional[bytes]]:
     """
@@ -480,11 +507,21 @@ def validate_inputs(state: AppState) -> Optional[str]:
         return "Please provide existing notes for enrichment mode."
     return None
 
+def _get_cached_model(model_display_name: str) -> genai.GenerativeModel:
+    """Return a cached GenerativeModel instance, creating it only if the model name changed."""
+    cache_key = "_model_cache"
+    if cache_key not in st.session_state:
+        st.session_state[cache_key] = {}
+    model_id = AVAILABLE_MODELS[model_display_name]
+    if model_id not in st.session_state[cache_key]:
+        st.session_state[cache_key][model_id] = genai.GenerativeModel(model_id)
+    return st.session_state[cache_key][model_id]
+
 def process_and_save_task(state: AppState, status_ui):
     start_time = time.time()
-    notes_model = genai.GenerativeModel(AVAILABLE_MODELS[state.notes_model])
-    refinement_model = genai.GenerativeModel(AVAILABLE_MODELS[state.refinement_model])
-    transcription_model = genai.GenerativeModel(AVAILABLE_MODELS[state.transcription_model])
+    notes_model = _get_cached_model(state.notes_model)
+    refinement_model = _get_cached_model(state.refinement_model)
+    transcription_model = _get_cached_model(state.transcription_model)
 
     status_ui.update(label="Step 1: Preparing Source Content...")
     raw_transcript, file_name = "", "Pasted Text"
@@ -542,6 +579,10 @@ def process_and_save_task(state: AppState, status_ui):
 
     if not raw_transcript: raise ValueError("Source content is empty.")
 
+    # Checkpoint: save raw transcript so it survives connection drops
+    st.session_state["_checkpoint_raw_transcript"] = raw_transcript
+    st.session_state["_checkpoint_file_name"] = file_name
+
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
 
     speakers = sanitize_input(state.speakers)
@@ -561,39 +602,50 @@ def process_and_save_task(state: AppState, status_ui):
         else:
             all_words = raw_transcript.split()
             chunks = [" ".join(all_words[i:i + CHUNK_WORD_SIZE]) for i in range(0, len(all_words), CHUNK_WORD_SIZE)]
-            all_refined_chunks = []
 
+            # Pre-build all prompts using raw chunk tails as context (known upfront, enables parallelism)
+            prompts = []
             for i, chunk in enumerate(chunks):
-                status_ui.update(label=f"Step 2: Refining Transcript (Chunk {i+1}/{len(chunks)})...")
-
-                context = ""
-                if i > 0 and all_refined_chunks:
-                    last_refined_chunk = all_refined_chunks[-1]
-                    context_words = last_refined_chunk.split()
-                    context = " ".join(context_words[-CHUNK_WORD_OVERLAP:])
-
-                if not context:
-                    prompt = f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}"
+                if i == 0:
+                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}")
                 else:
-                    prompt = f"""You are continuing to refine a long transcript. Below is the tail end of the previously refined section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition.
+                    prev_chunk_words = chunks[i - 1].split()
+                    context = " ".join(prev_chunk_words[-CHUNK_WORD_OVERLAP:])
+                    prompts.append(f"""You are continuing to refine a long transcript. Below is the tail end of the previous section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition.
 {speaker_info} {refinement_extra}
 ---
-CONTEXT FROM PREVIOUSLY REFINED CHUNK (FOR CONTINUITY ONLY):
+CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY):
 ...{context}
 ---
 NEW TRANSCRIPT CHUNK TO REFINE:
-{chunk}"""
+{chunk}""")
 
-                response = generate_with_retry(refinement_model, prompt)
-                all_refined_chunks.append(response.text)
-                total_tokens += safe_get_token_count(response)
+            status_ui.update(label=f"Step 2: Refining Transcript ({len(chunks)} chunks in parallel)...")
 
-            if all_refined_chunks:
-                refined_transcript = "\n\n".join(all_refined_chunks)
-            else:
-                refined_transcript = ""
+            # Process chunks in parallel (max 3 concurrent to respect API rate limits)
+            all_refined_chunks = [None] * len(chunks)
+            chunk_tokens = [0] * len(chunks)
+
+            def refine_chunk(idx, prompt):
+                resp = generate_with_retry(refinement_model, prompt)
+                return idx, resp.text, safe_get_token_count(resp)
+
+            with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as executor:
+                futures = {executor.submit(refine_chunk, i, p): i for i, p in enumerate(prompts)}
+                for future in as_completed(futures):
+                    idx, text, tokens = future.result()
+                    all_refined_chunks[idx] = text
+                    chunk_tokens[idx] = tokens
+                    done_count = sum(1 for c in all_refined_chunks if c is not None)
+                    status_ui.update(label=f"Step 2: Refining Transcript ({done_count}/{len(chunks)} chunks done)...")
+
+            total_tokens += sum(chunk_tokens)
+            refined_transcript = "\n\n".join(c for c in all_refined_chunks if c) if any(all_refined_chunks) else ""
 
         final_transcript = refined_transcript
+
+    # Checkpoint: save refined transcript
+    st.session_state["_checkpoint_refined_transcript"] = refined_transcript
 
     # --- Step 3: Generate Notes ---
     status_ui.update(label="Step 3: Generating Notes...")
@@ -656,12 +708,16 @@ NEW TRANSCRIPT CHUNK TO REFINE:
         final_notes_content, tokens = stream_and_collect(response, stream_placeholder)
         total_tokens += tokens
 
-    # --- Step 4: Proofread ---
-    status_ui.update(label="Step 4: Proofreading & Cleaning Notes...")
-    proofread_prompt = PROOFREAD_PROMPT.format(transcript=final_transcript, notes=final_notes_content)
-    response = generate_with_retry(notes_model, proofread_prompt)
-    final_notes_content = response.text
-    total_tokens += safe_get_token_count(response)
+    # --- Step 4: Proofread (only when chunking was used — single-chunk notes have no stitching artifacts) ---
+    was_chunked = len(final_transcript.split()) > CHUNK_WORD_SIZE
+    if was_chunked:
+        status_ui.update(label="Step 4: Proofreading & Cleaning Notes...")
+        proofread_prompt = PROOFREAD_PROMPT.format(transcript=final_transcript, notes=final_notes_content)
+        response = generate_with_retry(refinement_model, proofread_prompt)
+        final_notes_content = response.text
+        total_tokens += safe_get_token_count(response)
+    else:
+        status_ui.update(label="Step 4: Skipped (single-chunk, no stitching artifacts)")
 
     # --- Step 5: Executive Summary (Expert Meeting Option 3 only) ---
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
@@ -894,17 +950,19 @@ Your generated notes, transcripts, and chat history will appear here.
         else:
             st.info("No transcript available.")
 
-    # --- Downloads & Feedback ---
-    dl1, dl2, dl3, dl4 = st.columns(4)
+    # --- Downloads, Copy & Feedback ---
+    dl1, dl2, dl3, dl4, dl5 = st.columns(5)
 
-    dl1.download_button(
+    with dl1:
+        copy_to_clipboard_button(edited_content)
+    dl2.download_button(
         label="Download Notes (.txt)",
         data=edited_content,
         file_name=f"SynthNote_{active_note.get('file_name', 'note')}.txt",
         mime="text/plain",
         use_container_width=True
     )
-    dl2.download_button(
+    dl3.download_button(
         label="Download Notes (.md)",
         data=edited_content,
         file_name=f"SynthNote_{active_note.get('file_name', 'note')}.md",
@@ -913,7 +971,7 @@ Your generated notes, transcripts, and chat history will appear here.
     )
 
     if final_transcript:
-        dl3.download_button(
+        dl4.download_button(
             label=f"Download {transcript_source} Transcript",
             data=final_transcript,
             file_name=f"{transcript_source}_Transcript_{active_note.get('file_name', 'note')}.txt",
@@ -921,10 +979,10 @@ Your generated notes, transcripts, and chat history will appear here.
             use_container_width=True
         )
     else:
-        dl3.empty()
+        dl4.empty()
 
     if active_note.get('raw_transcript') and active_note.get('refined_transcript'):
-        dl4.download_button(
+        dl5.download_button(
             label="Download Raw Transcript",
             data=active_note['raw_transcript'],
             file_name=f"Raw_Transcript_{active_note.get('file_name', 'note')}.txt",
@@ -932,7 +990,7 @@ Your generated notes, transcripts, and chat history will appear here.
             use_container_width=True
         )
     else:
-        dl4.empty()
+        dl5.empty()
 
     st.feedback("thumbs", key=f"fb_{active_note['id']}")
 
