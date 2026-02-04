@@ -54,6 +54,13 @@ EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
 TONE_OPTIONS = ["Very Positive", "Positive", "Neutral", "Negative", "Very Negative"]
+NUMBER_FOCUS_OPTIONS = ["No Numbers", "Light", "Moderate", "Data-Heavy"]
+NUMBER_FOCUS_INSTRUCTIONS = {
+    "No Numbers": "Do NOT include any specific numbers, percentages, monetary values, or metrics. Describe trends and findings qualitatively using words like 'significant,' 'substantial,' 'modest,' etc.",
+    "Light": "Include only the most critical 2-3 numbers that are essential to the narrative. Describe most findings qualitatively.",
+    "Moderate": "Include key numbers, percentages, and metrics where they support your points. Balance data with narrative flow.",
+    "Data-Heavy": "Include ALL specific numbers, percentages, monetary values, metrics, and data points from the notes. The output should be dense with quantitative evidence supporting every claim.",
+}
 
 MEETING_TYPE_HELP = {
     "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations",
@@ -281,18 +288,20 @@ Convert the detailed meeting notes below into a concise, narrative-style researc
 
 ### STYLE RULES:
 1. **Opening line**: Start with a one-line context header describing what this channel check is about (e.g., "Channel checks on [sector/topic]").
-2. **Introduction**: One sentence describing who you spoke with and what their role/expertise is, without naming them. Use phrasing like "We spoke with a former [Company] employee responsible for [area]..."
-3. **Body**: Write 4-8 flowing paragraphs that capture the key takeaways. Each paragraph should make a clear point. Do NOT use bullet points, Q&A format, or numbered lists. Write in narrative prose.
-4. **Tone**: Your tone must be **{tone}**. This means:
+2. **Introduction**: One sentence describing who you spoke with and what their role/expertise is, without naming them. Use phrasing like "We spoke with a former [Company] employee responsible for [area]..." or "We spoke with [number] experts with experience across [area]..."
+3. **Attribution**: Throughout the note, attribute key claims and findings to the expert(s). Use phrases like "the expert noted," "according to our contact," "the former employee highlighted," "our expert believes," "she/he mentioned," "the expert estimates." This makes it clear the findings are sourced from the conversation, not the analyst's own opinion.
+4. **Body**: Write 4-8 flowing paragraphs that capture the key takeaways. Each paragraph should make a clear point. Do NOT use bullet points, Q&A format, or numbered lists. Write in narrative prose.
+5. **Tone**: Your tone must be **{tone}**. This means:
    - Very Positive: Highlight strengths, competitive advantages, growth potential. Frame challenges as temporary or manageable.
    - Positive: Generally constructive. Acknowledge risks but emphasize opportunities and positive trends.
    - Neutral: Balanced. Present facts and findings objectively without favoring positive or negative interpretation.
    - Negative: Highlight risks, challenges, structural problems. Frame positive developments as insufficient or temporary.
    - Very Negative: Emphasize fundamental weaknesses, unsustainable practices, competitive threats. Frame the situation as deeply problematic.
-5. **Data**: Include specific numbers, percentages, and metrics from the notes where they support your narrative. Do not fabricate data.
-6. **Length**: 300-600 words. Be concise but substantive.
-7. **No attribution**: Do not name the expert. Use "the expert," "our contact," or "the former employee."
-8. **Focus topics**: Focus primarily on the following topics from the notes: {topics}
+6. **Data emphasis**: {number_focus_instruction}
+7. **Length**: 300-600 words. Be concise but substantive.
+8. **No names**: Do not name the expert. Use "the expert," "our contact," or "the former employee."
+9. **Focus topics**: Focus primarily on the following topics from the notes: {topics}
+10. **Focus entities**: Center your analysis around these entities: {entities}. Other entities may be mentioned for context but keep the narrative focused on the selected ones.
 
 ### OUTPUT:
 Return ONLY the final research note. No preamble, no "Here is the note," no commentary.
@@ -1166,7 +1175,7 @@ SOURCE TRANSCRIPT:
 
 def render_otg_notes_tab(state: AppState):
     st.subheader("Convert Notes to Research Style")
-    st.caption("Paste detailed meeting notes to convert them into concise, narrative-style research notes with a chosen tone and topic focus.")
+    st.caption("Paste detailed meeting notes to convert them into concise, narrative-style research notes. Select entities, topics, tone, and data emphasis to control the output.")
 
     # --- OTG State init ---
     if "otg_input" not in st.session_state:
@@ -1177,6 +1186,8 @@ def render_otg_notes_tab(state: AppState):
         st.session_state.otg_output = ""
     if "otg_selected_topics" not in st.session_state:
         st.session_state.otg_selected_topics = []
+    if "otg_selected_entities" not in st.session_state:
+        st.session_state.otg_selected_entities = []
 
     # --- Input: paste notes or load from existing ---
     input_source = pills("Source", ["Paste Notes", "From Saved Note"], index=0, key="otg_source_pills")
@@ -1225,6 +1236,8 @@ def render_otg_notes_tab(state: AppState):
                 extracted = json.loads(raw_json)
                 st.session_state.otg_extracted = extracted
                 st.session_state.otg_selected_topics = extracted.get("topics", [])
+                st.session_state.otg_selected_entities = extracted.get("entities", [])
+                st.session_state.otg_output = ""
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to analyze notes: {e}")
@@ -1233,17 +1246,26 @@ def render_otg_notes_tab(state: AppState):
     if not extracted:
         return
 
-    # --- Display extracted metadata ---
-    col_entities, col_sector = st.columns([3, 1])
-    with col_entities:
-        entities = extracted.get("entities", [])
-        people = extracted.get("people", [])
-        all_names = entities + people
-        if all_names:
-            st.markdown("**Identified Entities:** " + ", ".join(all_names))
-    with col_sector:
-        sector = extracted.get("sector", "Unknown")
-        st.markdown(f"**Sector:** {sector}")
+    # --- Display sector ---
+    sector = extracted.get("sector", "Unknown")
+    st.markdown(f"**Sector:** {sector}")
+
+    st.divider()
+
+    # --- Entity selection ---
+    entities = extracted.get("entities", [])
+    people = extracted.get("people", [])
+    all_entity_names = entities + people
+    if all_entity_names:
+        st.markdown("**Select entities to focus on:**")
+        selected_entities = []
+        entity_cols = st.columns(min(4, len(all_entity_names)))
+        for i, entity in enumerate(all_entity_names):
+            col_idx = i % len(entity_cols)
+            with entity_cols[col_idx]:
+                if st.checkbox(entity, value=entity in st.session_state.otg_selected_entities, key=f"otg_entity_{i}"):
+                    selected_entities.append(entity)
+        st.session_state.otg_selected_entities = selected_entities
 
     st.divider()
 
@@ -1251,18 +1273,22 @@ def render_otg_notes_tab(state: AppState):
     topics = extracted.get("topics", [])
     if topics:
         st.markdown("**Select topics to focus on:**")
-        selected = []
-        cols = st.columns(min(3, len(topics)))
+        selected_topics = []
+        topic_cols = st.columns(min(3, len(topics)))
         for i, topic in enumerate(topics):
-            col_idx = i % len(cols)
-            with cols[col_idx]:
+            col_idx = i % len(topic_cols)
+            with topic_cols[col_idx]:
                 if st.checkbox(topic, value=topic in st.session_state.otg_selected_topics, key=f"otg_topic_{i}"):
-                    selected.append(topic)
-        st.session_state.otg_selected_topics = selected
+                    selected_topics.append(topic)
+        st.session_state.otg_selected_topics = selected_topics
 
-    # --- Tone selection ---
+    # --- Tone and Number Focus ---
     st.divider()
-    tone = pills("Tone", TONE_OPTIONS, index=2, key="otg_tone_pills")
+    tone_col, number_col = st.columns(2)
+    with tone_col:
+        tone = pills("Tone", TONE_OPTIONS, index=2, key="otg_tone_pills")
+    with number_col:
+        number_focus = pills("Data Emphasis", NUMBER_FOCUS_OPTIONS, index=2, key="otg_number_pills")
 
     # --- Generate OTG note ---
     st.divider()
@@ -1271,14 +1297,22 @@ def render_otg_notes_tab(state: AppState):
         st.warning("Select at least one topic to focus on.")
         return
 
+    if not st.session_state.otg_selected_entities and all_entity_names:
+        st.warning("Select at least one entity to focus on.")
+        return
+
     if st.button("Generate Research Note", type="primary", use_container_width=True, key="otg_generate_btn"):
         with st.spinner("Generating research note..."):
             try:
                 otg_model = _get_cached_model(state.notes_model)
                 topics_str = ", ".join(st.session_state.otg_selected_topics)
+                entities_str = ", ".join(st.session_state.otg_selected_entities) if st.session_state.otg_selected_entities else "all entities mentioned"
+                number_instruction = NUMBER_FOCUS_INSTRUCTIONS.get(number_focus, NUMBER_FOCUS_INSTRUCTIONS["Moderate"])
                 prompt = OTG_CONVERT_PROMPT.format(
                     tone=tone,
                     topics=topics_str,
+                    entities=entities_str,
+                    number_focus_instruction=number_instruction,
                     notes=st.session_state.otg_input
                 )
                 response = generate_with_retry(otg_model, prompt)
