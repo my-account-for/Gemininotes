@@ -119,21 +119,9 @@ Structure the main body in Question/Answer format.
 
 EARNINGS_CALL_PROMPT = """### **NOTES STRUCTURE: EARNINGS CALL**
 
-You are analyzing an earnings call transcript. Generate comprehensive, structured notes that capture all financial data, management commentary, and forward-looking guidance.
-
-**(1.) Call Overview:**
-- Company name, quarter/period, date, and key participants (CEO, CFO, etc.).
-- Headline numbers: Revenue, EPS, net income, and any key metrics highlighted by management.
-
-**(2.) Management Commentary:**
-Structure by the topics provided below. For each topic, use **bold headings** and bullet points.
+Generate detailed earnings call notes based on the transcript. Structure your notes under the following topics, using **bold headings** and bullet points for each:
 
 {topic_instructions}
-
-**(3.) Analyst Q&A:**
-For each question-answer exchange:
-- **Analyst name/firm (if stated):** The question in bold.
-- Bullet-point the management response with all specifics preserved.
 
 **PRIORITY #1: CAPTURE ALL FINANCIAL DATA.** Revenue, margins, EPS, guidance ranges, growth rates, basis points, dollar amounts — every number matters.
 **PRIORITY #2: CAPTURE FORWARD GUIDANCE.** Any forward-looking statements, guidance ranges, management expectations, or outlook commentary.
