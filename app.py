@@ -7,6 +7,7 @@ import streamlit as st
 import google.generativeai as genai
 import os
 import io
+import json
 import time
 from datetime import datetime
 import uuid
@@ -51,6 +52,8 @@ AVAILABLE_MODELS = {
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Internal Discussion", "Custom"]
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
+
+TONE_OPTIONS = ["Very Positive", "Positive", "Neutral", "Negative", "Very Negative"]
 
 MEETING_TYPE_HELP = {
     "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations",
@@ -254,6 +257,50 @@ REFINEMENT_INSTRUCTIONS = {
     "Management Meeting": "Pay special attention to names of attendees, action item owners, project names, deadlines, and organizational terminology.",
     "Internal Discussion": "Pay special attention to participant names, project/product names, technical terms, and any referenced documents or systems.",
 }
+
+# --- OTG NOTES PROMPTS ---
+
+OTG_EXTRACT_PROMPT = """Analyze the following meeting notes and extract structured metadata. Return ONLY valid JSON with no other text.
+
+{{
+  "entities": ["list of company names, product names, and proper nouns mentioned"],
+  "people": ["list of people mentioned by name or role"],
+  "sector": "the industry sector these notes relate to (e.g., Quick Commerce, Fintech, SaaS, Healthcare, etc.)",
+  "topics": ["list of 5-12 distinct topics/themes discussed in the notes, each as a short phrase"]
+}}
+
+---
+**NOTES:**
+{notes}
+"""
+
+OTG_CONVERT_PROMPT = """You are an expert equity research analyst writing concise, opinionated channel check notes for institutional investors.
+
+### YOUR TASK:
+Convert the detailed meeting notes below into a concise, narrative-style research note. This is NOT a summary — it is an **opinionated interpretation** of the key findings.
+
+### STYLE RULES:
+1. **Opening line**: Start with a one-line context header describing what this channel check is about (e.g., "Channel checks on [sector/topic]").
+2. **Introduction**: One sentence describing who you spoke with and what their role/expertise is, without naming them. Use phrasing like "We spoke with a former [Company] employee responsible for [area]..."
+3. **Body**: Write 4-8 flowing paragraphs that capture the key takeaways. Each paragraph should make a clear point. Do NOT use bullet points, Q&A format, or numbered lists. Write in narrative prose.
+4. **Tone**: Your tone must be **{tone}**. This means:
+   - Very Positive: Highlight strengths, competitive advantages, growth potential. Frame challenges as temporary or manageable.
+   - Positive: Generally constructive. Acknowledge risks but emphasize opportunities and positive trends.
+   - Neutral: Balanced. Present facts and findings objectively without favoring positive or negative interpretation.
+   - Negative: Highlight risks, challenges, structural problems. Frame positive developments as insufficient or temporary.
+   - Very Negative: Emphasize fundamental weaknesses, unsustainable practices, competitive threats. Frame the situation as deeply problematic.
+5. **Data**: Include specific numbers, percentages, and metrics from the notes where they support your narrative. Do not fabricate data.
+6. **Length**: 300-600 words. Be concise but substantive.
+7. **No attribution**: Do not name the expert. Use "the expert," "our contact," or "the former employee."
+8. **Focus topics**: Focus primarily on the following topics from the notes: {topics}
+
+### OUTPUT:
+Return ONLY the final research note. No preamble, no "Here is the note," no commentary.
+
+---
+**SOURCE NOTES:**
+{notes}
+"""
 
 
 # --- 3. STATE & DATA MODELS ---
@@ -1117,6 +1164,154 @@ SOURCE TRANSCRIPT:
                         st.toast(f"Note '{note['file_name']}' deleted.")
                         st.rerun()
 
+def render_otg_notes_tab(state: AppState):
+    st.subheader("Convert Notes to Research Style")
+    st.caption("Paste detailed meeting notes to convert them into concise, narrative-style research notes with a chosen tone and topic focus.")
+
+    # --- OTG State init ---
+    if "otg_input" not in st.session_state:
+        st.session_state.otg_input = ""
+    if "otg_extracted" not in st.session_state:
+        st.session_state.otg_extracted = None
+    if "otg_output" not in st.session_state:
+        st.session_state.otg_output = ""
+    if "otg_selected_topics" not in st.session_state:
+        st.session_state.otg_selected_topics = []
+
+    # --- Input: paste notes or load from existing ---
+    input_source = pills("Source", ["Paste Notes", "From Saved Note"], index=0, key="otg_source_pills")
+
+    if input_source == "Paste Notes":
+        st.session_state.otg_input = st.text_area(
+            "Paste your detailed notes here:",
+            value=st.session_state.otg_input,
+            height=300,
+            key="otg_paste_input"
+        )
+    else:
+        notes = database.get_all_notes()
+        if not notes:
+            st.info("No saved notes. Generate notes first in the Input & Generate tab.")
+            return
+        note_options = {n['file_name']: n['id'] for n in notes}
+        selected_name = st.selectbox("Select a saved note", list(note_options.keys()), key="otg_note_selector")
+        if selected_name:
+            selected_note = database.get_note_by_id(note_options[selected_name])
+            if selected_note:
+                st.session_state.otg_input = selected_note.get('content', '')
+                with st.expander("Preview loaded notes", expanded=False):
+                    st.markdown(st.session_state.otg_input[:2000] + ("..." if len(st.session_state.otg_input) > 2000 else ""))
+
+    if not st.session_state.otg_input.strip():
+        return
+
+    # --- Step 1: Extract entities, sector, topics ---
+    st.divider()
+
+    if st.button("Analyze Notes", use_container_width=True, key="otg_analyze_btn"):
+        with st.spinner("Extracting entities, sector, and topics..."):
+            try:
+                extract_model = _get_cached_model(state.notes_model)
+                prompt = OTG_EXTRACT_PROMPT.format(notes=st.session_state.otg_input)
+                response = generate_with_retry(extract_model, prompt)
+                raw_json = response.text.strip()
+                # Strip markdown code fences if present
+                if raw_json.startswith("```"):
+                    raw_json = raw_json.split("\n", 1)[1] if "\n" in raw_json else raw_json[3:]
+                    if raw_json.endswith("```"):
+                        raw_json = raw_json[:-3]
+                    raw_json = raw_json.strip()
+
+                extracted = json.loads(raw_json)
+                st.session_state.otg_extracted = extracted
+                st.session_state.otg_selected_topics = extracted.get("topics", [])
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to analyze notes: {e}")
+
+    extracted = st.session_state.otg_extracted
+    if not extracted:
+        return
+
+    # --- Display extracted metadata ---
+    col_entities, col_sector = st.columns([3, 1])
+    with col_entities:
+        entities = extracted.get("entities", [])
+        people = extracted.get("people", [])
+        all_names = entities + people
+        if all_names:
+            st.markdown("**Identified Entities:** " + ", ".join(all_names))
+    with col_sector:
+        sector = extracted.get("sector", "Unknown")
+        st.markdown(f"**Sector:** {sector}")
+
+    st.divider()
+
+    # --- Topic selection ---
+    topics = extracted.get("topics", [])
+    if topics:
+        st.markdown("**Select topics to focus on:**")
+        selected = []
+        cols = st.columns(min(3, len(topics)))
+        for i, topic in enumerate(topics):
+            col_idx = i % len(cols)
+            with cols[col_idx]:
+                if st.checkbox(topic, value=topic in st.session_state.otg_selected_topics, key=f"otg_topic_{i}"):
+                    selected.append(topic)
+        st.session_state.otg_selected_topics = selected
+
+    # --- Tone selection ---
+    st.divider()
+    tone = pills("Tone", TONE_OPTIONS, index=2, key="otg_tone_pills")
+
+    # --- Generate OTG note ---
+    st.divider()
+
+    if not st.session_state.otg_selected_topics:
+        st.warning("Select at least one topic to focus on.")
+        return
+
+    if st.button("Generate Research Note", type="primary", use_container_width=True, key="otg_generate_btn"):
+        with st.spinner("Generating research note..."):
+            try:
+                otg_model = _get_cached_model(state.notes_model)
+                topics_str = ", ".join(st.session_state.otg_selected_topics)
+                prompt = OTG_CONVERT_PROMPT.format(
+                    tone=tone,
+                    topics=topics_str,
+                    notes=st.session_state.otg_input
+                )
+                response = generate_with_retry(otg_model, prompt)
+                st.session_state.otg_output = response.text
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to generate research note: {e}")
+
+    # --- Display output ---
+    if st.session_state.otg_output:
+        st.divider()
+        st.markdown("### Generated Research Note")
+        with st.container(border=True):
+            st.markdown(st.session_state.otg_output)
+
+        out1, out2, out3 = st.columns(3)
+        with out1:
+            copy_to_clipboard_button(st.session_state.otg_output, "Copy Research Note")
+        out2.download_button(
+            label="Download (.txt)",
+            data=st.session_state.otg_output,
+            file_name=f"OTG_Note_{sector.replace(' ', '_')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+        out3.download_button(
+            label="Download (.md)",
+            data=st.session_state.otg_output,
+            file_name=f"OTG_Note_{sector.replace(' ', '_')}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+
 # --- 6. MAIN APPLICATION RUNNER ---
 def run_app():
     st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
@@ -1137,10 +1332,11 @@ def run_app():
             st.session_state.chat_histories = {}
 
 
-        tabs = st.tabs(["Input & Generate", "Output & History"])
+        tabs = st.tabs(["Input & Generate", "Output & History", "OTG Notes"])
 
         with tabs[0]: render_input_and_processing_tab(st.session_state.app_state)
         with tabs[1]: render_output_and_history_tab(st.session_state.app_state)
+        with tabs[2]: render_otg_notes_tab(st.session_state.app_state)
 
     except Exception as e:
         st.error("A critical application error occurred."); st.code(traceback.format_exc())
