@@ -622,13 +622,111 @@ def is_mobile_device() -> bool:
     # We'll use a session state flag that can be set via JS, defaulting to False.
     return st.session_state.get("_is_mobile", False)
 
-def process_and_save_task(state: AppState, status_ui):
+class ProgressTracker:
+    """Manages progress bar and status updates during processing."""
+
+    # Define the processing steps and their approximate weights (totaling 100)
+    STEPS = {
+        "prepare": {"weight": 5, "label": "Preparing Source Content"},
+        "transcribe": {"weight": 15, "label": "Transcribing Audio"},
+        "refine": {"weight": 25, "label": "Refining Transcript"},
+        "generate": {"weight": 40, "label": "Generating Notes"},
+        "proofread": {"weight": 10, "label": "Proofreading Notes"},
+        "save": {"weight": 5, "label": "Saving to Database"},
+    }
+
+    def __init__(self, status_container):
+        self.status = status_container
+        self.progress_bar = st.progress(0)
+        self.status_text = st.empty()
+        self.current_progress = 0
+        self.completed_steps = set()
+
+    def update(self, step: str, sub_progress: float = 0, detail: str = ""):
+        """
+        Update progress bar and status.
+        step: one of the STEPS keys
+        sub_progress: 0-1 progress within the current step
+        detail: additional detail text
+        """
+        # Calculate base progress from completed steps
+        base = sum(self.STEPS[s]["weight"] for s in self.completed_steps)
+
+        # Add current step's partial progress
+        if step in self.STEPS:
+            step_weight = self.STEPS[step]["weight"]
+            current = base + (step_weight * sub_progress)
+        else:
+            current = base
+
+        self.current_progress = min(current / 100, 1.0)
+        self.progress_bar.progress(self.current_progress)
+
+        # Update status text
+        label = self.STEPS.get(step, {}).get("label", step)
+        pct = int(self.current_progress * 100)
+        status_msg = f"**{pct}%** - {label}"
+        if detail:
+            status_msg += f" ({detail})"
+        self.status_text.markdown(status_msg)
+
+    def complete_step(self, step: str):
+        """Mark a step as completed."""
+        self.completed_steps.add(step)
+        self.update(step, 1.0)
+
+    def finish(self):
+        """Mark all progress complete."""
+        self.progress_bar.progress(1.0)
+        self.status_text.markdown("**100%** - Complete!")
+
+def send_browser_notification(title: str, body: str):
+    """Send a browser notification using the Notifications API."""
+    # Escape quotes for JavaScript
+    title_escaped = title.replace("'", "\\'").replace('"', '\\"')
+    body_escaped = body.replace("'", "\\'").replace('"', '\\"')
+
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            // Check if notifications are supported
+            if (!("Notification" in window)) {{
+                console.log("Browser doesn't support notifications");
+                return;
+            }}
+
+            // Request permission if needed
+            if (Notification.permission === "granted") {{
+                new Notification("{title_escaped}", {{
+                    body: "{body_escaped}",
+                    icon: "https://placehold.co/64x64?text=SN",
+                    tag: "synthnotes-complete"
+                }});
+            }} else if (Notification.permission !== "denied") {{
+                Notification.requestPermission().then(function(permission) {{
+                    if (permission === "granted") {{
+                        new Notification("{title_escaped}", {{
+                            body: "{body_escaped}",
+                            icon: "https://placehold.co/64x64?text=SN",
+                            tag: "synthnotes-complete"
+                        }});
+                    }}
+                }});
+            }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker):
     start_time = time.time()
     notes_model = _get_cached_model(state.notes_model)
     refinement_model = _get_cached_model(state.refinement_model)
     transcription_model = _get_cached_model(state.transcription_model)
 
-    status_ui.update(label="Step 1: Preparing Source Content...")
+    progress.update("prepare", 0, "Loading input...")
     raw_transcript, file_name = "", "Pasted Text"
     pdf_bytes_data = None
 
@@ -639,7 +737,7 @@ def process_and_save_task(state: AppState, status_ui):
         pdf_bytes_data = pdf_bytes
 
         if file_type == "audio_file":
-            status_ui.update(label="Step 1.1: Processing Audio...")
+            progress.update("transcribe", 0, "Processing audio file...")
 
             if state.audio_recording:
                 audio_bytes = state.audio_recording.getvalue()
@@ -658,7 +756,7 @@ def process_and_save_task(state: AppState, status_ui):
             try:
                 for i, chunk in enumerate(audio_chunks):
                     try:
-                        status_ui.update(label=f"Step 1.2: Transcribing audio chunk {i+1}/{len(audio_chunks)}...")
+                        progress.update("transcribe", i / len(audio_chunks), f"Chunk {i+1}/{len(audio_chunks)}")
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
                             chunk.export(temp_f.name, format="wav")
                             local_files.append(temp_f.name)
@@ -672,6 +770,7 @@ def process_and_save_task(state: AppState, status_ui):
                         raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
 
                 raw_transcript = "\n\n".join(all_transcripts).strip()
+                progress.complete_step("transcribe")
             finally:
                 for path in local_files: os.remove(path)
                 for cloud_name in cloud_files:
@@ -703,7 +802,8 @@ def process_and_save_task(state: AppState, status_ui):
 
     # --- Step 2: Refinement ---
     if state.refinement_enabled:
-        status_ui.update(label="Step 2: Refining Transcript...")
+        progress.complete_step("prepare")
+        progress.update("refine", 0, "Starting refinement...")
         words = raw_transcript.split()
 
         if len(words) <= CHUNK_WORD_SIZE:
@@ -732,7 +832,7 @@ CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY):
 NEW TRANSCRIPT CHUNK TO REFINE:
 {chunk}""")
 
-            status_ui.update(label=f"Step 2: Refining Transcript ({len(chunks)} chunks in parallel)...")
+            progress.update("refine", 0.1, f"{len(chunks)} chunks in parallel")
 
             # Process chunks in parallel (max 3 concurrent to respect API rate limits)
             all_refined_chunks = [None] * len(chunks)
@@ -749,12 +849,16 @@ NEW TRANSCRIPT CHUNK TO REFINE:
                     all_refined_chunks[idx] = text
                     chunk_tokens[idx] = tokens
                     done_count = sum(1 for c in all_refined_chunks if c is not None)
-                    status_ui.update(label=f"Step 2: Refining Transcript ({done_count}/{len(chunks)} chunks done)...")
+                    progress.update("refine", 0.1 + (0.9 * done_count / len(chunks)), f"{done_count}/{len(chunks)} chunks")
 
             total_tokens += sum(chunk_tokens)
             refined_transcript = "\n\n".join(c for c in all_refined_chunks if c) if any(all_refined_chunks) else ""
 
         final_transcript = refined_transcript
+    else:
+        # Refinement disabled - mark prepare and refine as complete
+        progress.complete_step("prepare")
+        progress.complete_step("refine")
 
     # Checkpoint: save refined transcript
     st.session_state["_checkpoint_refined_transcript"] = refined_transcript
@@ -762,7 +866,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     # --- Step 3: Generate Notes ---
     words = final_transcript.split()
     num_chunks = max(1, (len(words) + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
-    status_ui.update(label=f"Step 3: Generating Notes ({len(words):,} words, {num_chunks} chunk{'s' if num_chunks > 1 else ''})...")
+    progress.update("generate", 0, f"{len(words):,} words, {num_chunks} chunk{'s' if num_chunks > 1 else ''}")
     final_notes_content = ""
 
     if len(words) > CHUNK_WORD_SIZE:
@@ -773,7 +877,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
         prompt_base = _get_base_prompt_for_type(state)
 
         for i, chunk in enumerate(chunks):
-            status_ui.update(label=f"Step 3: Generating Notes (Chunk {i+1}/{len(chunks)})...")
+            progress.update("generate", i / len(chunks), f"Chunk {i+1}/{len(chunks)}")
             prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION
             prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
 
@@ -826,26 +930,28 @@ NEW TRANSCRIPT CHUNK TO REFINE:
         raise ValueError("The model returned empty notes. Please try again or use a different model.")
 
     # --- Step 4: Proofread (only when chunking was used — single-chunk notes have no stitching artifacts) ---
+    progress.complete_step("generate")
     was_chunked = len(final_transcript.split()) > CHUNK_WORD_SIZE
     if was_chunked:
-        status_ui.update(label="Step 4: Proofreading & Cleaning Notes...")
+        progress.update("proofread", 0, "Cleaning stitching artifacts...")
         proofread_prompt = PROOFREAD_PROMPT.format(transcript=final_transcript, notes=final_notes_content)
         response = generate_with_retry(refinement_model, proofread_prompt)
         final_notes_content = response.text
         total_tokens += safe_get_token_count(response)
     else:
-        status_ui.update(label="Step 4: Skipped (single-chunk, no stitching artifacts)")
+        progress.update("proofread", 1.0, "Skipped (single-chunk)")
+    progress.complete_step("proofread")
 
     # --- Step 5: Executive Summary (Expert Meeting Option 3 only) ---
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
-        status_ui.update(label="Step 5: Generating Executive Summary...")
+        progress.update("save", 0, "Generating executive summary...")
         summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
         response = generate_with_retry(notes_model, summary_prompt)
         final_notes_content += f"\n\n---\n\n{response.text}"
         total_tokens += safe_get_token_count(response)
 
     # --- Step 6: Save ---
-    status_ui.update(label="Step 6: Saving to Database...")
+    progress.update("save", 0.5, "Writing to database...")
 
     note_data = {
         'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
@@ -975,6 +1081,28 @@ def render_input_and_processing_tab(state: AppState):
             state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
             state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
             state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
+
+            st.divider()
+            st.markdown("**Notifications**")
+            st.caption("Enable browser notifications to be alerted when processing completes.")
+            if st.button("Enable Notifications", key="enable_notif_btn", use_container_width=True):
+                components.html(
+                    """
+                    <script>
+                    if ("Notification" in window) {
+                        Notification.requestPermission().then(function(permission) {
+                            if (permission === "granted") {
+                                new Notification("Notifications Enabled", {
+                                    body: "You'll be notified when processing completes.",
+                                    icon: "https://placehold.co/64x64?text=SN"
+                                });
+                            }
+                        });
+                    }
+                    </script>
+                    """,
+                    height=0,
+                )
     with col_participants:
         state.speakers = st.text_input("Participants (Optional)", value=state.speakers, placeholder="e.g., John Smith (Analyst), Jane Doe (CEO)")
 
@@ -999,14 +1127,27 @@ def render_input_and_processing_tab(state: AppState):
     # --- Processing ---
     if state.processing:
         with st.status("Processing your request...", expanded=True) as status:
+            progress = ProgressTracker(status)
             try:
-                final_note = process_and_save_task(state, status)
+                final_note = process_and_save_task(state, status, progress)
                 state.active_note_id = final_note['id']
+                progress.finish()
                 status.update(label="Done! Switch to the Output & History tab to view your note.", state="complete")
                 st.toast("Notes generated successfully!", icon="\u2705")
+                # Send browser notification
+                processing_time = final_note.get('processing_time', 0)
+                send_browser_notification(
+                    "SynthNotes AI - Complete",
+                    f"Your notes are ready! Processing took {processing_time:.1f}s"
+                )
             except Exception as e:
                 state.error_message = f"An error occurred during processing:\n{e}"
                 status.update(label=f"Error: {e}", state="error")
+                # Send error notification
+                send_browser_notification(
+                    "SynthNotes AI - Error",
+                    "Processing failed. Check the app for details."
+                )
         state.processing = False
 
     if state.error_message:
