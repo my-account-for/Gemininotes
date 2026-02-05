@@ -62,17 +62,6 @@ NUMBER_FOCUS_INSTRUCTIONS = {
     "Data-Heavy": "Include ALL specific numbers, percentages, monetary values, metrics, and data points from the notes. The output should be dense with quantitative evidence supporting every claim.",
 }
 
-THEME_PRESETS = {
-    "Blue": "#1E88E5",
-    "Red": "#E53935",
-    "Green": "#43A047",
-    "Purple": "#8E24AA",
-    "Orange": "#FB8C00",
-    "Teal": "#00897B",
-    "Pink": "#D81B60",
-    "Indigo": "#3949AB",
-}
-
 MEETING_TYPE_HELP = {
     "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations",
     "Earnings Call": "Financial data, management commentary, guidance, and analyst Q&A",
@@ -1368,43 +1357,6 @@ def render_otg_notes_tab(state: AppState):
         )
 
 # --- 6. MAIN APPLICATION RUNNER ---
-def _apply_theme_color(color: str):
-    """Inject CSS to override Streamlit's primary color at runtime."""
-    st.markdown(f"""
-    <style>
-        :root {{
-            --primary-color: {color} !important;
-        }}
-        .stButton > button[kind="primary"],
-        .stButton > button[data-testid="stBaseButton-primary"] {{
-            background-color: {color} !important;
-            border-color: {color} !important;
-        }}
-        .stButton > button[kind="primary"]:hover,
-        .stButton > button[data-testid="stBaseButton-primary"]:hover {{
-            background-color: {color}DD !important;
-            border-color: {color}DD !important;
-        }}
-        .stProgress .st-bo {{
-            background-color: {color} !important;
-        }}
-        a {{
-            color: {color} !important;
-        }}
-        .stTabs [aria-selected="true"] {{
-            color: {color} !important;
-            border-bottom-color: {color} !important;
-        }}
-        .stCheckbox input:checked + div {{
-            background-color: {color} !important;
-            border-color: {color} !important;
-        }}
-        [data-testid="stSidebarNav"] a[aria-current="page"] {{
-            color: {color} !important;
-        }}
-    </style>
-    """, unsafe_allow_html=True)
-
 def run_app():
     st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
 
@@ -1423,41 +1375,6 @@ def run_app():
         if "chat_histories" not in st.session_state:
             st.session_state.chat_histories = {}
 
-        # --- Theme color picker in sidebar ---
-        with st.sidebar:
-            st.markdown("**Theme Color**")
-            if "theme_color" not in st.session_state:
-                st.session_state.theme_color = "#1E88E5"
-
-            preset_names = list(THEME_PRESETS.keys())
-            current_color = st.session_state.theme_color
-            # Find matching preset or default to first
-            preset_idx = next((i for i, v in enumerate(THEME_PRESETS.values()) if v == current_color), None)
-
-            col_preset, col_custom = st.columns(2)
-            with col_preset:
-                selected_preset = st.selectbox(
-                    "Preset",
-                    preset_names,
-                    index=preset_idx if preset_idx is not None else 0,
-                    key="theme_preset_select",
-                    label_visibility="collapsed"
-                )
-            with col_custom:
-                custom_color = st.color_picker(
-                    "Custom",
-                    value=current_color,
-                    key="theme_color_picker",
-                    label_visibility="collapsed"
-                )
-
-            # If color picker changed from current, use it; otherwise use preset
-            if custom_color != current_color:
-                st.session_state.theme_color = custom_color
-            elif THEME_PRESETS.get(selected_preset) != current_color:
-                st.session_state.theme_color = THEME_PRESETS[selected_preset]
-
-        _apply_theme_color(st.session_state.theme_color)
 
         tabs = st.tabs(["Input & Generate", "Output & History", "OTG Notes"])
 
