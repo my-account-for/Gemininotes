@@ -29,6 +29,46 @@ import streamlit.components.v1 as components
 # --- Local Imports ---
 import database
 
+# --- Mobile Responsive CSS ---
+MOBILE_CSS = """
+<style>
+/* Responsive columns - stack on small screens */
+@media (max-width: 768px) {
+    /* Stack columns vertically on mobile */
+    [data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+    }
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        flex: 1 1 100% !important;
+        min-width: 100% !important;
+        margin-bottom: 0.5rem;
+    }
+    /* Make text areas full width */
+    textarea {
+        min-width: 100% !important;
+    }
+    /* Ensure buttons are touch-friendly */
+    button {
+        min-height: 44px !important;
+        padding: 0.5rem 1rem !important;
+    }
+    /* Make metrics more compact on mobile */
+    [data-testid="stMetricValue"] {
+        font-size: 1.2rem !important;
+    }
+    /* Reduce padding */
+    .main .block-container {
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+}
+/* Ensure copy button is visible */
+iframe {
+    min-height: 45px !important;
+}
+</style>
+"""
+
 # --- 2. CONSTANTS & CONFIG ---
 load_dotenv()
 try:
@@ -568,10 +608,19 @@ def _get_cached_model(model_display_name: str) -> genai.GenerativeModel:
     cache_key = "_model_cache"
     if cache_key not in st.session_state:
         st.session_state[cache_key] = {}
+    # Defensive: handle invalid model names gracefully
+    if model_display_name not in AVAILABLE_MODELS:
+        model_display_name = list(AVAILABLE_MODELS.keys())[0]  # fallback to first model
     model_id = AVAILABLE_MODELS[model_display_name]
     if model_id not in st.session_state[cache_key]:
         st.session_state[cache_key][model_id] = genai.GenerativeModel(model_id)
     return st.session_state[cache_key][model_id]
+
+def is_mobile_device() -> bool:
+    """Check if likely a mobile device based on viewport. Returns False on server-side."""
+    # Note: This is a heuristic. Streamlit doesn't expose device info directly.
+    # We'll use a session state flag that can be set via JS, defaulting to False.
+    return st.session_state.get("_is_mobile", False)
 
 def process_and_save_task(state: AppState, status_ui):
     start_time = time.time()
@@ -597,7 +646,10 @@ def process_and_save_task(state: AppState, status_ui):
             else:
                 audio_bytes = state.uploaded_file.getvalue()
 
-            audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+            try:
+                audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+            except Exception as audio_err:
+                raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
 
             chunk_length_ms = 5 * 60 * 1000
             audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
@@ -633,7 +685,11 @@ def process_and_save_task(state: AppState, status_ui):
     elif state.input_method == "Paste Text":
         raw_transcript = state.text_input
 
-    if not raw_transcript: raise ValueError("Source content is empty.")
+    if not raw_transcript or not raw_transcript.strip():
+        raise ValueError("Source content is empty or contains only whitespace.")
+
+    # Normalize whitespace and remove excessive blank lines
+    raw_transcript = re.sub(r'\n{3,}', '\n\n', raw_transcript.strip())
 
     # Checkpoint: save raw transcript so it survives connection drops
     st.session_state["_checkpoint_raw_transcript"] = raw_transcript
@@ -704,8 +760,9 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     st.session_state["_checkpoint_refined_transcript"] = refined_transcript
 
     # --- Step 3: Generate Notes ---
-    status_ui.update(label="Step 3: Generating Notes...")
     words = final_transcript.split()
+    num_chunks = max(1, (len(words) + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
+    status_ui.update(label=f"Step 3: Generating Notes ({len(words):,} words, {num_chunks} chunk{'s' if num_chunks > 1 else ''})...")
     final_notes_content = ""
 
     if len(words) > CHUNK_WORD_SIZE:
@@ -730,8 +787,8 @@ NEW TRANSCRIPT CHUNK TO REFINE:
             cumulative_notes_for_context = "\n\n".join(all_notes_chunks)
             context_package = _create_enhanced_context_from_notes(cumulative_notes_for_context, chunk_number=i + 1)
 
-        if not all_notes_chunks:
-             final_notes_content = ""
+        if not all_notes_chunks or not any(c.strip() for c in all_notes_chunks):
+            raise ValueError("Failed to generate notes from any chunk. Please try again or use a different model.")
         else:
             final_notes_content = all_notes_chunks[0]
             for i in range(1, len(all_notes_chunks)):
@@ -763,6 +820,10 @@ NEW TRANSCRIPT CHUNK TO REFINE:
         response = generate_with_retry(notes_model, prompt, stream=True)
         final_notes_content, tokens = stream_and_collect(response, stream_placeholder)
         total_tokens += tokens
+
+    # Defensive: ensure we have content
+    if not final_notes_content or not final_notes_content.strip():
+        raise ValueError("The model returned empty notes. Please try again or use a different model.")
 
     # --- Step 4: Proofread (only when chunking was used — single-chunk notes have no stitching artifacts) ---
     was_chunked = len(final_transcript.split()) > CHUNK_WORD_SIZE
@@ -929,7 +990,11 @@ def render_input_and_processing_tab(state: AppState):
     # --- Prompt Preview (collapsed) ---
     with st.expander("Prompt Preview", expanded=False):
         prompt_preview = get_dynamic_prompt(state, "[...transcript content...]")
-        st_ace(value=prompt_preview, language='markdown', theme='github', height=200, readonly=True, key="prompt_preview_ace")
+        try:
+            st_ace(value=prompt_preview, language='markdown', theme='github', height=200, readonly=True, key="prompt_preview_ace")
+        except Exception:
+            # Fallback for environments where st_ace doesn't work
+            st.code(prompt_preview, language="markdown")
 
     # --- Processing ---
     if state.processing:
@@ -992,9 +1057,17 @@ Your generated notes, transcripts, and chat history will appear here.
 
     col_notes, col_transcript = st.columns([3, 2])
     with col_notes:
-        view_mode = pills("View", ["Editor", "Preview"], index=0, key=f"view_mode_{active_note['id']}")
+        view_mode = pills("View", ["Editor", "Preview", "Simple Edit"], index=0, key=f"view_mode_{active_note['id']}")
         if view_mode == "Editor":
-            edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
+            # st_ace may not work well on mobile - wrap in try/except
+            try:
+                edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
+            except Exception:
+                st.warning("Advanced editor unavailable. Using simple editor.")
+                edited_content = st.text_area("Notes", value=active_note['content'], height=600, key=f"output_simple_{active_note['id']}")
+        elif view_mode == "Simple Edit":
+            # Mobile-friendly plain text editor
+            edited_content = st.text_area("Notes", value=active_note['content'], height=600, key=f"output_simple_{active_note['id']}")
         else:
             edited_content = active_note['content']
             with st.container(height=600, border=True):
@@ -1067,6 +1140,7 @@ Your generated notes, transcripts, and chat history will appear here.
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
+            full_response = ""
             try:
                 transcript_context = final_transcript[:30000] if final_transcript else "Not available."
                 system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
@@ -1089,11 +1163,18 @@ SOURCE TRANSCRIPT:
                 response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
 
                 message_placeholder = st.empty()
-                full_response = ""
-                for chunk in response:
-                    if not chunk.parts: continue
-                    full_response += chunk.text
-                    message_placeholder.markdown(full_response + "\u258c")
+                try:
+                    for chunk in response:
+                        if not chunk.parts:
+                            continue
+                        full_response += chunk.text
+                        message_placeholder.markdown(full_response + "\u258c")
+                except Exception as stream_err:
+                    # Handle streaming interruption gracefully
+                    if full_response:
+                        full_response += f"\n\n*(Stream interrupted: {stream_err})*"
+                    else:
+                        raise stream_err
                 message_placeholder.markdown(full_response)
 
             except Exception as e:
@@ -1226,19 +1307,43 @@ def render_otg_notes_tab(state: AppState):
                 prompt = OTG_EXTRACT_PROMPT.format(notes=st.session_state.otg_input)
                 response = generate_with_retry(extract_model, prompt)
                 raw_json = response.text.strip()
-                # Strip markdown code fences if present
+                # Strip markdown code fences if present (handle ```json and ``` variants)
                 if raw_json.startswith("```"):
-                    raw_json = raw_json.split("\n", 1)[1] if "\n" in raw_json else raw_json[3:]
-                    if raw_json.endswith("```"):
-                        raw_json = raw_json[:-3]
-                    raw_json = raw_json.strip()
+                    lines = raw_json.split("\n")
+                    # Remove first line (```json or ```)
+                    lines = lines[1:]
+                    # Remove last line if it's just ```
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    raw_json = "\n".join(lines).strip()
+
+                # Try to find JSON object if there's extra text
+                json_match = re.search(r'\{[\s\S]*\}', raw_json)
+                if json_match:
+                    raw_json = json_match.group(0)
 
                 extracted = json.loads(raw_json)
+
+                # Validate and normalize the extracted data
+                if not isinstance(extracted, dict):
+                    extracted = {}
+                extracted.setdefault("entities", [])
+                extracted.setdefault("people", [])
+                extracted.setdefault("sector", "Unknown")
+                extracted.setdefault("topics", [])
+
+                # Ensure lists contain strings only
+                extracted["entities"] = [str(e) for e in extracted["entities"] if e]
+                extracted["people"] = [str(p) for p in extracted["people"] if p]
+                extracted["topics"] = [str(t) for t in extracted["topics"] if t]
+
                 st.session_state.otg_extracted = extracted
                 st.session_state.otg_selected_topics = extracted.get("topics", [])
                 st.session_state.otg_selected_entities = extracted.get("entities", [])
                 st.session_state.otg_output = ""
                 st.rerun()
+            except json.JSONDecodeError as je:
+                st.error(f"Failed to parse analysis results. The model returned invalid JSON. Try again or use a different model.")
             except Exception as e:
                 st.error(f"Failed to analyze notes: {e}")
 
@@ -1252,34 +1357,35 @@ def render_otg_notes_tab(state: AppState):
 
     st.divider()
 
-    # --- Entity selection ---
+    # --- Entity selection (use stable keys based on entity name hash) ---
     entities = extracted.get("entities", [])
     people = extracted.get("people", [])
-    all_entity_names = entities + people
+    all_entity_names = list(dict.fromkeys(entities + people))  # Remove duplicates while preserving order
     if all_entity_names:
         st.markdown("**Select entities to focus on:**")
-        selected_entities = []
-        entity_cols = st.columns(min(4, len(all_entity_names)))
-        for i, entity in enumerate(all_entity_names):
-            col_idx = i % len(entity_cols)
-            with entity_cols[col_idx]:
-                if st.checkbox(entity, value=entity in st.session_state.otg_selected_entities, key=f"otg_entity_{i}"):
-                    selected_entities.append(entity)
+        # Use multiselect for better mobile experience
+        selected_entities = st.multiselect(
+            "Entities",
+            options=all_entity_names,
+            default=[e for e in st.session_state.otg_selected_entities if e in all_entity_names],
+            key="otg_entity_multiselect",
+            label_visibility="collapsed"
+        )
         st.session_state.otg_selected_entities = selected_entities
 
     st.divider()
 
-    # --- Topic selection ---
+    # --- Topic selection (use multiselect for better mobile UX) ---
     topics = extracted.get("topics", [])
     if topics:
         st.markdown("**Select topics to focus on:**")
-        selected_topics = []
-        topic_cols = st.columns(min(3, len(topics)))
-        for i, topic in enumerate(topics):
-            col_idx = i % len(topic_cols)
-            with topic_cols[col_idx]:
-                if st.checkbox(topic, value=topic in st.session_state.otg_selected_topics, key=f"otg_topic_{i}"):
-                    selected_topics.append(topic)
+        selected_topics = st.multiselect(
+            "Topics",
+            options=topics,
+            default=[t for t in st.session_state.otg_selected_topics if t in topics],
+            key="otg_topic_multiselect",
+            label_visibility="collapsed"
+        )
         st.session_state.otg_selected_topics = selected_topics
 
     # --- Tone and Number Focus ---
@@ -1360,6 +1466,9 @@ def render_otg_notes_tab(state: AppState):
 def run_app():
     st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
 
+    # Inject mobile-responsive CSS
+    st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+
     st.logo("https://placehold.co/64x64?text=SN", link="https://streamlit.io")
 
     st.title("SynthNotes AI")
@@ -1369,18 +1478,34 @@ def run_app():
 
     try:
         database.init_db()
+    except Exception as db_err:
+        st.error(f"Failed to initialize database: {db_err}")
+        st.info("The app may not be able to save notes. Check database permissions.")
+
+    try:
         if "app_state" not in st.session_state:
             st.session_state.app_state = AppState()
             on_sector_change()
         if "chat_histories" not in st.session_state:
             st.session_state.chat_histories = {}
 
-
         tabs = st.tabs(["Input & Generate", "Output & History", "OTG Notes"])
 
-        with tabs[0]: render_input_and_processing_tab(st.session_state.app_state)
-        with tabs[1]: render_output_and_history_tab(st.session_state.app_state)
-        with tabs[2]: render_otg_notes_tab(st.session_state.app_state)
+        with tabs[0]:
+            try:
+                render_input_and_processing_tab(st.session_state.app_state)
+            except Exception as tab_err:
+                st.error(f"Error in Input tab: {tab_err}")
+        with tabs[1]:
+            try:
+                render_output_and_history_tab(st.session_state.app_state)
+            except Exception as tab_err:
+                st.error(f"Error in Output tab: {tab_err}")
+        with tabs[2]:
+            try:
+                render_otg_notes_tab(st.session_state.app_state)
+            except Exception as tab_err:
+                st.error(f"Error in OTG Notes tab: {tab_err}")
 
     except Exception as e:
         st.error("A critical application error occurred."); st.code(traceback.format_exc())
