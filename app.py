@@ -97,6 +97,16 @@ hr {
     }
 }
 
+
+
+/* ── Compact mode support ── */
+[data-ui-density="compact"] .main .block-container {
+    padding-top: 0.8rem !important;
+}
+[data-ui-density="compact"] [data-testid="stVerticalBlock"] > [data-testid="stContainer"] {
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
+}
 /* ── Copy button iframe ── */
 iframe {
     min-height: 45px !important;
@@ -109,10 +119,13 @@ load_dotenv()
 try:
     if "GEMINI_API_KEY" in os.environ and os.environ["GEMINI_API_KEY"]:
         genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+        st.session_state.api_ready = True
     else:
-        st.session_state.config_error = "🔴 GEMINI_API_KEY not found."
+        st.session_state.api_ready = False
+        st.session_state.config_warning = "Gemini API key is missing. You can still browse history and use UI tools, but AI generation is disabled."
 except Exception as e:
-    st.session_state.config_error = f"🔴 Error configuring Google AI Client: {e}"
+    st.session_state.api_ready = False
+    st.session_state.config_warning = f"Google AI client configuration issue: {e}"
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
@@ -149,6 +162,34 @@ MEETING_TYPE_HELP = {
     "Management Meeting": "Decisions, action items, owners, and key discussion points",
     "Internal Discussion": "Perspectives, ideas, reasoning, conclusions, and next steps",
     "Custom": "Provide your own formatting instructions via the context field",
+}
+
+APP_THEMES = {
+    "System": {},
+    "Light": {
+        "bg": "#f7f9fc",
+        "card": "#ffffff",
+        "text": "#1f2937",
+        "muted": "#6b7280",
+        "border": "#e5e7eb",
+        "accent": "#2563eb",
+    },
+    "Dark": {
+        "bg": "#0f172a",
+        "card": "#111827",
+        "text": "#f9fafb",
+        "muted": "#9ca3af",
+        "border": "#1f2937",
+        "accent": "#60a5fa",
+    },
+    "Midnight Blue": {
+        "bg": "#0b1020",
+        "card": "#151d38",
+        "text": "#e2e8f0",
+        "muted": "#93a4c3",
+        "border": "#27314f",
+        "accent": "#22d3ee",
+    },
 }
 
 # --- PROMPT CONSTANTS ---
@@ -651,6 +692,8 @@ def validate_inputs(state: AppState) -> Optional[str]:
 
 def _get_cached_model(model_display_name: str) -> genai.GenerativeModel:
     """Return a cached GenerativeModel instance, creating it only if the model name changed."""
+    if not st.session_state.get("api_ready", False):
+        raise RuntimeError("Gemini API is not configured. Set GEMINI_API_KEY to enable generation features.")
     cache_key = "_model_cache"
     if cache_key not in st.session_state:
         st.session_state[cache_key] = {}
@@ -1678,6 +1721,65 @@ def render_otg_notes_tab(state: AppState):
         )
 
 # --- 6. MAIN APPLICATION RUNNER ---
+def _build_theme_css(theme_name: str) -> str:
+    palette = APP_THEMES.get(theme_name, {})
+    if not palette:
+        return ""
+    return f"""
+    <style>
+    .stApp {{
+        background: {palette['bg']};
+        color: {palette['text']};
+    }}
+    .main .block-container {{
+        max-width: 1220px;
+    }}
+    [data-testid="stVerticalBlock"] > [data-testid="stContainer"],
+    [data-testid="stMetric"],
+    [data-testid="stExpander"] {{
+        background: {palette['card']} !important;
+        border: 1px solid {palette['border']} !important;
+        border-radius: 12px;
+    }}
+    .stMarkdown, p, label {{
+        color: {palette['text']} !important;
+    }}
+    small, .caption {{
+        color: {palette['muted']} !important;
+    }}
+    [data-testid="stButton"] button[kind="primary"] {{
+        background: {palette['accent']} !important;
+        border-color: {palette['accent']} !important;
+    }}
+    </style>
+    """
+
+
+def _render_app_header():
+    title_col, control_col = st.columns([5, 2])
+    with title_col:
+        st.title("SynthNotes AI")
+        st.caption("AI-powered transcript refinement, note generation, and reusable research workflows.")
+    with control_col:
+        selected_theme = st.selectbox(
+            "Appearance",
+            options=list(APP_THEMES.keys()),
+            index=list(APP_THEMES.keys()).index(st.session_state.get("ui_theme", "System")),
+            key="ui_theme",
+            help="Use a stable app-level theme. 'System' follows Streamlit defaults.",
+        )
+        density = st.selectbox(
+            "Layout Density",
+            options=["Comfortable", "Compact"],
+            index=0 if st.session_state.get("ui_density", "Comfortable") == "Comfortable" else 1,
+            key="ui_density",
+        )
+    components.html(f"<script>document.body.setAttribute(\'data-ui-density\', \'{density.lower()}\');</script>", height=0)
+    theme_css = _build_theme_css(selected_theme)
+    if theme_css:
+        st.markdown(theme_css, unsafe_allow_html=True)
+
+
 def run_app():
     st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
 
@@ -1685,48 +1787,24 @@ def run_app():
     st.markdown(APP_CSS, unsafe_allow_html=True)
 
     st.logo("https://placehold.co/64x64?text=SN", link="https://streamlit.io")
+    _render_app_header()
 
-    # --- Header with dark mode toggle ---
-    title_col, theme_col = st.columns([6, 1])
-    with title_col:
-        st.title("SynthNotes AI")
-    with theme_col:
-        # Detect current theme and show toggle
-        current_theme = st.context.theme
-        is_dark = current_theme.get("backgroundColor", "#ffffff").lower() in (
-            "#0e1117", "#111111", "#000000", "#0e1118", "#262730",
-        )
-        dark_mode = st.toggle(
-            "Dark" if is_dark else "Light",
-            value=is_dark,
-            key="dark_mode_toggle",
-            help="Switch between light and dark mode",
-        )
-        if dark_mode != is_dark:
-            # Inject JS to toggle Streamlit's theme via settings menu
-            target_theme = "Dark" if dark_mode else "Light"
-            components.html(
-                f"""
-                <script>
-                // Toggle theme by updating localStorage and reloading
-                const stTheme = '{target_theme.lower()}';
-                try {{
-                    const key = Object.keys(localStorage).find(k => k.includes('stActiveTheme')) || 'stActiveTheme-/-v1';
-                    localStorage.setItem(key, JSON.stringify({{name: stTheme, themeInput: {{}}}}));
-                    window.parent.location.reload();
-                }} catch(e) {{
-                    // Fallback: use URL params
-                    const url = new URL(window.parent.location);
-                    url.searchParams.set('embed_options', 'dark_theme' === stTheme ? 'dark_theme' : 'light_theme');
-                    window.parent.location = url;
-                }}
-                </script>
-                """,
-                height=0,
-            )
+    if st.session_state.get("config_warning"):
+        st.warning(st.session_state.config_warning)
 
-    if "config_error" in st.session_state:
-        st.error(st.session_state.config_error); st.stop()
+    quick_a, quick_b, quick_c = st.columns(3)
+    quick_a.metric("AI Backend", "Ready" if st.session_state.get("api_ready") else "Offline")
+    quick_b.metric("Meeting Formats", len(MEETING_TYPES))
+    quick_c.metric("Available Models", len(AVAILABLE_MODELS))
+
+    with st.expander("Session Utilities", expanded=False):
+        util_a, util_b = st.columns(2)
+        if util_a.button("Clear current generated output", use_container_width=True):
+            st.session_state.app_state = AppState()
+            st.success("Current working state cleared.")
+        if util_b.button("Clear chat history cache", use_container_width=True):
+            st.session_state.chat_histories = {}
+            st.success("Chat history cache cleared.")
 
     try:
         database.init_db()
