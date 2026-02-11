@@ -27,12 +27,52 @@ import streamlit.components.v1 as components
 # --- Local Imports ---
 import database
 
-# --- Mobile Responsive CSS ---
-MOBILE_CSS = """
+# --- App-wide CSS ---
+APP_CSS = """
 <style>
-/* Responsive columns - stack on small screens */
+/* ── Active navigation tab highlight ── */
+[data-testid="stNavigation"] button[aria-selected="true"] {
+    border-bottom: 3px solid var(--primary-color) !important;
+    font-weight: 600 !important;
+    color: var(--primary-color) !important;
+}
+[data-testid="stNavigation"] button {
+    transition: border-bottom 0.15s ease, color 0.15s ease;
+}
+
+/* ── Reduce top padding for a tighter header ── */
+.main .block-container {
+    padding-top: 1.5rem !important;
+}
+
+/* ── Section dividers: lighter, more breathing room ── */
+hr {
+    margin-top: 1.2rem !important;
+    margin-bottom: 1.2rem !important;
+    opacity: 0.3;
+}
+
+/* ── Note cards in history list: subtle hover lift ── */
+[data-testid="stVerticalBlock"] > [data-testid="stContainer"] {
+    transition: box-shadow 0.15s ease;
+}
+[data-testid="stVerticalBlock"] > [data-testid="stContainer"]:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+/* ── Tighten metric blocks ── */
+[data-testid="stMetricValue"] {
+    font-size: 1.3rem !important;
+}
+[data-testid="stMetricLabel"] {
+    font-size: 0.75rem !important;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+}
+
+/* ── Responsive columns - stack on small screens ── */
 @media (max-width: 768px) {
-    /* Stack columns vertically on mobile */
     [data-testid="stHorizontalBlock"] {
         flex-wrap: wrap !important;
     }
@@ -41,26 +81,23 @@ MOBILE_CSS = """
         min-width: 100% !important;
         margin-bottom: 0.5rem;
     }
-    /* Make text areas full width */
     textarea {
         min-width: 100% !important;
     }
-    /* Ensure buttons are touch-friendly */
     button {
         min-height: 44px !important;
         padding: 0.5rem 1rem !important;
     }
-    /* Make metrics more compact on mobile */
     [data-testid="stMetricValue"] {
         font-size: 1.2rem !important;
     }
-    /* Reduce padding */
     .main .block-container {
         padding-left: 1rem !important;
         padding-right: 1rem !important;
     }
 }
-/* Ensure copy button is visible */
+
+/* ── Copy button iframe ── */
 iframe {
     min-height: 45px !important;
 }
@@ -981,9 +1018,14 @@ NEW TRANSCRIPT CHUNK TO REFINE:
 
 # --- 5. UI RENDERING FUNCTIONS ---
 def on_sector_change():
+    """Callback for sector selectbox. Reads new value from the widget key
+    (st.session_state.sector_selector) because on_change fires BEFORE the
+    selectbox return value updates state.selected_sector."""
     state = st.session_state.app_state
+    new_sector = st.session_state.get("sector_selector", state.selected_sector)
+    state.selected_sector = new_sector
     all_sectors = db_get_sectors()
-    state.earnings_call_topics = all_sectors.get(state.selected_sector, "")
+    state.earnings_call_topics = all_sectors.get(new_sector, "")
 
 def render_input_and_processing_tab(state: AppState):
     # --- Source Input ---
@@ -1027,11 +1069,18 @@ def render_input_and_processing_tab(state: AppState):
 
     # --- Configuration ---
     st.subheader("Configuration")
-    state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type), help=MEETING_TYPE_HELP.get(state.selected_meeting_type, ""))
 
+    # Meeting type + style on one row for Expert Meeting
     if state.selected_meeting_type == "Expert Meeting":
-        state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
-    elif state.selected_meeting_type == "Earnings Call":
+        cfg_col1, cfg_col2 = st.columns(2)
+        with cfg_col1:
+            state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type), help=MEETING_TYPE_HELP.get(state.selected_meeting_type, ""))
+        with cfg_col2:
+            state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
+    else:
+        state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type), help=MEETING_TYPE_HELP.get(state.selected_meeting_type, ""))
+
+    if state.selected_meeting_type == "Earnings Call":
         state.earnings_call_mode = st.radio("Mode", EARNINGS_CALL_MODES, horizontal=True, index=EARNINGS_CALL_MODES.index(state.earnings_call_mode))
 
         all_sectors = db_get_sectors()
@@ -1042,34 +1091,38 @@ def render_input_and_processing_tab(state: AppState):
         except ValueError:
             current_sector_index = 0
 
-        state.selected_sector = st.selectbox("Sector (for Topic Templates)", sector_options, index=current_sector_index, on_change=on_sector_change, key="sector_selector")
+        sector_col, manage_col = st.columns([3, 1])
+        with sector_col:
+            state.selected_sector = st.selectbox("Sector (for Topic Templates)", sector_options, index=current_sector_index, on_change=on_sector_change, key="sector_selector")
+        with manage_col:
+            st.markdown("<br>", unsafe_allow_html=True)
+            with st.popover("Manage Sectors", use_container_width=True):
+                st.markdown("**Edit or Delete Sector**")
+                sector_to_edit = st.selectbox("Select Sector", sorted(list(all_sectors.keys())))
+
+                if sector_to_edit:
+                    topics_for_edit = st.text_area("Sector Topics", value=all_sectors[sector_to_edit], key=f"topics_{sector_to_edit}")
+                    col1, col2 = st.columns([1,1])
+                    if col1.button("Save Changes", key=f"save_{sector_to_edit}"):
+                        database.save_sector(sector_to_edit, topics_for_edit); db_get_sectors.clear();
+                        st.toast(f"Sector '{sector_to_edit}' updated!"); st.rerun()
+                    if col2.button("Delete Sector", type="primary", key=f"delete_{sector_to_edit}"):
+                        database.delete_sector(sector_to_edit); db_get_sectors.clear(); state.selected_sector = "Other / Manual Topics"; on_sector_change();
+                        st.toast(f"Sector '{sector_to_edit}' deleted!"); st.rerun()
+
+                st.divider()
+                st.markdown("**Add a New Sector**")
+                new_sector_name = st.text_input("New Sector Name")
+                new_sector_topics = st.text_area("Topics for New Sector", key="new_sector_topics")
+
+                if st.button("Add New Sector"):
+                    if new_sector_name and new_sector_topics:
+                        database.save_sector(new_sector_name, new_sector_topics); db_get_sectors.clear();
+                        st.toast(f"Sector '{new_sector_name}' added!"); st.rerun()
+                    else:
+                        st.warning("Please provide both a name and topics for the new sector.")
+
         state.earnings_call_topics = st.text_area("Topic Instructions", value=state.earnings_call_topics, height=150, placeholder="Select a sector to load a template, or enter topics manually.")
-
-        with st.popover("Manage Sector Templates", use_container_width=True):
-            st.markdown("**Edit or Delete an Existing Sector**")
-            sector_to_edit = st.selectbox("Select Sector to Edit", sorted(list(all_sectors.keys())))
-
-            if sector_to_edit:
-                topics_for_edit = st.text_area("Sector Topics", value=all_sectors[sector_to_edit], key=f"topics_{sector_to_edit}")
-                col1, col2 = st.columns([1,1])
-                if col1.button("Save Changes", key=f"save_{sector_to_edit}"):
-                    database.save_sector(sector_to_edit, topics_for_edit); db_get_sectors.clear();
-                    st.toast(f"Sector '{sector_to_edit}' updated!"); st.rerun()
-                if col2.button("Delete Sector", type="primary", key=f"delete_{sector_to_edit}"):
-                    database.delete_sector(sector_to_edit); db_get_sectors.clear(); state.selected_sector = "Other / Manual Topics"; on_sector_change();
-                    st.toast(f"Sector '{sector_to_edit}' deleted!"); st.rerun()
-
-            st.divider()
-            st.markdown("**Add a New Sector**")
-            new_sector_name = st.text_input("New Sector Name")
-            new_sector_topics = st.text_area("Topics for New Sector", key="new_sector_topics")
-
-            if st.button("Add New Sector"):
-                if new_sector_name and new_sector_topics:
-                    database.save_sector(new_sector_name, new_sector_topics); db_get_sectors.clear();
-                    st.toast(f"Sector '{new_sector_name}' added!"); st.rerun()
-                else:
-                    st.warning("Please provide both a name and topics for the new sector.")
 
         if state.earnings_call_mode == "Enrich Existing Notes":
             state.existing_notes_input = st.text_area("Paste Existing Notes to Enrich:", value=state.existing_notes_input)
@@ -1077,26 +1130,23 @@ def render_input_and_processing_tab(state: AppState):
     elif state.selected_meeting_type == "Custom":
         state.context_input = st.text_area("Custom Instructions", value=state.context_input, height=120, placeholder="Describe how you want the notes structured...")
 
-    # --- Settings row ---
+    # --- Settings & Participants row ---
     col_settings, col_participants = st.columns(2)
     with col_settings:
-        with st.popover("Advanced Settings & Models", use_container_width=True):
-            st.markdown("**Processing**")
-            state.refinement_enabled = st.toggle("Enable Transcript Refinement", value=state.refinement_enabled)
+        with st.popover("Settings & Models", use_container_width=True):
+            state.refinement_enabled = st.toggle("Transcript Refinement", value=state.refinement_enabled)
             if state.selected_meeting_type != "Custom":
                 state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
                 if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
 
             st.divider()
-            st.markdown("**Model Selection**")
             state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
             state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
             state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
             state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
 
             st.divider()
-            st.markdown("**Notifications**")
-            st.caption("Enable browser notifications to be alerted when processing completes.")
+            st.caption("Browser notifications for processing completion.")
             if st.button("Enable Notifications", key="enable_notif_btn", use_container_width=True):
                 components.html(
                     """
@@ -1205,14 +1255,16 @@ Your generated notes, transcripts, and chat history will appear here.
     if not active_note:
         active_note = database.get_note_by_id(notes[0]['id'])
 
-    # --- Note header with metadata ---
-    st.markdown(f"### {active_note['file_name']}")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.markdown(f"**Type**")
-    m1.badge(active_note['meeting_type'])
-    m2.metric("Processing Time", f"{active_note.get('processing_time', 0):.1f}s")
-    m3.metric("Tokens Used", f"{active_note.get('token_usage', 0):,}")
-    m4.caption(f"Generated\n\n{datetime.fromisoformat(active_note['created_at']).strftime('%b %d, %Y %H:%M')}")
+    # --- Note header with inline metadata ---
+    hdr_left, hdr_right = st.columns([3, 2])
+    with hdr_left:
+        st.markdown(f"### {active_note['file_name']}")
+        st.badge(active_note['meeting_type'])
+    with hdr_right:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Time", f"{active_note.get('processing_time', 0):.1f}s")
+        m2.metric("Tokens", f"{active_note.get('token_usage', 0):,}")
+        m3.metric("Date", datetime.fromisoformat(active_note['created_at']).strftime('%b %d'))
 
     # --- Side-by-side Notes & Transcript ---
     final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
@@ -1234,52 +1286,46 @@ Your generated notes, transcripts, and chat history will appear here.
         else:
             st.info("No transcript available.")
 
-    # --- Downloads, Copy & Feedback ---
-    # Use callables for on-demand download generation (avoids pre-computing all formats)
+    # --- Actions bar ---
     note_id = active_note['id']
     fname = active_note.get('file_name', 'note')
     raw_tx = active_note.get('raw_transcript')
 
-    dl1, dl2, dl3, dl4, dl5 = st.columns(5)
-
+    dl1, dl2, dl3, dl4 = st.columns(4)
     with dl1:
         copy_to_clipboard_button(edited_content)
     dl2.download_button(
-        label="Download Notes (.txt)",
+        label="Notes (.txt)",
         data=lambda: edited_content,
         file_name=f"SynthNote_{fname}.txt",
         mime="text/plain",
         use_container_width=True
     )
     dl3.download_button(
-        label="Download Notes (.md)",
+        label="Notes (.md)",
         data=lambda: edited_content,
         file_name=f"SynthNote_{fname}.md",
         mime="text/markdown",
         use_container_width=True
     )
-
     if final_transcript:
         dl4.download_button(
-            label=f"Download {transcript_source} Transcript",
+            label=f"{transcript_source} Transcript",
             data=lambda: final_transcript,
             file_name=f"{transcript_source}_Transcript_{fname}.txt",
             mime="text/plain",
             use_container_width=True
         )
-    else:
-        dl4.empty()
-
-    if raw_tx and active_note.get('refined_transcript'):
-        dl5.download_button(
-            label="Download Raw Transcript",
+    elif raw_tx:
+        dl4.download_button(
+            label="Raw Transcript",
             data=lambda: raw_tx,
             file_name=f"Raw_Transcript_{fname}.txt",
             mime="text/plain",
             use_container_width=True
         )
     else:
-        dl5.empty()
+        dl4.empty()
 
     st.feedback("thumbs", key=f"fb_{active_note['id']}")
 
@@ -1390,17 +1436,18 @@ SOURCE TRANSCRIPT:
             with col1:
                 label = f"**{note['file_name']}**"
                 if is_active:
-                    label += "  \u2190 viewing"
+                    label += " &nbsp; `viewing`"
                 st.markdown(label)
-                st.badge(note['meeting_type'])
-                # Content snippet
                 content_text = note.get('content', '')
                 if content_text:
                     snippet = content_text[:120].replace('\n', ' ').strip()
                     if len(content_text) > 120:
                         snippet += "..."
                     st.caption(snippet)
-                st.caption(datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M'))
+                # Badge + date on one line
+                badge_col, date_col = st.columns([1, 2])
+                badge_col.badge(note['meeting_type'])
+                date_col.caption(datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M'))
             with col2:
                 if st.button("View", key=f"view_{note['id']}", use_container_width=True, disabled=is_active):
                     state.active_note_id = note['id']
@@ -1634,12 +1681,49 @@ def render_otg_notes_tab(state: AppState):
 def run_app():
     st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
 
-    # Inject mobile-responsive CSS
-    st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+    # Inject app-wide CSS (navigation highlights, spacing, responsive)
+    st.markdown(APP_CSS, unsafe_allow_html=True)
 
     st.logo("https://placehold.co/64x64?text=SN", link="https://streamlit.io")
 
-    st.title("SynthNotes AI")
+    # --- Header with dark mode toggle ---
+    title_col, theme_col = st.columns([6, 1])
+    with title_col:
+        st.title("SynthNotes AI")
+    with theme_col:
+        # Detect current theme and show toggle
+        current_theme = st.context.theme
+        is_dark = current_theme.get("backgroundColor", "#ffffff").lower() in (
+            "#0e1117", "#111111", "#000000", "#0e1118", "#262730",
+        )
+        dark_mode = st.toggle(
+            "Dark" if is_dark else "Light",
+            value=is_dark,
+            key="dark_mode_toggle",
+            help="Switch between light and dark mode",
+        )
+        if dark_mode != is_dark:
+            # Inject JS to toggle Streamlit's theme via settings menu
+            target_theme = "Dark" if dark_mode else "Light"
+            components.html(
+                f"""
+                <script>
+                // Toggle theme by updating localStorage and reloading
+                const stTheme = '{target_theme.lower()}';
+                try {{
+                    const key = Object.keys(localStorage).find(k => k.includes('stActiveTheme')) || 'stActiveTheme-/-v1';
+                    localStorage.setItem(key, JSON.stringify({{name: stTheme, themeInput: {{}}}}));
+                    window.parent.location.reload();
+                }} catch(e) {{
+                    // Fallback: use URL params
+                    const url = new URL(window.parent.location);
+                    url.searchParams.set('embed_options', 'dark_theme' === stTheme ? 'dark_theme' : 'light_theme');
+                    window.parent.location = url;
+                }}
+                </script>
+                """,
+                height=0,
+            )
 
     if "config_error" in st.session_state:
         st.error(st.session_state.config_error); st.stop()
