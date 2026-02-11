@@ -18,8 +18,6 @@ from pydub import AudioSegment
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
-from streamlit_pills import pills
-from streamlit_ace import st_ace
 import re
 import tempfile
 import html as html_module
@@ -95,6 +93,12 @@ EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
 TONE_OPTIONS = ["Very Positive", "Positive", "Neutral", "Negative", "Very Negative"]
 NUMBER_FOCUS_OPTIONS = ["No Numbers", "Light", "Moderate", "Data-Heavy"]
+OTG_WORD_COUNT_OPTIONS = {
+    "Short (~150 words)": "Approximately 150 words. Keep it very concise — only the most essential points.",
+    "Medium (~300 words)": "Approximately 300 words. Short and direct but cover all key findings.",
+    "Long (~500 words)": "Approximately 500 words. Cover all findings with enough detail for context.",
+    "Detailed (~750 words)": "Approximately 750 words. Provide thorough coverage with supporting detail and nuance.",
+}
 NUMBER_FOCUS_INSTRUCTIONS = {
     "No Numbers": "Do NOT include any specific numbers, percentages, monetary values, or metrics. Describe trends and findings qualitatively using words like 'significant,' 'substantial,' 'modest,' etc.",
     "Light": "Include only the most critical 2-3 numbers that are essential to the narrative. Describe most findings qualitatively.",
@@ -335,7 +339,7 @@ Convert the detailed meeting notes below into a short, plain-text research note.
 
 5. DATA: {number_focus_instruction}
 
-6. LENGTH: 150-350 words. Short and direct. Do not pad.
+6. LENGTH: {length_instruction}
 
 7. FOCUS ENTITIES: Center the note around: {entities}. Other entities can appear for context.
 
@@ -865,11 +869,14 @@ NEW TRANSCRIPT CHUNK TO REFINE:
 
     # --- Step 3: Generate Notes ---
     words = final_transcript.split()
-    num_chunks = max(1, (len(words) + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
+    # Earnings calls should not be chunked: their topic-based structure causes
+    # repeated sections when the same headings appear across multiple chunks.
+    skip_chunking = state.selected_meeting_type == "Earnings Call"
+    num_chunks = 1 if skip_chunking else max(1, (len(words) + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
     progress.update("generate", 0, f"{len(words):,} words, {num_chunks} chunk{'s' if num_chunks > 1 else ''}")
     final_notes_content = ""
 
-    if len(words) > CHUNK_WORD_SIZE:
+    if not skip_chunking and len(words) > CHUNK_WORD_SIZE:
         chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
 
         all_notes_chunks = []
@@ -931,7 +938,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
 
     # --- Step 4: Proofread (only when chunking was used — single-chunk notes have no stitching artifacts) ---
     progress.complete_step("generate")
-    was_chunked = len(final_transcript.split()) > CHUNK_WORD_SIZE
+    was_chunked = not skip_chunking and len(final_transcript.split()) > CHUNK_WORD_SIZE
     if was_chunked:
         progress.update("proofread", 0, "Cleaning stitching artifacts...")
         proofread_prompt = PROOFREAD_PROMPT.format(transcript=final_transcript, notes=final_notes_content)
@@ -975,7 +982,7 @@ def on_sector_change():
 
 def render_input_and_processing_tab(state: AppState):
     # --- Source Input ---
-    state.input_method = pills("Input Method", ["Paste Text", "Upload / Record"], index=["Paste Text", "Upload / Record"].index(state.input_method))
+    state.input_method = st.pills("Input Method", ["Paste Text", "Upload / Record"], default=state.input_method, key="input_method_pills")
 
     if state.input_method == "Paste Text":
         state.text_input = st.text_area("Paste source transcript here:", value=state.text_input, height=250, key="text_input_main")
@@ -1118,11 +1125,7 @@ def render_input_and_processing_tab(state: AppState):
     # --- Prompt Preview (collapsed) ---
     with st.expander("Prompt Preview", expanded=False):
         prompt_preview = get_dynamic_prompt(state, "[...transcript content...]")
-        try:
-            st_ace(value=prompt_preview, language='markdown', theme='github', height=200, readonly=True, key="prompt_preview_ace")
-        except Exception:
-            # Fallback for environments where st_ace doesn't work
-            st.code(prompt_preview, language="markdown")
+        st.code(prompt_preview, language="markdown", height=200)
 
     # --- Processing ---
     if state.processing:
@@ -1198,17 +1201,9 @@ Your generated notes, transcripts, and chat history will appear here.
 
     col_notes, col_transcript = st.columns([3, 2])
     with col_notes:
-        view_mode = pills("View", ["Editor", "Preview", "Simple Edit"], index=0, key=f"view_mode_{active_note['id']}")
+        view_mode = st.pills("View", ["Editor", "Preview"], default="Editor", key=f"view_mode_{active_note['id']}")
         if view_mode == "Editor":
-            # st_ace may not work well on mobile - wrap in try/except
-            try:
-                edited_content = st_ace(value=active_note['content'], language='markdown', theme='github', height=600, key=f"output_ace_{active_note['id']}")
-            except Exception:
-                st.warning("Advanced editor unavailable. Using simple editor.")
-                edited_content = st.text_area("Notes", value=active_note['content'], height=600, key=f"output_simple_{active_note['id']}")
-        elif view_mode == "Simple Edit":
-            # Mobile-friendly plain text editor
-            edited_content = st.text_area("Notes", value=active_note['content'], height=600, key=f"output_simple_{active_note['id']}")
+            edited_content = st.text_area("Notes", value=active_note['content'], height=600, key=f"output_editor_{active_note['id']}")
         else:
             edited_content = active_note['content']
             with st.container(height=600, border=True):
@@ -1412,7 +1407,7 @@ def render_otg_notes_tab(state: AppState):
         st.session_state.otg_selected_entities = []
 
     # --- Input: paste notes or load from existing ---
-    input_source = pills("Source", ["Paste Notes", "From Saved Note"], index=0, key="otg_source_pills")
+    input_source = st.pills("Source", ["Paste Notes", "From Saved Note"], default="Paste Notes", key="otg_source_pills")
 
     if input_source == "Paste Notes":
         st.session_state.otg_input = st.text_area(
@@ -1529,13 +1524,21 @@ def render_otg_notes_tab(state: AppState):
         )
         st.session_state.otg_selected_topics = selected_topics
 
-    # --- Tone and Number Focus ---
+    # --- Tone, Number Focus, and Length ---
     st.divider()
     tone_col, number_col = st.columns(2)
     with tone_col:
-        tone = pills("Tone", TONE_OPTIONS, index=2, key="otg_tone_pills")
+        tone = st.pills("Tone", TONE_OPTIONS, default="Neutral", key="otg_tone_pills")
     with number_col:
-        number_focus = pills("Data Emphasis", NUMBER_FOCUS_OPTIONS, index=2, key="otg_number_pills")
+        number_focus = st.pills("Data Emphasis", NUMBER_FOCUS_OPTIONS, default="Moderate", key="otg_number_pills")
+
+    word_count_options = list(OTG_WORD_COUNT_OPTIONS.keys())
+    selected_word_count = st.select_slider(
+        "Approximate Output Length",
+        options=word_count_options,
+        value=word_count_options[1],
+        key="otg_word_count_slider",
+    )
 
     # --- Custom instructions ---
     custom_instructions = st.text_area(
@@ -1563,12 +1566,14 @@ def render_otg_notes_tab(state: AppState):
                 topics_str = ", ".join(st.session_state.otg_selected_topics)
                 entities_str = ", ".join(st.session_state.otg_selected_entities) if st.session_state.otg_selected_entities else "all entities mentioned"
                 number_instruction = NUMBER_FOCUS_INSTRUCTIONS.get(number_focus, NUMBER_FOCUS_INSTRUCTIONS["Moderate"])
+                length_instruction = OTG_WORD_COUNT_OPTIONS.get(selected_word_count, OTG_WORD_COUNT_OPTIONS["Medium (~300 words)"])
                 custom_block = f"9. ADDITIONAL INSTRUCTIONS FROM THE ANALYST: {custom_instructions}" if custom_instructions.strip() else ""
                 prompt = OTG_CONVERT_PROMPT.format(
                     tone=tone,
                     topics=topics_str,
                     entities=entities_str,
                     number_focus_instruction=number_instruction,
+                    length_instruction=length_instruction,
                     custom_instructions_block=custom_block,
                     notes=st.session_state.otg_input
                 )
