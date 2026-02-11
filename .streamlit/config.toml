@@ -1,9 +1,16 @@
+[server]
+headless = true
+maxUploadSize = 250
+enableCORS = true
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
 [theme]
-primaryColor = "#007AFF"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F0F2F6"
-textColor = "#0F172A"
-font = "system-ui"
-baseFontWeight = 500
-headingFontWeights = [700, 700, 700, 700, 700]
-codeFontWeight = 400
+base = "dark"
+primaryColor = "#2563eb"
+backgroundColor = "#0f172a"
+secondaryBackgroundColor = "#111827"
+textColor = "#f9fafb"
+font = "sans serif"
