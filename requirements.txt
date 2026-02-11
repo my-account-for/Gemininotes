@@ -3,5 +3,3 @@ streamlit>=1.47.0
 python-dotenv
 pypdf2
 pydub>=0.25.0
-streamlit-pills
-streamlit-ace
