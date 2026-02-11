@@ -441,11 +441,16 @@ def stream_and_collect(response, placeholder=None):
 
 def copy_to_clipboard_button(text: str, button_label: str = "Copy Notes"):
     """Render a button that copies text to the clipboard using the browser Clipboard API."""
+    # Adapt button colors to the current theme (light vs dark mode)
+    theme = st.context.theme
+    bg_color = theme.get("primaryColor", "#FF4B4B")
+    text_color = theme.get("backgroundColor", "#FFFFFF")
+
     escaped = html_module.escape(text).replace("`", "\\`").replace("$", "\\$")
     components.html(
         f"""
         <button onclick="copyText()" style="
-            background-color:#FF4B4B; color:white; border:none; padding:0.4rem 1rem;
+            background-color:{bg_color}; color:{text_color}; border:none; padding:0.4rem 1rem;
             border-radius:0.3rem; cursor:pointer; font-size:0.875rem; width:100%;
         ">{button_label}</button>
         <script>
@@ -1163,6 +1168,20 @@ def render_input_and_processing_tab(state: AppState):
             state.fallback_content = None
             st.rerun()
 
+@st.dialog("Delete Note")
+def _confirm_delete_dialog(note_id: str, note_name: str):
+    st.markdown(f"Are you sure you want to delete **{note_name}**?")
+    st.caption("This action cannot be undone.")
+    c1, c2 = st.columns(2)
+    if c1.button("Cancel", use_container_width=True):
+        st.rerun()
+    if c2.button("Delete", type="primary", use_container_width=True):
+        database.delete_note(note_id)
+        if st.session_state.app_state.active_note_id == note_id:
+            st.session_state.app_state.active_note_id = None
+        st.toast(f"Note '{note_name}' deleted.")
+        st.rerun()
+
 def render_output_and_history_tab(state: AppState):
     notes = database.get_all_notes()
 
@@ -1216,21 +1235,26 @@ Your generated notes, transcripts, and chat history will appear here.
             st.info("No transcript available.")
 
     # --- Downloads, Copy & Feedback ---
+    # Use callables for on-demand download generation (avoids pre-computing all formats)
+    note_id = active_note['id']
+    fname = active_note.get('file_name', 'note')
+    raw_tx = active_note.get('raw_transcript')
+
     dl1, dl2, dl3, dl4, dl5 = st.columns(5)
 
     with dl1:
         copy_to_clipboard_button(edited_content)
     dl2.download_button(
         label="Download Notes (.txt)",
-        data=edited_content,
-        file_name=f"SynthNote_{active_note.get('file_name', 'note')}.txt",
+        data=lambda: edited_content,
+        file_name=f"SynthNote_{fname}.txt",
         mime="text/plain",
         use_container_width=True
     )
     dl3.download_button(
         label="Download Notes (.md)",
-        data=edited_content,
-        file_name=f"SynthNote_{active_note.get('file_name', 'note')}.md",
+        data=lambda: edited_content,
+        file_name=f"SynthNote_{fname}.md",
         mime="text/markdown",
         use_container_width=True
     )
@@ -1238,19 +1262,19 @@ Your generated notes, transcripts, and chat history will appear here.
     if final_transcript:
         dl4.download_button(
             label=f"Download {transcript_source} Transcript",
-            data=final_transcript,
-            file_name=f"{transcript_source}_Transcript_{active_note.get('file_name', 'note')}.txt",
+            data=lambda: final_transcript,
+            file_name=f"{transcript_source}_Transcript_{fname}.txt",
             mime="text/plain",
             use_container_width=True
         )
     else:
         dl4.empty()
 
-    if active_note.get('raw_transcript') and active_note.get('refined_transcript'):
+    if raw_tx and active_note.get('refined_transcript'):
         dl5.download_button(
             label="Download Raw Transcript",
-            data=active_note['raw_transcript'],
-            file_name=f"Raw_Transcript_{active_note.get('file_name', 'note')}.txt",
+            data=lambda: raw_tx,
+            file_name=f"Raw_Transcript_{fname}.txt",
             mime="text/plain",
             use_container_width=True
         )
@@ -1275,7 +1299,7 @@ Your generated notes, transcripts, and chat history will appear here.
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        with st.chat_message("assistant"):
+        with st.chat_message("assistant", avatar=":material/progress_activity:"):
             full_response = ""
             try:
                 transcript_context = final_transcript[:30000] if final_transcript else "Not available."
@@ -1381,14 +1405,8 @@ SOURCE TRANSCRIPT:
                 if st.button("View", key=f"view_{note['id']}", use_container_width=True, disabled=is_active):
                     state.active_note_id = note['id']
                     st.rerun()
-                with st.popover("Delete", use_container_width=True):
-                    st.caption("This action cannot be undone.")
-                    if st.button("Confirm delete", key=f"confirm_del_{note['id']}", type="primary", use_container_width=True):
-                        database.delete_note(note['id'])
-                        if state.active_note_id == note['id']:
-                            state.active_note_id = None
-                        st.toast(f"Note '{note['file_name']}' deleted.")
-                        st.rerun()
+                if st.button("Delete", key=f"del_{note['id']}", use_container_width=True):
+                    _confirm_delete_dialog(note['id'], note['file_name'])
 
 def render_otg_notes_tab(state: AppState):
     st.subheader("Convert Notes to Research Style")
@@ -1499,19 +1517,20 @@ def render_otg_notes_tab(state: AppState):
     all_entity_names = list(dict.fromkeys(entities + people))  # Remove duplicates while preserving order
     if all_entity_names:
         st.markdown("**Select entities to focus on:**")
-        # Use multiselect for better mobile experience
         selected_entities = st.multiselect(
             "Entities",
             options=all_entity_names,
             default=[e for e in st.session_state.otg_selected_entities if e in all_entity_names],
             key="otg_entity_multiselect",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            accept_new_options=True,
+            placeholder="Select or type to add new entities",
         )
         st.session_state.otg_selected_entities = selected_entities
 
     st.divider()
 
-    # --- Topic selection (use multiselect for better mobile UX) ---
+    # --- Topic selection ---
     topics = extracted.get("topics", [])
     if topics:
         st.markdown("**Select topics to focus on:**")
@@ -1520,7 +1539,9 @@ def render_otg_notes_tab(state: AppState):
             options=topics,
             default=[t for t in st.session_state.otg_selected_topics if t in topics],
             key="otg_topic_multiselect",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            accept_new_options=True,
+            placeholder="Select or type to add new topics",
         )
         st.session_state.otg_selected_topics = selected_topics
 
@@ -1590,20 +1611,21 @@ def render_otg_notes_tab(state: AppState):
         with st.container(border=True):
             st.markdown(st.session_state.otg_output)
 
+        otg_sector_slug = sector.replace(' ', '_')
         out1, out2, out3 = st.columns(3)
         with out1:
             copy_to_clipboard_button(st.session_state.otg_output, "Copy Research Note")
         out2.download_button(
             label="Download (.txt)",
-            data=st.session_state.otg_output,
-            file_name=f"OTG_Note_{sector.replace(' ', '_')}.txt",
+            data=lambda: st.session_state.otg_output,
+            file_name=f"OTG_Note_{otg_sector_slug}.txt",
             mime="text/plain",
             use_container_width=True
         )
         out3.download_button(
             label="Download (.md)",
-            data=st.session_state.otg_output,
-            file_name=f"OTG_Note_{sector.replace(' ', '_')}.md",
+            data=lambda: st.session_state.otg_output,
+            file_name=f"OTG_Note_{otg_sector_slug}.md",
             mime="text/markdown",
             use_container_width=True
         )
@@ -1635,23 +1657,33 @@ def run_app():
         if "chat_histories" not in st.session_state:
             st.session_state.chat_histories = {}
 
-        tabs = st.tabs(["Input & Generate", "Output & History", "OTG Notes"])
-
-        with tabs[0]:
+        def _page_input():
             try:
                 render_input_and_processing_tab(st.session_state.app_state)
             except Exception as tab_err:
                 st.error(f"Error in Input tab: {tab_err}")
-        with tabs[1]:
+
+        def _page_output():
             try:
                 render_output_and_history_tab(st.session_state.app_state)
             except Exception as tab_err:
                 st.error(f"Error in Output tab: {tab_err}")
-        with tabs[2]:
+
+        def _page_otg():
             try:
                 render_otg_notes_tab(st.session_state.app_state)
             except Exception as tab_err:
                 st.error(f"Error in OTG Notes tab: {tab_err}")
+
+        nav = st.navigation(
+            [
+                st.Page(_page_input, title="Input & Generate", icon=":material/edit_note:"),
+                st.Page(_page_output, title="Output & History", icon=":material/history:"),
+                st.Page(_page_otg, title="OTG Notes", icon=":material/quick_phrases:"),
+            ],
+            position="top",
+        )
+        nav.run()
 
     except Exception as e:
         st.error("A critical application error occurred."); st.code(traceback.format_exc())
