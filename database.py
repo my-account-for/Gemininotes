@@ -38,6 +38,7 @@ def _populate_default_sectors(conn):
 
 def init_db():
     with sqlite3.connect(DB_FILE, timeout=30.0) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
         cursor = conn.cursor()
         # Note table with pdf_blob support
         cursor.execute("""

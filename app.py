@@ -45,6 +45,14 @@ APP_CSS = """
     padding-top: 1.5rem !important;
 }
 
+/* ── Ultra-wide: cap content width for readability ── */
+@media (min-width: 1800px) {
+    .main .block-container {
+        max-width: 1600px !important;
+        margin: 0 auto !important;
+    }
+}
+
 /* ── Section dividers: lighter, more breathing room ── */
 hr {
     margin-top: 1.2rem !important;
@@ -54,10 +62,11 @@ hr {
 
 /* ── Note cards in history list: subtle hover lift ── */
 [data-testid="stVerticalBlock"] > [data-testid="stContainer"] {
-    transition: box-shadow 0.15s ease;
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
 }
 [data-testid="stVerticalBlock"] > [data-testid="stContainer"]:hover {
-    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    box-shadow: 0 2px 8px rgba(128,128,128,0.15);
+    transform: translateY(-1px);
 }
 
 /* ── Tighten metric blocks ── */
@@ -71,7 +80,31 @@ hr {
     opacity: 0.7;
 }
 
-/* ── Responsive columns - stack on small screens ── */
+/* ── Focus visibility for keyboard navigation (WCAG 2.1 AA) ── */
+button:focus-visible,
+[data-testid="stSelectbox"] select:focus-visible,
+textarea:focus-visible,
+input:focus-visible,
+[role="tab"]:focus-visible {
+    outline: 2px solid var(--primary-color) !important;
+    outline-offset: 2px !important;
+}
+
+/* ── Text overflow: prevent long filenames from breaking layout ── */
+[data-testid="stMarkdownContainer"] p {
+    overflow-wrap: break-word;
+    word-break: break-word;
+}
+
+/* ── Responsive: tablets (stack 4-col action bars into 2x2) ── */
+@media (max-width: 1024px) and (min-width: 769px) {
+    .main .block-container {
+        padding-left: 1.5rem !important;
+        padding-right: 1.5rem !important;
+    }
+}
+
+/* ── Responsive: mobile ── */
 @media (max-width: 768px) {
     [data-testid="stHorizontalBlock"] {
         flex-wrap: wrap !important;
@@ -84,6 +117,7 @@ hr {
     textarea {
         min-width: 100% !important;
     }
+    /* 44px minimum touch target (WCAG 2.5.5) */
     button {
         min-height: 44px !important;
         padding: 0.5rem 1rem !important;
@@ -95,11 +129,36 @@ hr {
         padding-left: 1rem !important;
         padding-right: 1rem !important;
     }
+    /* Stack the note header on mobile */
+    h3 {
+        font-size: 1.1rem !important;
+    }
 }
 
 /* ── Copy button iframe ── */
 iframe {
     min-height: 45px !important;
+}
+
+/* ── Print: hide navigation and interactive elements ── */
+@media print {
+    [data-testid="stNavigation"],
+    [data-testid="stSidebar"],
+    button,
+    iframe,
+    .stProgress {
+        display: none !important;
+    }
+    .main .block-container {
+        padding: 0 !important;
+        max-width: 100% !important;
+    }
+}
+
+/* ── Smooth transitions globally ── */
+* {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 </style>
 """
@@ -477,14 +536,15 @@ def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False):
 def stream_and_collect(response, placeholder=None):
     """Consume a streaming response, optionally displaying progress. Returns (full_text, token_count)."""
     full_text = ""
+    update_counter = 0
     for chunk in response:
         if chunk.parts:
             full_text += chunk.text
-            if placeholder:
+            update_counter += 1
+            # Throttle UI updates to every 5 chunks to reduce flickering
+            if placeholder and update_counter % 5 == 0:
                 word_count = len(full_text.split())
-                lines = full_text.strip().split('\n')
-                preview = '\n'.join(lines[-4:])
-                placeholder.caption(f"Streaming... {word_count:,} words generated\n{preview}")
+                placeholder.caption(f"Streaming... {word_count:,} words generated")
     if placeholder:
         placeholder.empty()
     token_count = safe_get_token_count(response)
@@ -497,21 +557,38 @@ def copy_to_clipboard_button(text: str, button_label: str = "Copy Notes"):
     bg_color = theme.get("primaryColor", "#FF4B4B")
     text_color = theme.get("backgroundColor", "#FFFFFF")
 
-    escaped = html_module.escape(text).replace("`", "\\`").replace("$", "\\$")
+    # Use JSON encoding to safely embed arbitrary text in a JS string literal
+    json_encoded = json.dumps(text)
+    safe_label = html_module.escape(button_label)
     components.html(
         f"""
-        <button onclick="copyText()" style="
-            background-color:{bg_color}; color:{text_color}; border:none; padding:0.4rem 1rem;
-            border-radius:0.3rem; cursor:pointer; font-size:0.875rem; width:100%;
-        ">{button_label}</button>
+        <button onclick="copyText()" aria-label="{safe_label}" role="button" tabindex="0"
+            onkeydown="if(event.key==='Enter'||event.key===' '){{event.preventDefault();copyText();}}"
+            style="
+                background-color:{bg_color}; color:{text_color}; border:none; padding:0.4rem 1rem;
+                border-radius:0.3rem; cursor:pointer; font-size:0.875rem; width:100%;
+                transition: opacity 0.15s ease, box-shadow 0.15s ease;
+            "
+            onmouseover="this.style.opacity='0.85'"
+            onmouseout="this.style.opacity='1'"
+            onfocus="this.style.boxShadow='0 0 0 2px {bg_color}40'"
+            onblur="this.style.boxShadow='none'"
+        >{safe_label}</button>
         <script>
         function copyText() {{
-            const text = `{escaped}`;
-            const decoded = new DOMParser().parseFromString(text, 'text/html').body.textContent;
-            navigator.clipboard.writeText(decoded).then(() => {{
+            const text = {json_encoded};
+            navigator.clipboard.writeText(text).then(() => {{
                 const btn = document.querySelector('button');
                 btn.textContent = 'Copied!';
-                setTimeout(() => btn.textContent = '{button_label}', 2000);
+                btn.setAttribute('aria-label', 'Copied to clipboard');
+                setTimeout(() => {{
+                    btn.textContent = {json.dumps(button_label)};
+                    btn.setAttribute('aria-label', {json.dumps(button_label)});
+                }}, 2000);
+            }}).catch(() => {{
+                const btn = document.querySelector('button');
+                btn.textContent = 'Failed';
+                setTimeout(() => btn.textContent = {json.dumps(button_label)}, 2000);
             }});
         }}
         </script>
@@ -651,13 +728,13 @@ def validate_inputs(state: AppState) -> Optional[str]:
         if not state.uploaded_file and not state.audio_recording:
              return "Please upload a file or record audio."
 
-    if state.uploaded_file:
-        size_mb = state.uploaded_file.size / (1024 * 1024)
-        ext = os.path.splitext(state.uploaded_file.name)[1].lower()
-        if ext == ".pdf" and size_mb > MAX_PDF_MB:
-            return f"PDF is too large ({size_mb:.1f}MB). Limit: {MAX_PDF_MB}MB."
-        elif ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac'] and size_mb > MAX_AUDIO_MB:
-            return f"Audio is too large ({size_mb:.1f}MB). Limit: {MAX_AUDIO_MB}MB."
+        if state.uploaded_file and not state.audio_recording:
+            size_mb = state.uploaded_file.size / (1024 * 1024)
+            ext = os.path.splitext(state.uploaded_file.name)[1].lower()
+            if ext == ".pdf" and size_mb > MAX_PDF_MB:
+                return f"PDF is too large ({size_mb:.1f}MB). Limit: {MAX_PDF_MB}MB."
+            elif ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac'] and size_mb > MAX_AUDIO_MB:
+                return f"Audio is too large ({size_mb:.1f}MB). Limit: {MAX_AUDIO_MB}MB."
 
     if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes" and not state.existing_notes_input:
         return "Please provide existing notes for enrichment mode."
@@ -742,36 +819,20 @@ class ProgressTracker:
 
 def send_browser_notification(title: str, body: str):
     """Send a browser notification using the Notifications API."""
-    # Escape quotes for JavaScript
-    title_escaped = title.replace("'", "\\'").replace('"', '\\"')
-    body_escaped = body.replace("'", "\\'").replace('"', '\\"')
+    safe_title = json.dumps(title)
+    safe_body = json.dumps(body)
 
     components.html(
         f"""
         <script>
         (function() {{
-            // Check if notifications are supported
-            if (!("Notification" in window)) {{
-                console.log("Browser doesn't support notifications");
-                return;
-            }}
-
-            // Request permission if needed
+            if (!("Notification" in window)) return;
+            var opts = {{body: {safe_body}, icon: "https://placehold.co/64x64?text=SN", tag: "synthnotes-complete"}};
             if (Notification.permission === "granted") {{
-                new Notification("{title_escaped}", {{
-                    body: "{body_escaped}",
-                    icon: "https://placehold.co/64x64?text=SN",
-                    tag: "synthnotes-complete"
-                }});
+                new Notification({safe_title}, opts);
             }} else if (Notification.permission !== "denied") {{
                 Notification.requestPermission().then(function(permission) {{
-                    if (permission === "granted") {{
-                        new Notification("{title_escaped}", {{
-                            body: "{body_escaped}",
-                            icon: "https://placehold.co/64x64?text=SN",
-                            tag: "synthnotes-complete"
-                        }});
-                    }}
+                    if (permission === "granted") new Notification({safe_title}, opts);
                 }});
             }}
         }})();
@@ -872,8 +933,7 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
         else:
-            all_words = raw_transcript.split()
-            chunks = [" ".join(all_words[i:i + CHUNK_WORD_SIZE]) for i in range(0, len(all_words), CHUNK_WORD_SIZE)]
+            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
 
             # Pre-build all prompts using raw chunk tails as context (known upfront, enables parallelism)
             prompts = []
@@ -1109,7 +1169,7 @@ def render_input_and_processing_tab(state: AppState):
         with sector_col:
             state.selected_sector = st.selectbox("Sector (for Topic Templates)", sector_options, index=current_sector_index, on_change=on_sector_change, key="sector_selector")
         with manage_col:
-            st.markdown("<br>", unsafe_allow_html=True)
+            st.container(height=28, border=False)  # vertical spacer to align with selectbox
             with st.popover("Manage Sectors", use_container_width=True):
                 st.markdown("**Edit or Delete Sector**")
                 sector_to_edit = st.selectbox("Select Sector", sorted(list(all_sectors.keys())))
@@ -1186,10 +1246,11 @@ def render_input_and_processing_tab(state: AppState):
     st.divider()
     validation_error = validate_inputs(state)
 
+    if validation_error:
+        st.warning(validation_error)
+
     if st.button("Generate Notes", type="primary", use_container_width=True, disabled=bool(validation_error)):
         state.processing = True; state.error_message = None; state.fallback_content = None; st.rerun()
-
-    if validation_error: st.warning(f"Please fix the following: {validation_error}")
 
     # --- Prompt Preview (collapsed) ---
     with st.expander("Prompt Preview", expanded=False):
@@ -1204,10 +1265,14 @@ def render_input_and_processing_tab(state: AppState):
                 final_note = process_and_save_task(state, status, progress)
                 state.active_note_id = final_note['id']
                 progress.finish()
-                status.update(label="Done! Switch to the Output & History tab to view your note.", state="complete")
+                processing_time = final_note.get('processing_time', 0)
+                word_count = len(final_note.get('content', '').split())
+                status.update(
+                    label=f"Done! {word_count:,} words generated in {processing_time:.1f}s. Switch to the **Output & History** tab to view your note.",
+                    state="complete"
+                )
                 st.toast("Notes generated successfully!", icon="\u2705")
                 # Send browser notification
-                processing_time = final_note.get('processing_time', 0)
                 send_browser_notification(
                     "SynthNotes AI - Complete",
                     f"Your notes are ready! Processing took {processing_time:.1f}s"
@@ -1223,27 +1288,31 @@ def render_input_and_processing_tab(state: AppState):
         state.processing = False
 
     if state.error_message:
-        st.error("Last run failed. See details below:")
-        st.code(state.error_message)
+        st.error("Processing failed. See details below.")
+        with st.expander("Error Details", expanded=True):
+            st.code(state.error_message)
+        err_col1, err_col2 = st.columns(2)
         if state.fallback_content:
-            st.download_button("Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt")
-        if st.button("Clear Error"):
+            err_col1.download_button("Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt", use_container_width=True)
+        if err_col2.button("Dismiss Error", use_container_width=True):
             state.error_message = None
             state.fallback_content = None
             st.rerun()
 
 @st.dialog("Delete Note")
 def _confirm_delete_dialog(note_id: str, note_name: str):
-    st.markdown(f"Are you sure you want to delete **{note_name}**?")
+    # Truncate long names in the dialog
+    display_name = note_name if len(note_name) <= 50 else note_name[:47] + "..."
+    st.markdown(f"Are you sure you want to delete **{display_name}**?")
     st.caption("This action cannot be undone.")
     c1, c2 = st.columns(2)
     if c1.button("Cancel", use_container_width=True):
         st.rerun()
-    if c2.button("Delete", type="primary", use_container_width=True):
+    if c2.button("Yes, Delete", use_container_width=True):
         database.delete_note(note_id)
         if st.session_state.app_state.active_note_id == note_id:
             st.session_state.app_state.active_note_id = None
-        st.toast(f"Note '{note_name}' deleted.")
+        st.toast(f"Note '{display_name}' deleted.")
         st.rerun()
 
 def render_output_and_history_tab(state: AppState):
@@ -1272,7 +1341,11 @@ Your generated notes, transcripts, and chat history will appear here.
     # --- Note header with inline metadata ---
     hdr_left, hdr_right = st.columns([3, 2])
     with hdr_left:
-        st.markdown(f"### {active_note['file_name']}")
+        # Truncate very long file names to prevent layout breakage
+        display_name = active_note['file_name']
+        if len(display_name) > 80:
+            display_name = display_name[:77] + "..."
+        st.markdown(f"### {display_name}")
         st.badge(active_note['meeting_type'])
     with hdr_right:
         m1, m2, m3 = st.columns(3)
@@ -1289,10 +1362,15 @@ Your generated notes, transcripts, and chat history will appear here.
         view_mode = st.pills("View", ["Editor", "Preview"], default="Editor", key=f"view_mode_{active_note['id']}")
         if view_mode == "Editor":
             edited_content = st.text_area("Notes", value=active_note['content'], height=600, key=f"output_editor_{active_note['id']}")
+            # Word count feedback for the notes editor
+            note_wc = len(edited_content.split()) if edited_content else 0
+            st.caption(f"{note_wc:,} words")
         else:
             edited_content = active_note['content']
             with st.container(height=600, border=True):
                 st.markdown(edited_content)
+            note_wc = len(edited_content.split()) if edited_content else 0
+            st.caption(f"{note_wc:,} words")
     with col_transcript:
         st.markdown(f"**{transcript_source} Transcript**")
         if final_transcript:
@@ -1310,14 +1388,14 @@ Your generated notes, transcripts, and chat history will appear here.
         copy_to_clipboard_button(edited_content)
     dl2.download_button(
         label="Notes (.txt)",
-        data=lambda: edited_content,
+        data=edited_content,
         file_name=f"SynthNote_{fname}.txt",
         mime="text/plain",
         use_container_width=True
     )
     dl3.download_button(
         label="Notes (.md)",
-        data=lambda: edited_content,
+        data=edited_content,
         file_name=f"SynthNote_{fname}.md",
         mime="text/markdown",
         use_container_width=True
@@ -1325,7 +1403,7 @@ Your generated notes, transcripts, and chat history will appear here.
     if final_transcript:
         dl4.download_button(
             label=f"{transcript_source} Transcript",
-            data=lambda: final_transcript,
+            data=final_transcript,
             file_name=f"{transcript_source}_Transcript_{fname}.txt",
             mime="text/plain",
             use_container_width=True
@@ -1333,7 +1411,7 @@ Your generated notes, transcripts, and chat history will appear here.
     elif raw_tx:
         dl4.download_button(
             label="Raw Transcript",
-            data=lambda: raw_tx,
+            data=raw_tx,
             file_name=f"Raw_Transcript_{fname}.txt",
             mime="text/plain",
             use_container_width=True
@@ -1363,8 +1441,11 @@ Your generated notes, transcripts, and chat history will appear here.
             full_response = ""
             try:
                 transcript_context = final_transcript[:30000] if final_transcript else "Not available."
+                truncation_note = ""
+                if final_transcript and len(final_transcript) > 30000:
+                    truncation_note = f"\n\nNote: The transcript was truncated from {len(final_transcript):,} to 30,000 characters. Some content at the end may be missing from the TRANSCRIPT section. The NOTES section contains the full meeting content."
                 system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
-If the user asks for verbatim quotes or exact wording, refer to the TRANSCRIPT section. For analysis and summary questions, use the NOTES section.
+If the user asks for verbatim quotes or exact wording, refer to the TRANSCRIPT section. For analysis and summary questions, use the NOTES section.{truncation_note}
 
 MEETING NOTES:
 ---
@@ -1430,32 +1511,36 @@ SOURCE TRANSCRIPT:
     # --- Search & Filter ---
     filter_col1, filter_col2 = st.columns([3, 1])
     with filter_col1:
-        search_query = st.text_input("Search notes", placeholder="Filter by file name...", label_visibility="collapsed")
+        search_query = st.text_input("Search notes by file name", placeholder="Search notes...", label_visibility="collapsed")
     with filter_col2:
-        type_filter = st.selectbox("Type", ["All"] + MEETING_TYPES, label_visibility="collapsed")
+        type_filter = st.selectbox("Filter by meeting type", ["All Types"] + MEETING_TYPES, label_visibility="collapsed")
 
     filtered_notes = notes
     if search_query:
         filtered_notes = [n for n in filtered_notes if search_query.lower() in n.get('file_name', '').lower()]
-    if type_filter != "All":
+    if type_filter != "All Types":
         filtered_notes = [n for n in filtered_notes if n.get('meeting_type') == type_filter]
 
     if not filtered_notes:
-        st.caption("No notes match your search.")
+        st.info("No notes match your search. Try a different keyword or clear the filter.")
 
     for note in filtered_notes:
         is_active = note['id'] == state.active_note_id
         with st.container(border=True):
             col1, col2 = st.columns([5, 1])
             with col1:
-                label = f"**{note['file_name']}**"
+                # Truncate long filenames for card display
+                card_name = note['file_name']
+                if len(card_name) > 60:
+                    card_name = card_name[:57] + "..."
+                label = f"**{card_name}**"
                 if is_active:
                     label += " &nbsp; `viewing`"
                 st.markdown(label)
                 content_text = note.get('content', '')
                 if content_text:
-                    snippet = content_text[:120].replace('\n', ' ').strip()
-                    if len(content_text) > 120:
+                    snippet = content_text[:150].replace('\n', ' ').strip()
+                    if len(content_text) > 150:
                         snippet += "..."
                     st.caption(snippet)
                 # Badge + date on one line
@@ -1466,7 +1551,7 @@ SOURCE TRANSCRIPT:
                 if st.button("View", key=f"view_{note['id']}", use_container_width=True, disabled=is_active):
                     state.active_note_id = note['id']
                     st.rerun()
-                if st.button("Delete", key=f"del_{note['id']}", use_container_width=True):
+                if st.button("Delete", key=f"del_{note['id']}", use_container_width=True, type="tertiary"):
                     _confirm_delete_dialog(note['id'], note['file_name'])
 
 def render_otg_notes_tab(state: AppState):
@@ -1500,17 +1585,31 @@ def render_otg_notes_tab(state: AppState):
         if not notes:
             st.info("No saved notes. Generate notes first in the Input & Generate tab.")
             return
-        note_options = {n['file_name']: n['id'] for n in notes}
-        selected_name = st.selectbox("Select a saved note", list(note_options.keys()), key="otg_note_selector")
+        note_labels = []
+        note_id_by_label = {}
+        for n in notes:
+            label = n['file_name']
+            # Disambiguate duplicate filenames by appending the date
+            if label in note_id_by_label:
+                created = datetime.fromisoformat(n['created_at']).strftime('%b %d %H:%M')
+                label = f"{label} ({created})"
+            note_labels.append(label)
+            note_id_by_label[label] = n['id']
+        selected_name = st.selectbox("Select a saved note", note_labels, key="otg_note_selector")
         if selected_name:
-            selected_note = database.get_note_by_id(note_options[selected_name])
+            selected_note = database.get_note_by_id(note_id_by_label[selected_name])
             if selected_note:
                 st.session_state.otg_input = selected_note.get('content', '')
                 with st.expander("Preview loaded notes", expanded=False):
                     st.markdown(st.session_state.otg_input[:2000] + ("..." if len(st.session_state.otg_input) > 2000 else ""))
 
     if not st.session_state.otg_input.strip():
+        st.info("Paste notes above or load a saved note to get started.")
         return
+
+    # Word count for OTG input
+    otg_wc = len(st.session_state.otg_input.split())
+    st.caption(f"{otg_wc:,} words in source notes")
 
     # --- Step 1: Extract entities, sector, topics ---
     st.divider()
@@ -1678,14 +1777,14 @@ def render_otg_notes_tab(state: AppState):
             copy_to_clipboard_button(st.session_state.otg_output, "Copy Research Note")
         out2.download_button(
             label="Download (.txt)",
-            data=lambda: st.session_state.otg_output,
+            data=st.session_state.otg_output,
             file_name=f"OTG_Note_{otg_sector_slug}.txt",
             mime="text/plain",
             use_container_width=True
         )
         out3.download_button(
             label="Download (.md)",
-            data=lambda: st.session_state.otg_output,
+            data=st.session_state.otg_output,
             file_name=f"OTG_Note_{otg_sector_slug}.md",
             mime="text/markdown",
             use_container_width=True
