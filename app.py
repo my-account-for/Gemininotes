@@ -177,6 +177,10 @@ MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
 CHUNK_WORD_SIZE = 4000
 CHUNK_WORD_OVERLAP = 400
+# High output token ceiling for notes generation and proofreading.
+# Without this, Gemini defaults to ~8192 output tokens and silently
+# truncates long, detailed notes — especially on later chunks.
+MAX_OUTPUT_TOKENS = 65536
 
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
@@ -342,11 +346,12 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 {context_package}
 
 ### **CONTINUATION INSTRUCTIONS**
-1.  **PROCESS THE ENTIRE CHUNK:** Your task is to process the **entire** new transcript chunk provided below.
+1.  **PROCESS THE ENTIRE CHUNK:** Your task is to process the **entire** new transcript chunk provided below. Every substantive point, example, data point, and nuanced opinion in this chunk MUST appear in your output.
 2.  **HANDLE OVERLAP:** The beginning of this new chunk overlaps with the end of the previous one. Process it naturally. Your output will be automatically de-duplicated later.
 3.  **MAINTAIN FORMAT:** Continue to use the exact same formatting as established in the base instructions.
 4.  **NO META-COMMENTARY:** NEVER produce statements about the transcript itself, such as "the transcript does not contain an answer," "no relevant information in this section," "the chunk starts mid-conversation," or similar. If a chunk begins mid-answer, capture that content as a continuation of the relevant section. Always extract and document whatever substantive content exists.
 5.  **MID-CHUNK STARTS:** If the chunk starts in the middle of a response, begin your notes by capturing that content under the most relevant heading from context. Do not skip or discard partial content.
+6.  **MAINTAIN OUTPUT VOLUME:** This chunk contains the same amount of content as the first chunk. Your output for this chunk MUST be equally detailed and equally long. Do NOT produce a shorter or more condensed output just because this is a continuation. If the first chunk produced 30 bullet points, this chunk should produce a similar number. Do NOT taper off, summarize, or become briefer.
 
 ---
 {base_instructions}
@@ -518,11 +523,14 @@ def safe_get_token_count(response):
         pass
     return 0
 
-def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False):
+def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False, generation_config=None):
     """Wrapper around generate_content with exponential backoff for transient API failures."""
+    kwargs = {"stream": stream}
+    if generation_config is not None:
+        kwargs["generation_config"] = generation_config
     for attempt in range(max_retries):
         try:
-            return model.generate_content(prompt_or_contents, stream=stream)
+            return model.generate_content(prompt_or_contents, **kwargs)
         except Exception as e:
             error_str = str(e).lower()
             is_transient = any(kw in error_str for kw in [
@@ -1005,7 +1013,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
             prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
 
             stream_placeholder = st.empty()
-            response = generate_with_retry(notes_model, prompt, stream=True)
+            response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
             current_notes_text, tokens = stream_and_collect(response, stream_placeholder)
             total_tokens += tokens
 
@@ -1044,7 +1052,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     else:
         prompt = get_dynamic_prompt(state, final_transcript)
         stream_placeholder = st.empty()
-        response = generate_with_retry(notes_model, prompt, stream=True)
+        response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
         final_notes_content, tokens = stream_and_collect(response, stream_placeholder)
         total_tokens += tokens
 
@@ -1058,7 +1066,9 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     if was_chunked:
         progress.update("proofread", 0, "Cleaning stitching artifacts...")
         proofread_prompt = PROOFREAD_PROMPT.format(transcript=final_transcript, notes=final_notes_content)
-        response = generate_with_retry(refinement_model, proofread_prompt)
+        # Use the SAME model that generated the notes — a weaker model
+        # (refinement_model) will summarize/condense instead of preserving detail.
+        response = generate_with_retry(notes_model, proofread_prompt, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
         final_notes_content = response.text
         total_tokens += safe_get_token_count(response)
     else:
