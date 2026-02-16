@@ -116,8 +116,8 @@ except Exception as e:
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
-CHUNK_WORD_SIZE = 6000
-CHUNK_WORD_OVERLAP = 300
+CHUNK_WORD_SIZE = 4000
+CHUNK_WORD_OVERLAP = 400
 
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
