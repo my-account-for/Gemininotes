@@ -22,6 +22,7 @@ import re
 import tempfile
 import html as html_module
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import copy
 import streamlit.components.v1 as components
 
 # --- Local Imports ---
@@ -188,6 +189,7 @@ AVAILABLE_MODELS = {
     "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite", "Gemini 2.5 Pro": "gemini-2.5-pro","Gemini 3.0 Flash": "gemini-3-flash-preview", "Gemini 3.0 Pro": "gemini-3-pro-preview",
 }
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Internal Discussion", "Custom"]
+MAX_TOPIC_DISCOVERY_FILES = 4  # Number of PDFs to scan for topic discovery
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
@@ -498,6 +500,89 @@ SOURCE NOTES:
 {notes}
 """
 
+
+# --- EARNINGS CALL MULTI-FILE ANALYSIS PROMPTS ---
+
+EC_TOPIC_DISCOVERY_PROMPT = """You are an expert equity research analyst. Analyze the following earnings call transcripts and identify the key topics discussed.
+
+### TASK:
+From the transcripts below, extract a structured topic hierarchy. The topics should reflect the actual business structure and discussion themes of this company/group.
+
+### OUTPUT FORMAT:
+Return ONLY valid JSON with no other text, using this exact structure:
+{{
+  "company_name": "The company or group name",
+  "primary_topics": [
+    {{
+      "name": "Primary Topic Name (e.g., brand name, business segment, division)",
+      "description": "Brief description of what this covers",
+      "sub_topics": [
+        "Sub-topic 1 (e.g., menu innovation, unit economics, store expansion)",
+        "Sub-topic 2",
+        "Sub-topic 3"
+      ]
+    }}
+  ],
+  "cross_cutting_topics": [
+    {{
+      "name": "Cross-cutting Topic Name (e.g., Capital Allocation, Management Changes, Macro Environment)",
+      "description": "Brief description"
+    }}
+  ]
+}}
+
+### GUIDELINES:
+1. **Primary topics** are business segments, brands, divisions, or major product lines (e.g., for Jubilant FoodWorks: "Dominos India", "Popeyes", "Dunkin Donuts", "Hong's Kitchen")
+2. **Sub-topics** under each primary topic are recurring themes like: strategy, menu innovation, store expansion, unit economics, competitive positioning, pricing, customer acquisition, operational efficiency, supply chain, marketing, org structure changes, incentive changes, etc.
+3. **Cross-cutting topics** span the entire company: capital allocation, management commentary, guidance, macro environment, regulatory, ESG, etc.
+4. Be SPECIFIC to this business — don't use generic templates. The topics should reflect what is ACTUALLY discussed in these transcripts.
+5. Include 3-8 primary topics and 3-10 sub-topics per primary topic, based on what the transcripts actually cover.
+
+---
+**TRANSCRIPTS:**
+
+{transcripts}
+"""
+
+EC_MULTI_FILE_NOTES_PROMPT = """### **EARNINGS CALL NOTES — STRUCTURED BY TOPICS**
+
+You are generating detailed earnings call notes from the transcript below. Structure your notes STRICTLY under the provided topic hierarchy.
+
+### TOPIC STRUCTURE TO FOLLOW:
+{topic_structure}
+
+### RULES:
+1. For each topic and sub-topic, extract ALL relevant information from the transcript.
+2. If a topic/sub-topic has no relevant information in this transcript, write "No specific commentary in this quarter." under it — do NOT skip the heading.
+3. Use **bold headings** for primary topics and sub-topics. Use bullet points for details.
+4. **PRIORITY #1: CAPTURE ALL FINANCIAL DATA.** Revenue, margins, EPS, guidance ranges, growth rates, basis points, dollar amounts — every number matters.
+5. **PRIORITY #2: CAPTURE FORWARD GUIDANCE.** Any forward-looking statements, guidance ranges, management expectations, or outlook commentary.
+6. **PRIORITY #3: PRESERVE MANAGEMENT TONE.** Note confidence, caution, hedging language, or changes from prior quarter tone.
+7. **PRIORITY #4: CAPTURE SEGMENT/VERTICAL DETAIL.** Business segment breakdowns, geographic splits, and vertical-specific commentary.
+8. Include the quarter/period identifier at the top of your notes if mentioned in the transcript.
+
+### FORMAT EXAMPLE:
+**[Primary Topic: Brand/Segment Name]**
+
+**[Sub-topic: Strategy]**
+- Bullet point with detail...
+- Another bullet point...
+
+**[Sub-topic: Unit Economics]**
+- Bullet point with detail...
+
+---
+**TRANSCRIPT ({file_label}):**
+{transcript}
+"""
+
+EC_MULTI_FILE_STITCH_HEADER = """# Earnings Call Topic Analysis — {company_name}
+*Generated on {date}*
+*Files analyzed: {file_count}*
+
+---
+
+"""
 
 # --- 3. STATE & DATA MODELS ---
 @dataclass
@@ -1827,6 +1912,466 @@ def render_otg_notes_tab(state: AppState):
             use_container_width=True
         )
 
+# --- EARNINGS CALL MULTI-FILE ANALYSIS ---
+
+def _extract_pdf_texts(uploaded_files: list) -> List[Tuple[str, str]]:
+    """Extract text from multiple uploaded PDF files.
+    Returns list of (filename, text_content) tuples. Skips files with errors.
+    """
+    results = []
+    for f in uploaded_files:
+        name = f.name
+        try:
+            file_bytes_io = io.BytesIO(f.getvalue())
+            reader = PyPDF2.PdfReader(file_bytes_io)
+            if reader.is_encrypted:
+                st.warning(f"Skipping encrypted PDF: {name}")
+                continue
+            content = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
+            if not content or not content.strip():
+                st.warning(f"No text found in: {name}")
+                continue
+            content = re.sub(r'\n{3,}', '\n\n', content.strip())
+            results.append((name, content))
+        except Exception as e:
+            st.warning(f"Error reading {name}: {e}")
+    return results
+
+
+def _discover_topics(file_texts: List[Tuple[str, str]], model_name: str) -> dict:
+    """Send first N transcripts to Gemini for topic discovery. Returns parsed JSON."""
+    discovery_files = file_texts[:MAX_TOPIC_DISCOVERY_FILES]
+
+    # Build combined transcript text with file labels
+    transcript_parts = []
+    for i, (fname, text) in enumerate(discovery_files, 1):
+        # Limit each transcript to ~15k words to avoid context overflow
+        words = text.split()
+        truncated = " ".join(words[:15000])
+        transcript_parts.append(f"--- TRANSCRIPT {i}: {fname} ---\n{truncated}")
+
+    combined = "\n\n".join(transcript_parts)
+    prompt = EC_TOPIC_DISCOVERY_PROMPT.format(transcripts=combined)
+
+    model = _get_cached_model(model_name)
+    response = generate_with_retry(model, prompt, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
+    raw_json = response.text.strip()
+
+    # Strip markdown code fences if present
+    if raw_json.startswith("```"):
+        lines = raw_json.split("\n")
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw_json = "\n".join(lines).strip()
+
+    json_match = re.search(r'\{[\s\S]*\}', raw_json)
+    if json_match:
+        raw_json = json_match.group(0)
+
+    result = json.loads(raw_json)
+    if not isinstance(result, dict):
+        raise ValueError("Topic discovery returned invalid format.")
+
+    result.setdefault("company_name", "Unknown Company")
+    result.setdefault("primary_topics", [])
+    result.setdefault("cross_cutting_topics", [])
+
+    return result
+
+
+def _build_topic_structure_text(selected_topics: dict) -> str:
+    """Convert selected topics dict into a text structure for the notes prompt."""
+    lines = []
+    for primary in selected_topics.get("primary_topics", []):
+        lines.append(f"**{primary['name']}**")
+        if primary.get("description"):
+            lines.append(f"  ({primary['description']})")
+        for sub in primary.get("sub_topics", []):
+            lines.append(f"  - {sub}")
+        lines.append("")
+
+    for cross in selected_topics.get("cross_cutting_topics", []):
+        lines.append(f"**{cross['name']}**")
+        if cross.get("description"):
+            lines.append(f"  ({cross['description']})")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _generate_notes_for_file(file_label: str, transcript: str, topic_structure_text: str,
+                              model_name: str) -> Tuple[str, int]:
+    """Generate earnings call notes for a single file under the given topic structure.
+    Returns (notes_text, token_count).
+    """
+    prompt = EC_MULTI_FILE_NOTES_PROMPT.format(
+        topic_structure=topic_structure_text,
+        file_label=file_label,
+        transcript=transcript
+    )
+    model = _get_cached_model(model_name)
+    response = generate_with_retry(model, prompt, stream=True,
+                                   generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
+    full_text, token_count = stream_and_collect(response)
+    return full_text, token_count
+
+
+def _stitch_multi_file_notes(company_name: str, file_notes: List[Tuple[str, str]]) -> str:
+    """Stitch together notes from multiple files into a single output."""
+    header = EC_MULTI_FILE_STITCH_HEADER.format(
+        company_name=company_name,
+        date=datetime.now().strftime("%B %d, %Y"),
+        file_count=len(file_notes)
+    )
+
+    parts = [header]
+    for i, (fname, notes) in enumerate(file_notes, 1):
+        parts.append(f"## {i}. {fname}\n")
+        parts.append(notes.strip())
+        parts.append("\n\n---\n")
+
+    return "\n".join(parts)
+
+
+def render_ec_analysis_tab(state: AppState):
+    st.subheader("Multi-Transcript Earnings Call Analysis")
+    st.caption(
+        "Upload multiple earnings call PDFs. The system will identify key topics from the first "
+        f"{MAX_TOPIC_DISCOVERY_FILES} transcripts, let you select and customize topics, "
+        "then generate structured notes for every file."
+    )
+
+    # --- Session state initialization ---
+    if "ec_analysis_files" not in st.session_state:
+        st.session_state.ec_analysis_files = None
+    if "ec_analysis_texts" not in st.session_state:
+        st.session_state.ec_analysis_texts = []
+    if "ec_discovered_topics" not in st.session_state:
+        st.session_state.ec_discovered_topics = None
+    if "ec_selected_topics" not in st.session_state:
+        st.session_state.ec_selected_topics = None
+    if "ec_analysis_output" not in st.session_state:
+        st.session_state.ec_analysis_output = ""
+    if "ec_analysis_processing" not in st.session_state:
+        st.session_state.ec_analysis_processing = False
+    if "ec_file_notes" not in st.session_state:
+        st.session_state.ec_file_notes = []
+
+    # --- Step 1: Upload multiple PDFs ---
+    st.markdown("### Step 1: Upload Earnings Call Transcripts")
+    uploaded_files = st.file_uploader(
+        "Upload PDF transcripts",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="ec_multi_pdf_uploader",
+        help="Upload 2 or more earnings call transcript PDFs for the same company."
+    )
+
+    if not uploaded_files or len(uploaded_files) < 2:
+        st.info("Upload at least 2 PDF transcripts to begin. For best topic discovery, upload 4 or more.")
+        # Reset downstream state if files changed
+        if not uploaded_files:
+            st.session_state.ec_analysis_texts = []
+            st.session_state.ec_discovered_topics = None
+            st.session_state.ec_selected_topics = None
+            st.session_state.ec_analysis_output = ""
+            st.session_state.ec_file_notes = []
+        return
+
+    # Show file list
+    file_names = [f.name for f in uploaded_files]
+    st.caption(f"**{len(uploaded_files)}** files uploaded: {', '.join(file_names)}")
+
+    # --- Step 2: Extract text and discover topics ---
+    st.divider()
+    st.markdown("### Step 2: Identify Topics")
+    st.caption(
+        f"Analyzes the first {min(len(uploaded_files), MAX_TOPIC_DISCOVERY_FILES)} transcripts "
+        "to identify primary topics (brands, segments) and sub-topics (strategy, unit economics, etc.)."
+    )
+
+    # Model selection for analysis
+    analysis_model = st.selectbox(
+        "Model for Topic Discovery",
+        list(AVAILABLE_MODELS.keys()),
+        index=list(AVAILABLE_MODELS.keys()).index(state.notes_model),
+        key="ec_analysis_model_select"
+    )
+
+    if st.button("Identify Topics", use_container_width=True, key="ec_discover_btn"):
+        with st.spinner("Extracting text from PDFs and identifying topics..."):
+            try:
+                # Extract texts
+                file_texts = _extract_pdf_texts(uploaded_files)
+                if len(file_texts) < 2:
+                    st.error("Could not extract text from at least 2 PDFs. Check file quality.")
+                    return
+                st.session_state.ec_analysis_texts = file_texts
+
+                # Discover topics
+                discovered = _discover_topics(file_texts, analysis_model)
+                st.session_state.ec_discovered_topics = discovered
+
+                # Initialize selection with all topics selected
+                st.session_state.ec_selected_topics = copy.deepcopy(discovered)
+                st.session_state.ec_analysis_output = ""
+                st.session_state.ec_file_notes = []
+                st.rerun()
+            except json.JSONDecodeError:
+                st.error("Failed to parse topic discovery results. Try again or use a different model.")
+            except Exception as e:
+                st.error(f"Topic discovery failed: {e}")
+
+    # --- Step 3: Display and select topics ---
+    discovered = st.session_state.ec_discovered_topics
+    if not discovered:
+        return
+
+    company_name = discovered.get("company_name", "Unknown Company")
+    st.success(f"Topics identified for **{company_name}**")
+
+    st.divider()
+    st.markdown("### Step 3: Select & Customize Topics")
+    st.caption("Check the topics you want included in the final notes. You can also add custom topics.")
+
+    primary_topics = discovered.get("primary_topics", [])
+    cross_cutting = discovered.get("cross_cutting_topics", [])
+
+    # Build selected topics structure from user interaction
+    selected_primary = []
+    for p_idx, primary in enumerate(primary_topics):
+        p_name = primary.get("name", f"Topic {p_idx+1}")
+        p_desc = primary.get("description", "")
+        sub_topics = primary.get("sub_topics", [])
+
+        # Primary topic toggle
+        p_key = f"ec_primary_{p_idx}"
+        p_enabled = st.checkbox(
+            f"**{p_name}**" + (f" — {p_desc}" if p_desc else ""),
+            value=True,
+            key=p_key
+        )
+
+        if p_enabled:
+            # Sub-topic selection
+            selected_subs = []
+            sub_cols = st.columns(min(len(sub_topics), 4)) if sub_topics else []
+            for s_idx, sub in enumerate(sub_topics):
+                col = sub_cols[s_idx % len(sub_cols)] if sub_cols else st
+                s_key = f"ec_sub_{p_idx}_{s_idx}"
+                if col.checkbox(sub, value=True, key=s_key):
+                    selected_subs.append(sub)
+
+            # Add custom sub-topic
+            custom_sub = st.text_input(
+                "Add custom sub-topic",
+                key=f"ec_custom_sub_{p_idx}",
+                placeholder="e.g., digital transformation, new market entry..."
+            )
+            if custom_sub and custom_sub.strip():
+                for cs in [s.strip() for s in custom_sub.split(",") if s.strip()]:
+                    if cs not in selected_subs:
+                        selected_subs.append(cs)
+
+            if selected_subs:
+                selected_primary.append({
+                    "name": p_name,
+                    "description": p_desc,
+                    "sub_topics": selected_subs
+                })
+
+        st.divider()
+
+    # Cross-cutting topics
+    if cross_cutting:
+        st.markdown("**Cross-Cutting Topics:**")
+        selected_cross = []
+        cross_cols = st.columns(min(len(cross_cutting), 4))
+        for c_idx, cross in enumerate(cross_cutting):
+            c_name = cross.get("name", f"Cross-topic {c_idx+1}")
+            c_desc = cross.get("description", "")
+            col = cross_cols[c_idx % len(cross_cols)]
+            c_key = f"ec_cross_{c_idx}"
+            if col.checkbox(c_name + (f" — {c_desc}" if c_desc else ""), value=True, key=c_key):
+                selected_cross.append(cross)
+        st.divider()
+    else:
+        selected_cross = []
+
+    # Add custom primary topic
+    with st.expander("Add Custom Primary Topic", expanded=False):
+        custom_p_name = st.text_input("Primary Topic Name", key="ec_custom_primary_name",
+                                       placeholder="e.g., New Business Segment")
+        custom_p_desc = st.text_input("Description (optional)", key="ec_custom_primary_desc")
+        custom_p_subs = st.text_input("Sub-topics (comma-separated)", key="ec_custom_primary_subs",
+                                       placeholder="e.g., strategy, revenue, expansion")
+        if custom_p_name and custom_p_name.strip():
+            subs = [s.strip() for s in custom_p_subs.split(",") if s.strip()] if custom_p_subs else []
+            selected_primary.append({
+                "name": custom_p_name.strip(),
+                "description": custom_p_desc.strip() if custom_p_desc else "",
+                "sub_topics": subs
+            })
+
+    # Store final selection
+    final_selection = {
+        "company_name": company_name,
+        "primary_topics": selected_primary,
+        "cross_cutting_topics": selected_cross
+    }
+    st.session_state.ec_selected_topics = final_selection
+
+    # Preview selected structure
+    with st.expander("Preview Selected Topic Structure", expanded=False):
+        structure_text = _build_topic_structure_text(final_selection)
+        st.code(structure_text, language="markdown")
+
+    if not selected_primary and not selected_cross:
+        st.warning("Select at least one topic to generate notes.")
+        return
+
+    # --- Step 4: Generate notes for all files ---
+    st.divider()
+    st.markdown("### Step 4: Generate Notes")
+
+    file_texts = st.session_state.ec_analysis_texts
+    if not file_texts:
+        st.warning("File texts not available. Please re-run topic identification.")
+        return
+
+    st.caption(f"Will generate structured notes for **{len(file_texts)}** transcripts under the selected topics.")
+
+    # Model selection for note generation
+    notes_model = st.selectbox(
+        "Model for Notes Generation",
+        list(AVAILABLE_MODELS.keys()),
+        index=list(AVAILABLE_MODELS.keys()).index(state.notes_model),
+        key="ec_notes_model_select"
+    )
+
+    if st.button("Generate All Notes", type="primary", use_container_width=True, key="ec_generate_all_btn"):
+        st.session_state.ec_analysis_processing = True
+        st.rerun()
+
+    if st.session_state.ec_analysis_processing:
+        topic_structure_text = _build_topic_structure_text(final_selection)
+        total_tokens = 0
+        all_file_notes = []
+        start_time = time.time()
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        try:
+            for i, (fname, text) in enumerate(file_texts):
+                pct = i / len(file_texts)
+                progress_bar.progress(pct)
+                status_text.markdown(f"**{int(pct*100)}%** — Processing **{fname}** ({i+1}/{len(file_texts)})")
+
+                notes_text, tokens = _generate_notes_for_file(fname, text, topic_structure_text, notes_model)
+                total_tokens += tokens
+                all_file_notes.append((fname, notes_text))
+
+            progress_bar.progress(1.0)
+            status_text.markdown("**100%** — Stitching notes together...")
+
+            # Stitch
+            stitched = _stitch_multi_file_notes(company_name, all_file_notes)
+
+            st.session_state.ec_analysis_output = stitched
+            st.session_state.ec_file_notes = all_file_notes
+
+            elapsed = time.time() - start_time
+            status_text.markdown(
+                f"**100%** — Done! {len(file_texts)} files processed, "
+                f"{total_tokens:,} tokens used, {elapsed:.1f}s elapsed."
+            )
+            st.toast("Earnings call analysis complete!", icon="\u2705")
+
+            # Browser notification
+            send_browser_notification(
+                "SynthNotes AI - EC Analysis Complete",
+                f"{len(file_texts)} transcripts analyzed in {elapsed:.1f}s"
+            )
+
+        except Exception as e:
+            status_text.markdown(f"**Error:** {e}")
+            st.error(f"Notes generation failed: {e}")
+        finally:
+            st.session_state.ec_analysis_processing = False
+
+    # --- Step 5: Display output ---
+    if st.session_state.ec_analysis_output:
+        st.divider()
+        st.markdown("### Output")
+
+        # View mode
+        view_mode = st.pills("View", ["Combined", "Per-File"], default="Combined", key="ec_view_mode")
+
+        if view_mode == "Combined":
+            with st.container(height=600, border=True):
+                st.markdown(st.session_state.ec_analysis_output)
+            note_wc = len(st.session_state.ec_analysis_output.split())
+            st.caption(f"{note_wc:,} words")
+        else:
+            # Per-file tabs
+            file_notes = st.session_state.ec_file_notes
+            if file_notes:
+                tab_names = [fname for fname, _ in file_notes]
+                tabs = st.tabs(tab_names)
+                for tab, (fname, notes) in zip(tabs, file_notes):
+                    with tab:
+                        with st.container(height=500, border=True):
+                            st.markdown(notes)
+                        wc = len(notes.split())
+                        st.caption(f"{wc:,} words")
+
+        # Actions bar
+        dl1, dl2, dl3 = st.columns(3)
+        with dl1:
+            copy_to_clipboard_button(st.session_state.ec_analysis_output, "Copy All Notes")
+        dl2.download_button(
+            label="Download (.txt)",
+            data=st.session_state.ec_analysis_output,
+            file_name=f"EC_Analysis_{company_name.replace(' ', '_')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+        dl3.download_button(
+            label="Download (.md)",
+            data=st.session_state.ec_analysis_output,
+            file_name=f"EC_Analysis_{company_name.replace(' ', '_')}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+
+        # Save to database option
+        st.divider()
+        if st.button("Save to Notes History", use_container_width=True, key="ec_save_btn"):
+            try:
+                note_data = {
+                    'id': str(uuid.uuid4()),
+                    'created_at': datetime.now().isoformat(),
+                    'meeting_type': 'Earnings Call',
+                    'file_name': f"EC Analysis — {company_name}",
+                    'content': st.session_state.ec_analysis_output,
+                    'raw_transcript': "\n\n---\n\n".join(
+                        f"--- {fname} ---\n{text[:5000]}..." if len(text) > 5000 else f"--- {fname} ---\n{text}"
+                        for fname, text in st.session_state.ec_analysis_texts
+                    ),
+                    'refined_transcript': None,
+                    'token_usage': 0,
+                    'processing_time': 0,
+                    'pdf_blob': None
+                }
+                database.save_note(note_data)
+                st.toast("Saved to Notes History!", icon="\u2705")
+                st.session_state.app_state.active_note_id = note_data['id']
+            except Exception as e:
+                st.error(f"Failed to save: {e}")
+
+
 # --- 6. MAIN APPLICATION RUNNER ---
 def run_app():
     st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
@@ -1909,10 +2454,17 @@ def run_app():
             except Exception as tab_err:
                 st.error(f"Error in OTG Notes tab: {tab_err}")
 
+        def _page_ec_analysis():
+            try:
+                render_ec_analysis_tab(st.session_state.app_state)
+            except Exception as tab_err:
+                st.error(f"Error in EC Analysis tab: {tab_err}")
+
         nav = st.navigation(
             [
                 st.Page(_page_input, title="Input & Generate", icon=":material/edit_note:"),
                 st.Page(_page_output, title="Output & History", icon=":material/history:"),
+                st.Page(_page_ec_analysis, title="EC Analysis", icon=":material/analytics:"),
                 st.Page(_page_otg, title="OTG Notes", icon=":material/quick_phrases:"),
             ],
             position="top",
