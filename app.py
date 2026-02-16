@@ -153,11 +153,14 @@ MEETING_TYPE_HELP = {
 
 # --- PROMPT CONSTANTS ---
 
-EXPERT_MEETING_DETAILED_PROMPT = """### **NOTES STRUCTURE**
+EXPERT_MEETING_DETAILED_PROMPT = """### **PRIMARY DIRECTIVE: MAXIMUM DETAIL & STRICT COMPLETENESS**
+Your goal is to produce the most thorough, granular notes possible. **Nothing substantive should be omitted.** Every factual claim, example, explanation, aside, and data point in the transcript must appear in your notes. When in doubt, INCLUDE it. Err heavily on the side of over-inclusion. Longer, more detailed notes are always preferred over concise ones.
+
+### **NOTES STRUCTURE**
 
 **(1.) Opening overview or Expert background (Conditional):**
 - If the transcript chunk begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
-- **DO:** Capture ALL details (names, dates, numbers, titles). Use simple, direct language.
+- **DO:** Capture ALL details (names, dates, numbers, titles, affiliations, years of experience, roles). Use simple, direct language.
 - **DO NOT:** Summarize or include introductions about consulting firms.
 - If no intro exists, OMIT this section entirely.
 
@@ -166,11 +169,21 @@ Structure the main body STRICTLY in Question/Answer format.
 
 **(2.A) Questions:**
 -   Extract the clear, primary question and format it in **bold**.
+-   If the questioner provides context, framing, or a multi-part question, capture the full scope — do not reduce a multi-part question to a single line.
 
 **(2.B) Answers:**
 -   Use bullet points (`-`) directly below the question.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
--   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), etc."""
+-   Use **multiple bullet points** per answer — do NOT collapse a detailed response into a single bullet.
+-   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), time periods, market sizes, growth rates, company names, product names, geographies, and any other concrete details.
+-   **PRIORITY #2: CAPTURE ALL NUANCE & REASONING.** Do not reduce complex answers to surface-level summaries. You must retain:
+    -   **Sentiment & Tone:** Note if the expert is confident, uncertain, speculative, cautious, or enthusiastic (e.g., "The expert was highly confident that...," "He cautioned that...").
+    -   **Qualifiers & Conditions:** Preserve words that change meaning (e.g., "usually," "in most cases," "except in," "only when," "roughly," "approximately").
+    -   **Examples & Analogies:** If the expert uses a specific example, anecdote, case study, or analogy to illustrate a point, capture it in full — these are often the most valuable parts.
+    -   **Cause & Effect:** Retain reasoning chains (e.g., "...because of regulatory changes," "...which led to a 15% decline in...").
+    -   **Comparisons & Contrasts:** If the expert compares companies, products, approaches, or time periods, capture both sides of the comparison.
+    -   **Tangential but relevant points:** If the expert volunteers additional context, background, or related information beyond the direct question, include it — do NOT discard it as off-topic.
+-   **PRIORITY #3: PRESERVE MULTI-STEP EXPLANATIONS.** If an answer involves a sequence of steps, a timeline, or a logical chain, preserve the full sequence rather than summarizing the conclusion only."""
 
 EXPERT_MEETING_CONCISE_PROMPT = """### **PRIMARY DIRECTIVE: EFFICIENT & NUANCED**
 Your goal is to be **efficient**, not just brief. Efficiency means removing conversational filler ("um," "you know," repetition) but **preserving all substantive information**. Your output should be concise yet information-dense.
@@ -295,7 +308,7 @@ PROOFREAD_PROMPT = """You are an expert proofreader for meeting notes. You have 
 
 4.  **Clean up stitching seams**: Fix any formatting inconsistencies, duplicated content, or awkward transitions that may have resulted from stitching multiple chunks together.
 
-5.  **Preserve all correct content**: Do NOT summarize, shorten, or remove any existing correct content. Your role is to fix and add, never to reduce. The final output must be at least as detailed as the input notes.
+5.  **Preserve all correct content**: Do NOT summarize, shorten, condense, or remove any existing correct content. Your role is to fix and add, never to reduce. The final output must be at least as detailed as the input notes. Every bullet point, example, data point, and nuanced explanation from the input notes must appear in your output — do not merge multiple bullets into one or drop supporting details.
 
 ### OUTPUT:
 Return ONLY the complete, corrected notes. Do not include any commentary about your changes or a preamble.
