@@ -963,8 +963,10 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
         progress.update("refine", 0, "Starting refinement...")
         words = raw_transcript.split()
 
+        lang_instruction = "IMPORTANT: Your entire output MUST be in English. If the transcript contains Hindi, Hinglish, or any other non-English language, translate all content into clear, natural English while preserving the original meaning, nuance, and speaker intent."
+
         if len(words) <= CHUNK_WORD_SIZE:
-            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n\nTRANSCRIPT:\n{raw_transcript}"
+            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT:\n{raw_transcript}"
             response = generate_with_retry(refinement_model, refine_prompt)
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
@@ -975,12 +977,13 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
             prompts = []
             for i, chunk in enumerate(chunks):
                 if i == 0:
-                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}")
+                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}")
                 else:
                     prev_chunk_words = chunks[i - 1].split()
                     context = " ".join(prev_chunk_words[-CHUNK_WORD_OVERLAP:])
                     prompts.append(f"""You are continuing to refine a long transcript. Below is the tail end of the previous section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition.
 {speaker_info} {refinement_extra}
+{lang_instruction}
 ---
 CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY):
 ...{context}
