@@ -177,6 +177,10 @@ MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
 CHUNK_WORD_SIZE = 4000
 CHUNK_WORD_OVERLAP = 400
+# High output token ceiling for notes generation.
+# Without this, Gemini defaults to ~8192 output tokens and silently
+# truncates long, detailed notes — especially on later chunks.
+MAX_OUTPUT_TOKENS = 65536
 
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
@@ -342,11 +346,12 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 {context_package}
 
 ### **CONTINUATION INSTRUCTIONS**
-1.  **PROCESS THE ENTIRE CHUNK:** Your task is to process the **entire** new transcript chunk provided below.
+1.  **PROCESS THE ENTIRE CHUNK:** Your task is to process the **entire** new transcript chunk provided below. Every substantive point, example, data point, and nuanced opinion in this chunk MUST appear in your output.
 2.  **HANDLE OVERLAP:** The beginning of this new chunk overlaps with the end of the previous one. Process it naturally. Your output will be automatically de-duplicated later.
 3.  **MAINTAIN FORMAT:** Continue to use the exact same formatting as established in the base instructions.
 4.  **NO META-COMMENTARY:** NEVER produce statements about the transcript itself, such as "the transcript does not contain an answer," "no relevant information in this section," "the chunk starts mid-conversation," or similar. If a chunk begins mid-answer, capture that content as a continuation of the relevant section. Always extract and document whatever substantive content exists.
 5.  **MID-CHUNK STARTS:** If the chunk starts in the middle of a response, begin your notes by capturing that content under the most relevant heading from context. Do not skip or discard partial content.
+6.  **MAINTAIN OUTPUT VOLUME:** This chunk contains the same amount of content as the first chunk. Your output for this chunk MUST be equally detailed and equally long. Do NOT produce a shorter or more condensed output just because this is a continuation. If the first chunk produced 30 bullet points, this chunk should produce a similar number. Do NOT taper off, summarize, or become briefer.
 
 ---
 {base_instructions}
@@ -356,30 +361,58 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 {chunk_text}
 """
 
-PROOFREAD_PROMPT = """You are an expert proofreader for meeting notes. You have the **original transcript** and the **generated notes**. Your task is to produce a corrected, polished final version of the notes.
+def cleanup_stitched_notes(notes_text: str) -> str:
+    """Deterministic cleanup of stitched notes — no LLM call, zero risk of content loss.
 
-### YOUR TASKS (in priority order):
+    Handles:
+    1. Remove meta-commentary / processing artifacts from chunked generation
+    2. Collapse duplicate consecutive headings from overlap regions
+    3. Fix formatting: excessive blank lines, trailing whitespace
+    """
+    if not notes_text or not notes_text.strip():
+        return notes_text
 
-1.  **Fix misinterpreted words**: Cross-reference the notes against the transcript. Correct any words that were misheard, misspelled, or misinterpreted — especially company names, proper nouns, technical terms, industry jargon, acronyms, and numbers.
+    # --- 1. Remove known meta-commentary artifacts ---
+    artifact_patterns = [
+        r'^[\-\*]*\s*(?:Note:|Disclaimer:)?\s*(?:The|This)\s+(?:transcript|section|chunk|portion|segment)\s+(?:does not|doesn\'t|appears to)\s+.*$',
+        r'^[\-\*]*\s*(?:No relevant|No additional|No further|No substantive)\s+(?:information|content|data|details).*$',
+        r'^[\-\*]*\s*(?:This section (?:appears|seems|is) (?:incomplete|empty|blank)).*$',
+        r'^[\-\*]*\s*\[(?:No content|Empty|Continues|Continuation)\].*$',
+    ]
+    lines = notes_text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        stripped = line.strip()
+        is_artifact = any(re.match(p, stripped, re.IGNORECASE) for p in artifact_patterns)
+        if not is_artifact:
+            cleaned_lines.append(line)
 
-2.  **Remove processing artifacts**: Delete any meta-commentary or error statements that are not part of the actual meeting content. Examples: "the transcript does not contain an answer," "no relevant information found," "this section appears incomplete," or any similar artifacts from chunked processing.
+    # --- 2. Collapse duplicate consecutive bold headings (from overlap stitching) ---
+    # Pattern: **Heading** appears twice in a row (possibly separated by blank lines)
+    result_lines = []
+    last_heading = None
+    for line in cleaned_lines:
+        stripped = line.strip()
+        heading_match = re.match(r'^(\*\*.+?\*\*)\s*$', stripped)
+        if heading_match:
+            current_heading = heading_match.group(1).strip()
+            if current_heading == last_heading:
+                # Skip duplicate heading — keep first occurrence
+                continue
+            last_heading = current_heading
+        elif stripped:  # Non-empty, non-heading line resets heading tracker
+            last_heading = None
+        result_lines.append(line)
 
-3.  **Verify completeness**: Check that every substantive point, data point, name, number, percentage, monetary value, example, and nuanced opinion from the transcript is reflected in the notes. If anything is missing, add it under the appropriate section following the same formatting.
+    text = '\n'.join(result_lines)
 
-4.  **Clean up stitching seams**: Fix any formatting inconsistencies, duplicated content, or awkward transitions that may have resulted from stitching multiple chunks together.
+    # --- 3. Collapse 3+ consecutive blank lines to 2 ---
+    text = re.sub(r'\n{3,}', '\n\n', text)
 
-5.  **Preserve all correct content**: Do NOT summarize, shorten, condense, or remove any existing correct content. Your role is to fix and add, never to reduce. The final output must be at least as detailed as the input notes. Every bullet point, example, data point, and nuanced explanation from the input notes must appear in your output — do not merge multiple bullets into one or drop supporting details.
+    # --- 4. Strip trailing whitespace from each line ---
+    text = '\n'.join(line.rstrip() for line in text.split('\n'))
 
-### OUTPUT:
-Return ONLY the complete, corrected notes. Do not include any commentary about your changes or a preamble.
-
----
-**ORIGINAL TRANSCRIPT:**
-{transcript}
----
-**GENERATED NOTES TO PROOFREAD:**
-{notes}
-"""
+    return text.strip()
 
 EXECUTIVE_SUMMARY_PROMPT = """Generate a structured executive summary from the following meeting notes.
 
@@ -518,11 +551,14 @@ def safe_get_token_count(response):
         pass
     return 0
 
-def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False):
+def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False, generation_config=None):
     """Wrapper around generate_content with exponential backoff for transient API failures."""
+    kwargs = {"stream": stream}
+    if generation_config is not None:
+        kwargs["generation_config"] = generation_config
     for attempt in range(max_retries):
         try:
-            return model.generate_content(prompt_or_contents, stream=stream)
+            return model.generate_content(prompt_or_contents, **kwargs)
         except Exception as e:
             error_str = str(e).lower()
             is_transient = any(kw in error_str for kw in [
@@ -767,8 +803,8 @@ class ProgressTracker:
         "prepare": {"weight": 5, "label": "Preparing Source Content"},
         "transcribe": {"weight": 15, "label": "Transcribing Audio"},
         "refine": {"weight": 25, "label": "Refining Transcript"},
-        "generate": {"weight": 40, "label": "Generating Notes"},
-        "proofread": {"weight": 10, "label": "Proofreading Notes"},
+        "generate": {"weight": 47, "label": "Generating Notes"},
+        "cleanup": {"weight": 3, "label": "Cleaning Up Notes"},
         "save": {"weight": 5, "label": "Saving to Database"},
     }
 
@@ -1005,7 +1041,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
             prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
 
             stream_placeholder = st.empty()
-            response = generate_with_retry(notes_model, prompt, stream=True)
+            response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
             current_notes_text, tokens = stream_and_collect(response, stream_placeholder)
             total_tokens += tokens
 
@@ -1044,7 +1080,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     else:
         prompt = get_dynamic_prompt(state, final_transcript)
         stream_placeholder = st.empty()
-        response = generate_with_retry(notes_model, prompt, stream=True)
+        response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
         final_notes_content, tokens = stream_and_collect(response, stream_placeholder)
         total_tokens += tokens
 
@@ -1052,18 +1088,16 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     if not final_notes_content or not final_notes_content.strip():
         raise ValueError("The model returned empty notes. Please try again or use a different model.")
 
-    # --- Step 4: Proofread (only when chunking was used — single-chunk notes have no stitching artifacts) ---
+    # --- Step 4: Deterministic cleanup (replaces LLM proofread to avoid content loss) ---
     progress.complete_step("generate")
     was_chunked = not skip_chunking and len(final_transcript.split()) > CHUNK_WORD_SIZE
     if was_chunked:
-        progress.update("proofread", 0, "Cleaning stitching artifacts...")
-        proofread_prompt = PROOFREAD_PROMPT.format(transcript=final_transcript, notes=final_notes_content)
-        response = generate_with_retry(refinement_model, proofread_prompt)
-        final_notes_content = response.text
-        total_tokens += safe_get_token_count(response)
+        progress.update("cleanup", 0, "Cleaning stitching artifacts...")
+        final_notes_content = cleanup_stitched_notes(final_notes_content)
+        progress.update("cleanup", 1.0, "Done")
     else:
-        progress.update("proofread", 1.0, "Skipped (single-chunk)")
-    progress.complete_step("proofread")
+        progress.update("cleanup", 1.0, "Skipped (single-chunk)")
+    progress.complete_step("cleanup")
 
     # --- Step 5: Executive Summary (Expert Meeting Option 3 only) ---
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
