@@ -116,8 +116,8 @@ except Exception as e:
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
-CHUNK_WORD_SIZE = 6000
-CHUNK_WORD_OVERLAP = 300
+CHUNK_WORD_SIZE = 4000
+CHUNK_WORD_OVERLAP = 400
 
 AVAILABLE_MODELS = {
     "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
@@ -168,13 +168,14 @@ Your goal is to produce the most thorough, granular notes possible. Remove conve
 Structure the main body STRICTLY in Question/Answer format.
 
 **(2.A) Questions:**
--   Extract the clear, primary question and format it in **bold**.
+-   Identify the core question being asked and rephrase it clearly in **bold**. Do NOT copy the question verbatim from the transcript — clean up filler, false starts, and rambling phrasing into a clear, well-formed question that preserves the original intent.
 -   If the questioner provides context, framing, or a multi-part question, capture the full scope — do not reduce a multi-part question to a single line.
 
 **(2.B) Answers:**
 -   Use bullet points (`-`) directly below the question.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   Use **multiple bullet points** per answer — do NOT collapse a detailed response into a single bullet.
+-   **ZERO SKIPPING RULE:** If the expert said it with substance, it must appear in your notes. Do NOT skip examples, anecdotes, specific sentences, or supporting details even if they seem minor or repetitive. Every distinct point gets its own bullet. If an answer contains 8 substantive points, you must produce at least 8 bullets — never condense them into 3-4.
 -   **PRIORITY #1: CAPTURE ALL HARD DATA.** This includes all names, examples, monetary values (`$`), percentages (`%`), metrics, specific entities mentioned, time periods, market sizes, growth rates, company names, product names, and geographies.
 -   **PRIORITY #2: CAPTURE ALL NUANCE & REASONING.** Do not over-summarize or reduce complex answers to surface-level statements. You must retain the following:
     -   **Sentiment & Tone:** Note if the expert is confident, uncertain, speculative, cautious, or enthusiastic (e.g., "The expert was highly confident that...," "He cautioned that...").
@@ -199,7 +200,7 @@ Your goal is to be **efficient**, not just brief. Efficiency means removing conv
 Structure the main body in Question/Answer format.
 
 **(2.A) Questions:**
--   Extract the clear, primary question and format it in **bold**.
+-   Identify the core question being asked and rephrase it clearly in **bold**. Do NOT copy verbatim from the transcript — clean up filler and rambling into a clear, well-formed question.
 
 **(2.B) Answers:**
 -   Use bullet points (`-`) directly below the question.
