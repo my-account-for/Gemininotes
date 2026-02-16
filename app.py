@@ -497,21 +497,22 @@ def copy_to_clipboard_button(text: str, button_label: str = "Copy Notes"):
     bg_color = theme.get("primaryColor", "#FF4B4B")
     text_color = theme.get("backgroundColor", "#FFFFFF")
 
-    escaped = html_module.escape(text).replace("`", "\\`").replace("$", "\\$")
+    # Use JSON encoding to safely embed arbitrary text in a JS string literal
+    json_encoded = json.dumps(text)
+    safe_label = html_module.escape(button_label)
     components.html(
         f"""
         <button onclick="copyText()" style="
             background-color:{bg_color}; color:{text_color}; border:none; padding:0.4rem 1rem;
             border-radius:0.3rem; cursor:pointer; font-size:0.875rem; width:100%;
-        ">{button_label}</button>
+        ">{safe_label}</button>
         <script>
         function copyText() {{
-            const text = `{escaped}`;
-            const decoded = new DOMParser().parseFromString(text, 'text/html').body.textContent;
-            navigator.clipboard.writeText(decoded).then(() => {{
+            const text = {json_encoded};
+            navigator.clipboard.writeText(text).then(() => {{
                 const btn = document.querySelector('button');
                 btn.textContent = 'Copied!';
-                setTimeout(() => btn.textContent = '{button_label}', 2000);
+                setTimeout(() => btn.textContent = {json.dumps(button_label)}, 2000);
             }});
         }}
         </script>
@@ -651,13 +652,13 @@ def validate_inputs(state: AppState) -> Optional[str]:
         if not state.uploaded_file and not state.audio_recording:
              return "Please upload a file or record audio."
 
-    if state.uploaded_file:
-        size_mb = state.uploaded_file.size / (1024 * 1024)
-        ext = os.path.splitext(state.uploaded_file.name)[1].lower()
-        if ext == ".pdf" and size_mb > MAX_PDF_MB:
-            return f"PDF is too large ({size_mb:.1f}MB). Limit: {MAX_PDF_MB}MB."
-        elif ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac'] and size_mb > MAX_AUDIO_MB:
-            return f"Audio is too large ({size_mb:.1f}MB). Limit: {MAX_AUDIO_MB}MB."
+        if state.uploaded_file and not state.audio_recording:
+            size_mb = state.uploaded_file.size / (1024 * 1024)
+            ext = os.path.splitext(state.uploaded_file.name)[1].lower()
+            if ext == ".pdf" and size_mb > MAX_PDF_MB:
+                return f"PDF is too large ({size_mb:.1f}MB). Limit: {MAX_PDF_MB}MB."
+            elif ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac'] and size_mb > MAX_AUDIO_MB:
+                return f"Audio is too large ({size_mb:.1f}MB). Limit: {MAX_AUDIO_MB}MB."
 
     if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes" and not state.existing_notes_input:
         return "Please provide existing notes for enrichment mode."
@@ -742,36 +743,20 @@ class ProgressTracker:
 
 def send_browser_notification(title: str, body: str):
     """Send a browser notification using the Notifications API."""
-    # Escape quotes for JavaScript
-    title_escaped = title.replace("'", "\\'").replace('"', '\\"')
-    body_escaped = body.replace("'", "\\'").replace('"', '\\"')
+    safe_title = json.dumps(title)
+    safe_body = json.dumps(body)
 
     components.html(
         f"""
         <script>
         (function() {{
-            // Check if notifications are supported
-            if (!("Notification" in window)) {{
-                console.log("Browser doesn't support notifications");
-                return;
-            }}
-
-            // Request permission if needed
+            if (!("Notification" in window)) return;
+            var opts = {{body: {safe_body}, icon: "https://placehold.co/64x64?text=SN", tag: "synthnotes-complete"}};
             if (Notification.permission === "granted") {{
-                new Notification("{title_escaped}", {{
-                    body: "{body_escaped}",
-                    icon: "https://placehold.co/64x64?text=SN",
-                    tag: "synthnotes-complete"
-                }});
+                new Notification({safe_title}, opts);
             }} else if (Notification.permission !== "denied") {{
                 Notification.requestPermission().then(function(permission) {{
-                    if (permission === "granted") {{
-                        new Notification("{title_escaped}", {{
-                            body: "{body_escaped}",
-                            icon: "https://placehold.co/64x64?text=SN",
-                            tag: "synthnotes-complete"
-                        }});
-                    }}
+                    if (permission === "granted") new Notification({safe_title}, opts);
                 }});
             }}
         }})();
@@ -872,8 +857,7 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
         else:
-            all_words = raw_transcript.split()
-            chunks = [" ".join(all_words[i:i + CHUNK_WORD_SIZE]) for i in range(0, len(all_words), CHUNK_WORD_SIZE)]
+            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
 
             # Pre-build all prompts using raw chunk tails as context (known upfront, enables parallelism)
             prompts = []
@@ -1310,14 +1294,14 @@ Your generated notes, transcripts, and chat history will appear here.
         copy_to_clipboard_button(edited_content)
     dl2.download_button(
         label="Notes (.txt)",
-        data=lambda: edited_content,
+        data=edited_content,
         file_name=f"SynthNote_{fname}.txt",
         mime="text/plain",
         use_container_width=True
     )
     dl3.download_button(
         label="Notes (.md)",
-        data=lambda: edited_content,
+        data=edited_content,
         file_name=f"SynthNote_{fname}.md",
         mime="text/markdown",
         use_container_width=True
@@ -1325,7 +1309,7 @@ Your generated notes, transcripts, and chat history will appear here.
     if final_transcript:
         dl4.download_button(
             label=f"{transcript_source} Transcript",
-            data=lambda: final_transcript,
+            data=final_transcript,
             file_name=f"{transcript_source}_Transcript_{fname}.txt",
             mime="text/plain",
             use_container_width=True
@@ -1333,7 +1317,7 @@ Your generated notes, transcripts, and chat history will appear here.
     elif raw_tx:
         dl4.download_button(
             label="Raw Transcript",
-            data=lambda: raw_tx,
+            data=raw_tx,
             file_name=f"Raw_Transcript_{fname}.txt",
             mime="text/plain",
             use_container_width=True
@@ -1363,8 +1347,11 @@ Your generated notes, transcripts, and chat history will appear here.
             full_response = ""
             try:
                 transcript_context = final_transcript[:30000] if final_transcript else "Not available."
+                truncation_note = ""
+                if final_transcript and len(final_transcript) > 30000:
+                    truncation_note = f"\n\nNote: The transcript was truncated from {len(final_transcript):,} to 30,000 characters. Some content at the end may be missing from the TRANSCRIPT section. The NOTES section contains the full meeting content."
                 system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
-If the user asks for verbatim quotes or exact wording, refer to the TRANSCRIPT section. For analysis and summary questions, use the NOTES section.
+If the user asks for verbatim quotes or exact wording, refer to the TRANSCRIPT section. For analysis and summary questions, use the NOTES section.{truncation_note}
 
 MEETING NOTES:
 ---
@@ -1500,10 +1487,19 @@ def render_otg_notes_tab(state: AppState):
         if not notes:
             st.info("No saved notes. Generate notes first in the Input & Generate tab.")
             return
-        note_options = {n['file_name']: n['id'] for n in notes}
-        selected_name = st.selectbox("Select a saved note", list(note_options.keys()), key="otg_note_selector")
+        note_labels = []
+        note_id_by_label = {}
+        for n in notes:
+            label = n['file_name']
+            # Disambiguate duplicate filenames by appending the date
+            if label in note_id_by_label:
+                created = datetime.fromisoformat(n['created_at']).strftime('%b %d %H:%M')
+                label = f"{label} ({created})"
+            note_labels.append(label)
+            note_id_by_label[label] = n['id']
+        selected_name = st.selectbox("Select a saved note", note_labels, key="otg_note_selector")
         if selected_name:
-            selected_note = database.get_note_by_id(note_options[selected_name])
+            selected_note = database.get_note_by_id(note_id_by_label[selected_name])
             if selected_note:
                 st.session_state.otg_input = selected_note.get('content', '')
                 with st.expander("Preview loaded notes", expanded=False):
@@ -1678,14 +1674,14 @@ def render_otg_notes_tab(state: AppState):
             copy_to_clipboard_button(st.session_state.otg_output, "Copy Research Note")
         out2.download_button(
             label="Download (.txt)",
-            data=lambda: st.session_state.otg_output,
+            data=st.session_state.otg_output,
             file_name=f"OTG_Note_{otg_sector_slug}.txt",
             mime="text/plain",
             use_container_width=True
         )
         out3.download_button(
             label="Download (.md)",
-            data=lambda: st.session_state.otg_output,
+            data=st.session_state.otg_output,
             file_name=f"OTG_Note_{otg_sector_slug}.md",
             mime="text/markdown",
             use_container_width=True
