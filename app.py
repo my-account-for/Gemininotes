@@ -154,7 +154,7 @@ MEETING_TYPE_HELP = {
 # --- PROMPT CONSTANTS ---
 
 EXPERT_MEETING_DETAILED_PROMPT = """### **PRIMARY DIRECTIVE: MAXIMUM DETAIL & STRICT COMPLETENESS**
-Your goal is to produce the most thorough, granular notes possible. **Nothing substantive should be omitted.** Every factual claim, example, explanation, aside, and data point in the transcript must appear in your notes. When in doubt, INCLUDE it. Err heavily on the side of over-inclusion. Longer, more detailed notes are always preferred over concise ones.
+Your goal is to produce the most thorough, granular notes possible. Remove conversational filler ("um," "you know," repetition) but **nothing substantive should be omitted.** Every factual claim, example, explanation, aside, and data point in the transcript must appear in your notes. When in doubt, INCLUDE it. Err heavily on the side of over-inclusion. Longer, more detailed notes are always preferred over concise ones.
 
 ### **NOTES STRUCTURE**
 
@@ -175,13 +175,13 @@ Structure the main body STRICTLY in Question/Answer format.
 -   Use bullet points (`-`) directly below the question.
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   Use **multiple bullet points** per answer — do NOT collapse a detailed response into a single bullet.
--   **PRIORITY #1: CAPTURE ALL SPECIFICS.** This includes all data, names, examples, monetary values (`$`), percentages (`%`), time periods, market sizes, growth rates, company names, product names, geographies, and any other concrete details.
--   **PRIORITY #2: CAPTURE ALL NUANCE & REASONING.** Do not reduce complex answers to surface-level summaries. You must retain:
+-   **PRIORITY #1: CAPTURE ALL HARD DATA.** This includes all names, examples, monetary values (`$`), percentages (`%`), metrics, specific entities mentioned, time periods, market sizes, growth rates, company names, product names, and geographies.
+-   **PRIORITY #2: CAPTURE ALL NUANCE & REASONING.** Do not over-summarize or reduce complex answers to surface-level statements. You must retain the following:
     -   **Sentiment & Tone:** Note if the expert is confident, uncertain, speculative, cautious, or enthusiastic (e.g., "The expert was highly confident that...," "He cautioned that...").
-    -   **Qualifiers & Conditions:** Preserve words that change meaning (e.g., "usually," "in most cases," "except in," "only when," "roughly," "approximately").
-    -   **Examples & Analogies:** If the expert uses a specific example, anecdote, case study, or analogy to illustrate a point, capture it in full — these are often the most valuable parts.
-    -   **Cause & Effect:** Retain reasoning chains (e.g., "...because of regulatory changes," "...which led to a 15% decline in...").
-    -   **Comparisons & Contrasts:** If the expert compares companies, products, approaches, or time periods, capture both sides of the comparison.
+    -   **Qualifiers & Conditions:** Preserve modifying words that change meaning (e.g., "usually," "in most cases," "except in," "only when," "roughly," "approximately," "a potential risk is...").
+    -   **Key Examples & Analogies:** If the expert uses a specific example, anecdote, case study, or analogy to illustrate a point, capture it in full, even if it spans multiple sentences — these are often the most valuable parts of an expert call.
+    -   **Cause & Effect:** Retain any reasoning chains provided (e.g., "...because of regulatory changes," "...which led to a 15% decline in...").
+    -   **Comparisons & Contrasts:** If the expert compares companies, products, approaches, or time periods, capture both sides of the comparison with the specific details for each.
     -   **Tangential but relevant points:** If the expert volunteers additional context, background, or related information beyond the direct question, include it — do NOT discard it as off-topic.
 -   **PRIORITY #3: PRESERVE MULTI-STEP EXPLANATIONS.** If an answer involves a sequence of steps, a timeline, or a logical chain, preserve the full sequence rather than summarizing the conclusion only."""
 
