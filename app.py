@@ -584,6 +584,149 @@ EC_MULTI_FILE_STITCH_HEADER = """# Earnings Call Topic Analysis — {company_nam
 
 """
 
+# --- REPORT COMPARISON PROMPT CONSTANTS ---
+
+RC_DIMENSION_DISCOVERY_PROMPT = """You are an expert equity research analyst specializing in annual report analysis. Analyze the following annual reports and identify the key QUALITATIVE dimensions that can be meaningfully compared across years.
+
+### TASK:
+From the reports below, extract a structured set of comparison dimensions. Focus ONLY on qualitative and strategic aspects — NOT financial numbers (those will differ year to year and are not the focus).
+
+### OUTPUT FORMAT:
+Return ONLY valid JSON with no other text, using this exact structure:
+{{
+  "company_name": "The company or group name",
+  "report_years": ["Year 1", "Year 2", ...],
+  "comparison_dimensions": [
+    {{
+      "name": "Dimension Name",
+      "description": "Brief description of what this covers",
+      "sub_dimensions": [
+        "Sub-dimension 1",
+        "Sub-dimension 2"
+      ]
+    }}
+  ]
+}}
+
+### FOCUS AREAS (use these as guidance, but be specific to what is actually in the reports):
+1. **Management Commentary & Tone** — How does the CEO/Chairman letter read? What is the tone — optimistic, cautious, defensive? What themes are emphasized?
+2. **Strategic Direction & Priorities** — What strategic pillars are highlighted? How have priorities shifted? New initiatives vs. continued focus areas?
+3. **Business Structure & Organization** — How is the business organized (segments, divisions, subsidiaries)? Any restructuring, new segments, or organizational changes?
+4. **Leadership & Governance** — Board composition changes, key management changes, succession planning, governance structure evolution?
+5. **Incentive Structures & Compensation** — How are executives compensated? What metrics drive bonuses/ESOPs? Any changes in incentive design?
+6. **Risk Factors & Mitigation** — What risks are highlighted? How has the risk landscape changed? New risks vs. dropped risks?
+7. **Capital Allocation Philosophy** — How does management talk about deploying capital? Dividends vs. buybacks vs. reinvestment priorities?
+8. **ESG / Sustainability** — Environmental, social, governance initiatives. How prominent is ESG in the narrative? Any new commitments?
+9. **Market & Competitive Positioning** — How does the company describe its competitive position? Market share commentary, moats, differentiation?
+10. **Growth Levers & Outlook** — What growth avenues are highlighted? Organic vs. inorganic? Geographic vs. product expansion?
+11. **Culture & People** — Employee-related commentary, talent strategy, culture statements, DEI initiatives?
+12. **Technology & Digital** — Digital transformation initiatives, technology investments, IT strategy evolution?
+
+### GUIDELINES:
+- Be SPECIFIC to this company — identify dimensions that are actually discussed in these reports.
+- Include 5-12 dimensions with 2-6 sub-dimensions each, based on what the reports actually cover.
+- The dimensions should enable meaningful year-over-year comparison of QUALITATIVE changes.
+- Do NOT include dimensions focused on specific numbers or financial metrics.
+
+---
+**ANNUAL REPORTS:**
+
+{reports}
+"""
+
+RC_PER_REPORT_EXTRACTION_PROMPT = """### **ANNUAL REPORT ANALYSIS — QUALITATIVE EXTRACTION**
+
+You are extracting qualitative information from an annual report for a specific set of comparison dimensions. Focus on WHAT management says, HOW they say it, and WHAT has changed — NOT on specific numbers.
+
+### DIMENSIONS TO EXTRACT:
+{dimension_structure}
+
+### RULES:
+1. For each dimension and sub-dimension, extract ALL relevant qualitative information from this report.
+2. If a dimension/sub-dimension has no relevant information in this report, write "Not addressed in this report." — do NOT skip the heading.
+3. Use **bold headings** for dimensions and sub-dimensions. Use bullet points for details.
+4. **FOCUS ON:**
+   - Management's language, tone, and emphasis
+   - Strategic statements and directional commentary
+   - Organizational descriptions and structural details
+   - Policy descriptions (compensation, governance, risk)
+   - Qualitative characterizations ("strong growth", "challenging environment", "transformational year")
+   - Changes in emphasis or new themes compared to what might be typical
+5. **AVOID:**
+   - Specific revenue/profit/margin numbers (unless they illustrate a qualitative point about strategy)
+   - Detailed financial tables or ratios
+   - Restating numbers that will obviously differ between years
+6. Capture DIRECT QUOTES from management where they are particularly revealing of tone or strategic intent.
+7. Note the year/period this report covers at the top.
+
+### FORMAT:
+**[Dimension: Name]**
+
+**[Sub-dimension: Name]**
+- Bullet point with qualitative detail...
+- Another bullet point...
+
+---
+**ANNUAL REPORT ({file_label}):**
+{report_text}
+"""
+
+RC_COMPARISON_PROMPT = """### **ANNUAL REPORT COMPARISON — YEAR-OVER-YEAR QUALITATIVE ANALYSIS**
+
+You are an expert analyst comparing annual reports from different years for the same company. Below are the qualitative extractions from each year's report. Your task is to produce a structured comparison highlighting what has CHANGED, what has STAYED THE SAME, and what is NEW or DROPPED.
+
+### COMPANY: {company_name}
+### REPORTS COMPARED: {report_labels}
+
+### COMPARISON DIMENSIONS:
+{dimension_structure}
+
+### EXTRACTED DATA FROM EACH REPORT:
+{per_report_extractions}
+
+### YOUR TASK:
+For each dimension and sub-dimension, produce a comparison that answers:
+1. **What changed?** — Shifts in tone, emphasis, strategy, structure, or policy between years.
+2. **What remained consistent?** — Themes or approaches that persisted across years.
+3. **What is new?** — Themes, initiatives, or structural elements that appear in later reports but not earlier ones.
+4. **What was dropped?** — Items emphasized in earlier reports but absent or de-emphasized in later ones.
+
+### FORMAT:
+For each dimension, structure your output as:
+
+## [Dimension Name]
+
+### [Sub-dimension Name]
+
+**Evolution across years:**
+- [Year-over-year comparison points as bullets]
+
+**Key shifts:**
+- [Most significant changes highlighted]
+
+**Consistency:**
+- [What stayed the same]
+
+### RULES:
+1. Be SPECIFIC — cite which year said what. Use phrases like "In FY2022, management emphasized X, while in FY2024, the focus shifted to Y."
+2. Include direct management quotes where they illustrate a meaningful shift.
+3. Do NOT simply list what each year said — actually COMPARE and CONTRAST.
+4. Highlight the most SIGNIFICANT shifts prominently. Minor changes can be noted briefly.
+5. If a dimension shows no meaningful change across years, say so explicitly — consistency is also a finding.
+6. Order the comparison chronologically (earliest to latest year).
+7. At the end, include a section called "## Key Takeaways" with 5-10 bullet points summarizing the most important qualitative shifts across all dimensions.
+
+---
+"""
+
+RC_STITCH_HEADER = """# Annual Report Comparison — {company_name}
+*Generated on {date}*
+*Reports compared: {report_labels}*
+
+---
+
+"""
+
 # --- 3. STATE & DATA MODELS ---
 @dataclass
 class AppState:
@@ -2034,6 +2177,460 @@ def _stitch_multi_file_notes(company_name: str, file_notes: List[Tuple[str, str]
     return "\n".join(parts)
 
 
+# --- REPORT COMPARISON HELPER FUNCTIONS ---
+
+MAX_RC_DISCOVERY_FILES = 4  # Number of reports to scan for dimension discovery
+
+def _discover_rc_dimensions(file_texts: List[Tuple[str, str]], model_name: str) -> dict:
+    """Send reports to Gemini for qualitative dimension discovery. Returns parsed JSON."""
+    discovery_files = file_texts[:MAX_RC_DISCOVERY_FILES]
+
+    report_parts = []
+    for i, (fname, text) in enumerate(discovery_files, 1):
+        words = text.split()
+        truncated = " ".join(words[:15000])
+        report_parts.append(f"--- REPORT {i}: {fname} ---\n{truncated}")
+
+    combined = "\n\n".join(report_parts)
+    prompt = RC_DIMENSION_DISCOVERY_PROMPT.format(reports=combined)
+
+    model = _get_cached_model(model_name)
+    response = generate_with_retry(model, prompt, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
+    raw_json = response.text.strip()
+
+    # Strip markdown code fences if present
+    if raw_json.startswith("```"):
+        lines = raw_json.split("\n")
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw_json = "\n".join(lines).strip()
+
+    json_match = re.search(r'\{[\s\S]*\}', raw_json)
+    if json_match:
+        raw_json = json_match.group(0)
+
+    result = json.loads(raw_json)
+    if not isinstance(result, dict):
+        raise ValueError("Dimension discovery returned invalid format.")
+
+    result.setdefault("company_name", "Unknown Company")
+    result.setdefault("report_years", [])
+    result.setdefault("comparison_dimensions", [])
+
+    return result
+
+
+def _build_dimension_structure_text(selected_dimensions: dict) -> str:
+    """Convert selected dimensions dict into a text structure for prompts."""
+    lines = []
+    for dim in selected_dimensions.get("comparison_dimensions", []):
+        lines.append(f"**{dim['name']}**")
+        if dim.get("description"):
+            lines.append(f"  ({dim['description']})")
+        for sub in dim.get("sub_dimensions", []):
+            lines.append(f"  - {sub}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _extract_report_qualitative(file_label: str, report_text: str, dimension_structure_text: str,
+                                 model_name: str) -> Tuple[str, int]:
+    """Extract qualitative data from a single report for the given dimensions.
+    Returns (extraction_text, token_count).
+    """
+    prompt = RC_PER_REPORT_EXTRACTION_PROMPT.format(
+        dimension_structure=dimension_structure_text,
+        file_label=file_label,
+        report_text=report_text
+    )
+    model = _get_cached_model(model_name)
+    response = generate_with_retry(model, prompt, stream=True,
+                                   generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
+    full_text, token_count = stream_and_collect(response)
+    return full_text, token_count
+
+
+def _generate_rc_comparison(company_name: str, report_labels: str, dimension_structure_text: str,
+                             per_report_extractions: str, model_name: str) -> Tuple[str, int]:
+    """Generate the final year-over-year comparison from all per-report extractions.
+    Returns (comparison_text, token_count).
+    """
+    prompt = RC_COMPARISON_PROMPT.format(
+        company_name=company_name,
+        report_labels=report_labels,
+        dimension_structure=dimension_structure_text,
+        per_report_extractions=per_report_extractions
+    )
+    model = _get_cached_model(model_name)
+    response = generate_with_retry(model, prompt, stream=True,
+                                   generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
+    full_text, token_count = stream_and_collect(response)
+    return full_text, token_count
+
+
+def _stitch_rc_output(company_name: str, report_labels: str, comparison_text: str,
+                       per_report_extractions: List[Tuple[str, str]]) -> str:
+    """Stitch the comparison output with header and optional per-report appendix."""
+    header = RC_STITCH_HEADER.format(
+        company_name=company_name,
+        date=datetime.now().strftime("%B %d, %Y"),
+        report_labels=report_labels
+    )
+    parts = [header, comparison_text.strip()]
+
+    # Add per-report extractions as appendix
+    parts.append("\n\n---\n\n# Appendix: Per-Report Extractions\n")
+    for i, (fname, extraction) in enumerate(per_report_extractions, 1):
+        parts.append(f"## {i}. {fname}\n")
+        parts.append(extraction.strip())
+        parts.append("\n\n---\n")
+
+    return "\n".join(parts)
+
+
+# --- REPORT COMPARISON TAB ---
+
+def render_report_comparison_tab(state: AppState):
+    st.subheader("Annual Report Comparison")
+    st.caption(
+        "Upload annual reports (PDFs) from different years for the same company. "
+        "The system will identify qualitative dimensions — management commentary, strategy, "
+        "org structure, incentives, risk factors, etc. — and produce a year-over-year comparison. "
+        "Numbers and financial data are intentionally de-emphasized; the focus is on narrative shifts."
+    )
+
+    # --- Session state initialization ---
+    if "rc_files" not in st.session_state:
+        st.session_state.rc_files = None
+    if "rc_texts" not in st.session_state:
+        st.session_state.rc_texts = []
+    if "rc_discovered_dims" not in st.session_state:
+        st.session_state.rc_discovered_dims = None
+    if "rc_selected_dims" not in st.session_state:
+        st.session_state.rc_selected_dims = None
+    if "rc_comparison_output" not in st.session_state:
+        st.session_state.rc_comparison_output = ""
+    if "rc_processing" not in st.session_state:
+        st.session_state.rc_processing = False
+    if "rc_per_report_extractions" not in st.session_state:
+        st.session_state.rc_per_report_extractions = []
+
+    # --- Step 1: Upload PDFs ---
+    st.markdown("### Step 1: Upload Annual Reports")
+    uploaded_files = st.file_uploader(
+        "Upload annual report PDFs (one per year)",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="rc_pdf_uploader",
+        help="Upload 2 or more annual report PDFs from different years for the same company."
+    )
+
+    if not uploaded_files or len(uploaded_files) < 2:
+        st.info("Upload at least 2 annual report PDFs to begin. Name files clearly (e.g., 'CompanyName_AR_2023.pdf').")
+        if not uploaded_files:
+            st.session_state.rc_texts = []
+            st.session_state.rc_discovered_dims = None
+            st.session_state.rc_selected_dims = None
+            st.session_state.rc_comparison_output = ""
+            st.session_state.rc_per_report_extractions = []
+        return
+
+    file_names = [f.name for f in uploaded_files]
+    st.caption(f"**{len(uploaded_files)}** reports uploaded: {', '.join(file_names)}")
+
+    # --- Step 2: Extract text and discover dimensions ---
+    st.divider()
+    st.markdown("### Step 2: Identify Comparison Dimensions")
+    st.caption(
+        f"Analyzes the first {min(len(uploaded_files), MAX_RC_DISCOVERY_FILES)} reports "
+        "to identify qualitative dimensions for comparison (strategy, governance, incentives, etc.)."
+    )
+
+    analysis_model = st.selectbox(
+        "Model for Dimension Discovery",
+        list(AVAILABLE_MODELS.keys()),
+        index=list(AVAILABLE_MODELS.keys()).index(state.notes_model),
+        key="rc_analysis_model_select"
+    )
+
+    if st.button("Identify Dimensions", use_container_width=True, key="rc_discover_btn"):
+        with st.spinner("Extracting text from PDFs and identifying comparison dimensions..."):
+            try:
+                file_texts = _extract_pdf_texts(uploaded_files)
+                if len(file_texts) < 2:
+                    st.error("Could not extract text from at least 2 PDFs. Check file quality.")
+                    return
+                st.session_state.rc_texts = file_texts
+
+                discovered = _discover_rc_dimensions(file_texts, analysis_model)
+                st.session_state.rc_discovered_dims = discovered
+                st.session_state.rc_selected_dims = copy.deepcopy(discovered)
+                st.session_state.rc_comparison_output = ""
+                st.session_state.rc_per_report_extractions = []
+                st.rerun()
+            except json.JSONDecodeError:
+                st.error("Failed to parse dimension discovery results. Try again or use a different model.")
+            except Exception as e:
+                st.error(f"Dimension discovery failed: {e}")
+
+    # --- Step 3: Display and select dimensions ---
+    discovered = st.session_state.rc_discovered_dims
+    if not discovered:
+        return
+
+    company_name = discovered.get("company_name", "Unknown Company")
+    report_years = discovered.get("report_years", [])
+    years_display = ", ".join(report_years) if report_years else "multiple years"
+    st.success(f"Dimensions identified for **{company_name}** ({years_display})")
+
+    st.divider()
+    st.markdown("### Step 3: Select & Customize Dimensions")
+    st.caption("Check the dimensions you want compared across years. You can also add custom dimensions.")
+
+    comparison_dims = discovered.get("comparison_dimensions", [])
+
+    selected_dims = []
+    for d_idx, dim in enumerate(comparison_dims):
+        d_name = dim.get("name", f"Dimension {d_idx+1}")
+        d_desc = dim.get("description", "")
+        sub_dims = dim.get("sub_dimensions", [])
+
+        d_key = f"rc_dim_{d_idx}"
+        d_enabled = st.checkbox(
+            f"**{d_name}**" + (f" — {d_desc}" if d_desc else ""),
+            value=True,
+            key=d_key
+        )
+
+        if d_enabled:
+            selected_subs = []
+            sub_cols = st.columns(min(len(sub_dims), 4)) if sub_dims else []
+            for s_idx, sub in enumerate(sub_dims):
+                col = sub_cols[s_idx % len(sub_cols)] if sub_cols else st
+                s_key = f"rc_sub_{d_idx}_{s_idx}"
+                if col.checkbox(sub, value=True, key=s_key):
+                    selected_subs.append(sub)
+
+            # Add custom sub-dimension
+            custom_sub = st.text_input(
+                "Add custom sub-dimension",
+                key=f"rc_custom_sub_{d_idx}",
+                placeholder="e.g., succession planning, digital strategy..."
+            )
+            if custom_sub and custom_sub.strip():
+                for cs in [s.strip() for s in custom_sub.split(",") if s.strip()]:
+                    if cs not in selected_subs:
+                        selected_subs.append(cs)
+
+            if selected_subs:
+                selected_dims.append({
+                    "name": d_name,
+                    "description": d_desc,
+                    "sub_dimensions": selected_subs
+                })
+
+        st.divider()
+
+    # Add custom dimension
+    with st.expander("Add Custom Dimension", expanded=False):
+        custom_d_name = st.text_input("Dimension Name", key="rc_custom_dim_name",
+                                       placeholder="e.g., Regulatory Environment")
+        custom_d_desc = st.text_input("Description (optional)", key="rc_custom_dim_desc")
+        custom_d_subs = st.text_input("Sub-dimensions (comma-separated)", key="rc_custom_dim_subs",
+                                       placeholder="e.g., compliance changes, new regulations, policy shifts")
+        if custom_d_name and custom_d_name.strip():
+            subs = [s.strip() for s in custom_d_subs.split(",") if s.strip()] if custom_d_subs else []
+            selected_dims.append({
+                "name": custom_d_name.strip(),
+                "description": custom_d_desc.strip() if custom_d_desc else "",
+                "sub_dimensions": subs
+            })
+
+    # Store final selection
+    final_selection = {
+        "company_name": company_name,
+        "report_years": report_years,
+        "comparison_dimensions": selected_dims
+    }
+    st.session_state.rc_selected_dims = final_selection
+
+    # Preview selected structure
+    with st.expander("Preview Selected Dimension Structure", expanded=False):
+        structure_text = _build_dimension_structure_text(final_selection)
+        st.code(structure_text, language="markdown")
+
+    if not selected_dims:
+        st.warning("Select at least one dimension to generate comparison.")
+        return
+
+    # --- Step 4: Generate comparison ---
+    st.divider()
+    st.markdown("### Step 4: Generate Comparison")
+
+    file_texts = st.session_state.rc_texts
+    if not file_texts:
+        st.warning("Report texts not available. Please re-run dimension identification.")
+        return
+
+    st.caption(
+        f"Will extract qualitative data from **{len(file_texts)}** reports, "
+        "then produce a year-over-year comparison across selected dimensions."
+    )
+
+    notes_model = st.selectbox(
+        "Model for Analysis",
+        list(AVAILABLE_MODELS.keys()),
+        index=list(AVAILABLE_MODELS.keys()).index(state.notes_model),
+        key="rc_notes_model_select"
+    )
+
+    if st.button("Generate Comparison", type="primary", use_container_width=True, key="rc_generate_btn"):
+        st.session_state.rc_processing = True
+        st.rerun()
+
+    if st.session_state.rc_processing:
+        dimension_structure_text = _build_dimension_structure_text(final_selection)
+        total_tokens = 0
+        all_extractions = []
+        start_time = time.time()
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        try:
+            # Phase 1: Extract qualitative data from each report
+            num_files = len(file_texts)
+            for i, (fname, text) in enumerate(file_texts):
+                # Extraction is ~70% of the work, comparison is ~30%
+                pct = (i / num_files) * 0.7
+                progress_bar.progress(pct)
+                status_text.markdown(
+                    f"**{int(pct*100)}%** — Extracting qualitative data from **{fname}** ({i+1}/{num_files})"
+                )
+
+                extraction_text, tokens = _extract_report_qualitative(
+                    fname, text, dimension_structure_text, notes_model
+                )
+                total_tokens += tokens
+                all_extractions.append((fname, extraction_text))
+
+            # Phase 2: Generate comparison
+            progress_bar.progress(0.75)
+            status_text.markdown("**75%** — Generating year-over-year comparison...")
+
+            report_labels = ", ".join(fname for fname, _ in file_texts)
+            per_report_combined = "\n\n---\n\n".join(
+                f"### Report: {fname}\n\n{extraction}"
+                for fname, extraction in all_extractions
+            )
+
+            comparison_text, comp_tokens = _generate_rc_comparison(
+                company_name, report_labels, dimension_structure_text,
+                per_report_combined, notes_model
+            )
+            total_tokens += comp_tokens
+
+            # Stitch final output
+            progress_bar.progress(0.95)
+            status_text.markdown("**95%** — Assembling final output...")
+
+            stitched = _stitch_rc_output(company_name, report_labels, comparison_text, all_extractions)
+
+            st.session_state.rc_comparison_output = stitched
+            st.session_state.rc_per_report_extractions = all_extractions
+
+            elapsed = time.time() - start_time
+            progress_bar.progress(1.0)
+            status_text.markdown(
+                f"**100%** — Done! {len(file_texts)} reports compared, "
+                f"{total_tokens:,} tokens used, {elapsed:.1f}s elapsed."
+            )
+            st.toast("Report comparison complete!", icon="\u2705")
+
+            send_browser_notification(
+                "SynthNotes AI - Report Comparison Complete",
+                f"{len(file_texts)} annual reports compared in {elapsed:.1f}s"
+            )
+
+        except Exception as e:
+            status_text.markdown(f"**Error:** {e}")
+            st.error(f"Comparison generation failed: {e}")
+        finally:
+            st.session_state.rc_processing = False
+
+    # --- Step 5: Display output ---
+    if st.session_state.rc_comparison_output:
+        st.divider()
+        st.markdown("### Output")
+
+        view_mode = st.pills(
+            "View", ["Comparison", "Per-Report Extractions"],
+            default="Comparison", key="rc_view_mode"
+        )
+
+        if view_mode == "Comparison":
+            with st.container(height=600, border=True):
+                st.markdown(st.session_state.rc_comparison_output)
+            note_wc = len(st.session_state.rc_comparison_output.split())
+            st.caption(f"{note_wc:,} words")
+        else:
+            extractions = st.session_state.rc_per_report_extractions
+            if extractions:
+                tab_names = [fname for fname, _ in extractions]
+                tabs = st.tabs(tab_names)
+                for tab, (fname, extraction) in zip(tabs, extractions):
+                    with tab:
+                        with st.container(height=500, border=True):
+                            st.markdown(extraction)
+                        wc = len(extraction.split())
+                        st.caption(f"{wc:,} words")
+
+        # Actions bar
+        dl1, dl2, dl3 = st.columns(3)
+        with dl1:
+            copy_to_clipboard_button(st.session_state.rc_comparison_output, "Copy Comparison")
+        dl2.download_button(
+            label="Download (.txt)",
+            data=st.session_state.rc_comparison_output,
+            file_name=f"Report_Comparison_{company_name.replace(' ', '_')}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+        dl3.download_button(
+            label="Download (.md)",
+            data=st.session_state.rc_comparison_output,
+            file_name=f"Report_Comparison_{company_name.replace(' ', '_')}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+
+        # Save to database
+        st.divider()
+        if st.button("Save to Notes History", use_container_width=True, key="rc_save_btn"):
+            try:
+                note_data = {
+                    'id': str(uuid.uuid4()),
+                    'created_at': datetime.now().isoformat(),
+                    'meeting_type': 'Report Comparison',
+                    'file_name': f"Report Comparison — {company_name}",
+                    'content': st.session_state.rc_comparison_output,
+                    'raw_transcript': "\n\n---\n\n".join(
+                        f"--- {fname} ---\n{text[:5000]}..." if len(text) > 5000 else f"--- {fname} ---\n{text}"
+                        for fname, text in st.session_state.rc_texts
+                    ),
+                    'refined_transcript': None,
+                    'token_usage': 0,
+                    'processing_time': 0,
+                    'pdf_blob': None
+                }
+                database.save_note(note_data)
+                st.toast("Saved to Notes History!", icon="\u2705")
+                st.session_state.app_state.active_note_id = note_data['id']
+            except Exception as e:
+                st.error(f"Failed to save: {e}")
+
+
 def render_ec_analysis_tab(state: AppState):
     st.subheader("Multi-Transcript Earnings Call Analysis")
     st.caption(
@@ -2460,11 +3057,18 @@ def run_app():
             except Exception as tab_err:
                 st.error(f"Error in EC Analysis tab: {tab_err}")
 
+        def _page_report_comparison():
+            try:
+                render_report_comparison_tab(st.session_state.app_state)
+            except Exception as tab_err:
+                st.error(f"Error in Report Comparison tab: {tab_err}")
+
         nav = st.navigation(
             [
                 st.Page(_page_input, title="Input & Generate", icon=":material/edit_note:"),
                 st.Page(_page_output, title="Output & History", icon=":material/history:"),
                 st.Page(_page_ec_analysis, title="EC Analysis", icon=":material/analytics:"),
+                st.Page(_page_report_comparison, title="Report Compare", icon=":material/compare:"),
                 st.Page(_page_otg, title="OTG Notes", icon=":material/quick_phrases:"),
             ],
             position="top",
