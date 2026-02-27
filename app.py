@@ -239,10 +239,13 @@ Structure the main body STRICTLY in Question/Answer format.
 
 **(2.A) Questions:**
 -   Identify the core question being asked and rephrase it clearly in **bold**. Do NOT copy the question verbatim from the transcript — clean up filler, false starts, and rambling phrasing into a clear, well-formed question that preserves the original intent.
+-   **NO LABELS:** Do NOT prefix questions with "Q:", "Q.", "Question:", or any similar label. The bold question text stands alone.
 -   If the questioner provides context, framing, or a multi-part question, capture the full scope — do not reduce a multi-part question to a single line.
+-   **LONG QUESTIONS / PREAMBLE:** Sometimes a question is long because the interviewer provides substantial framing, background, or context before asking — this preamble is part of the question and must be preserved as part of the bold question text. Do NOT treat the preamble as part of the answer.
+-   **SPACING:** Leave exactly one blank line between the end of one answer and the start of the next bold question, so each Q&A pair is visually separated.
 
 **(2.B) Answers:**
--   Use bullet points (`-`) directly below the question.
+-   Use bullet points (`-`) directly below the question (no blank line between the bold question and its first bullet).
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   Use **multiple bullet points** per answer — do NOT collapse a detailed response into a single bullet.
 -   **ZERO SKIPPING RULE:** If the expert said it with substance, it must appear in your notes. Do NOT skip examples, anecdotes, specific sentences, or supporting details even if they seem minor or repetitive. Every distinct point gets its own bullet. If an answer contains 8 substantive points, you must produce at least 8 bullets — never condense them into 3-4.
@@ -271,9 +274,12 @@ Structure the main body in Question/Answer format.
 
 **(2.A) Questions:**
 -   Identify the core question being asked and rephrase it clearly in **bold**. Do NOT copy verbatim from the transcript — clean up filler and rambling into a clear, well-formed question.
+-   **NO LABELS:** Do NOT prefix questions with "Q:", "Q.", "Question:", or any similar label. The bold question text stands alone.
+-   **LONG QUESTIONS / PREAMBLE:** Sometimes a question is long because the interviewer provides substantial framing, background, or context before asking — this preamble is part of the question and must be preserved as part of the bold question text. Do NOT treat the preamble as part of the answer.
+-   **SPACING:** Leave exactly one blank line between the end of one answer and the start of the next bold question, so each Q&A pair is visually separated.
 
 **(2.B) Answers:**
--   Use bullet points (`-`) directly below the question.
+-   Use bullet points (`-`) directly below the question (no blank line between the bold question and its first bullet).
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   **PRIORITY #1: CAPTURE ALL HARD DATA.** This includes all names, examples, monetary values (`$`), percentages (`%`), metrics, and specific entities mentioned.
 -   **PRIORITY #2: CAPTURE ALL NUANCE.** Do not over-summarize. You must retain the following:
@@ -367,6 +373,81 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 **MEETING TRANSCRIPT (NEW CHUNK):**
 {chunk_text}
 """
+
+VALIDATION_PROMPT = """You are a strict Quality Assurance Auditor. Your task is to compare a set of generated meeting notes against the original transcript to identify any gaps, inaccuracies, or quality issues.
+
+## INPUTS
+
+### PROCESSED NOTES (Generated Output):
+{processed_output}
+
+### SOURCE TRANSCRIPT (Ground Truth):
+{transcript}
+
+## VALIDATION CRITERIA
+
+Perform a comprehensive audit across the following dimensions:
+
+### 1. MISSING INFORMATION
+Identify substantive content from the transcript that is NOT captured in the notes:
+- Facts, figures, percentages, monetary values present in the transcript but absent from notes
+- Examples, anecdotes, or case studies mentioned by the expert but not captured
+- Named entities (companies, people, products, geographies) mentioned but omitted
+- Qualifiers, conditions, or hedging language that changes the meaning of a statement
+
+### 2. INCOMPLETE QUESTIONS
+Flag questions in the notes that:
+- Are truncated or missing key parts of the original question
+- Lose the multi-part nature of the original question
+- Omit important framing or context provided by the questioner
+- Incorrectly split interviewer preamble/context into the answer section
+
+### 3. INCORRECT ANSWERS
+Identify answers in the notes that:
+- Contradict what was actually said in the transcript
+- Contain factual errors or misattributions
+- Overstate or understate the expert's confidence, certainty, or tone
+- Merge or conflate distinct points made at different times
+
+### 4. UNSUPPORTED ASSUMPTIONS
+Flag content in the notes that:
+- Was not said in the transcript (fabricated or hallucinated)
+- Represents an inference rather than a stated fact (without labeling it as such)
+- Attributes statements to the wrong speaker
+
+### 5. FORMATTING ISSUES
+Note any structural problems:
+- "Q:", "Q.", "Question:", or similar labels appearing before questions (questions should be bold text only, no labels)
+- Missing blank line between Q&A pairs (there should be one blank line between the end of an answer and the next question)
+- Questions where the interviewer's long preamble has been incorrectly placed inside the answer section instead of as part of the bold question
+
+## OUTPUT FORMAT
+
+Respond ONLY with the structured report below. For each finding, be specific — quote the relevant text from both the notes and the transcript where applicable. If there are no issues in a category, write "None found."
+
+---
+
+## VALIDATION REPORT
+
+### 1. MISSING INFORMATION
+[List each missing item as a bullet: • **[Topic]:** [What is in the transcript that is absent from the notes]]
+
+### 2. INCOMPLETE QUESTIONS
+[List each issue as a bullet: • **[Question as shown in notes]:** [What is missing or incorrectly truncated]]
+
+### 3. INCORRECT ANSWERS
+[List each issue as a bullet: • **[Claim in notes]:** [What the transcript actually says]]
+
+### 4. UNSUPPORTED ASSUMPTIONS
+[List each issue as a bullet: • **[Statement in notes]:** [Why it is unsupported by the transcript]]
+
+### 5. FORMATTING ISSUES
+[List each issue as a bullet: • [Description of the specific formatting problem and where it occurs]]
+
+### OVERALL ASSESSMENT
+[2-3 sentence summary of the overall quality, completeness, and fidelity of the notes relative to the transcript. Note the severity of findings.]
+
+---"""
 
 def cleanup_stitched_notes(notes_text: str) -> str:
     """Deterministic cleanup of stitched notes — no LLM call, zero risk of content loss.
@@ -1690,6 +1771,40 @@ Your generated notes, transcripts, and chat history will appear here.
         dl4.empty()
 
     st.feedback("thumbs", key=f"fb_{active_note['id']}")
+
+    # --- VALIDATE OUTPUT COMPLETENESS ---
+    if final_transcript:
+        st.divider()
+        st.subheader("Validate Output Completeness")
+        st.caption("Runs a strict completeness and fidelity check by comparing the processed notes against the source transcript. Identifies missing information, incomplete questions, incorrect answers, and unsupported assumptions.")
+
+        val_key = f"validation_result_{active_note['id']}"
+
+        if st.button("Validate Output Completeness", key=f"validate_btn_{active_note['id']}", type="secondary", use_container_width=False):
+            with st.spinner("Running completeness and fidelity validation..."):
+                try:
+                    transcript_for_validation = final_transcript[:50000]
+                    truncation_note = ""
+                    if len(final_transcript) > 50000:
+                        truncation_note = f"\n\n[Note: Transcript truncated from {len(final_transcript):,} to 50,000 characters for validation. Findings are based on the available portion.]"
+                    validation_prompt = VALIDATION_PROMPT.format(
+                        processed_output=edited_content,
+                        transcript=transcript_for_validation + truncation_note
+                    )
+                    val_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-2.5-pro")
+                    val_model = genai.GenerativeModel(val_model_name)
+                    val_response = generate_with_retry(val_model, validation_prompt)
+                    st.session_state[val_key] = val_response.text
+                except Exception as e:
+                    st.session_state[val_key] = f"Validation failed: {str(e)}"
+
+        if val_key in st.session_state:
+            st.text_area(
+                "Gap Findings",
+                value=st.session_state[val_key],
+                height=450,
+                key=f"validation_output_{active_note['id']}",
+            )
 
     # --- CHAT ---
     st.divider()
