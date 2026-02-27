@@ -374,67 +374,73 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 {chunk_text}
 """
 
-VALIDATION_DETAILED_PROMPT = """You are a Transcript Completeness Auditor. Your job is to verify that processed meeting notes accurately and completely capture the content of the source transcript.
+VALIDATION_DETAILED_PROMPT = """You are a rigorous Transcript Completeness Auditor performing a fact-by-fact audit of processed meeting notes against the source transcript.
 
 ## INPUTS
 
-### PROCESSED NOTES ({chunk_info}):
-{processed_output}
+### FULL PROCESSED NOTES (complete — for reference when checking missing content):
+{full_notes}
+
+### PORTION TO ANNOTATE ({chunk_info}):
+{chunk_to_annotate}
 
 ### SOURCE TRANSCRIPT (Ground Truth):
 {transcript}
 
 ## CRITICAL UNDERSTANDING
 
-Notes are always paraphrased and restructured versions of the transcript — this is intentional and correct. You must NEVER flag paraphrasing, rephrasing, reorganisation, or clean compression as an error. The note-taking model's job is to restructure, not transcribe verbatim.
+Notes are always paraphrased and restructured versions of the transcript — this is intentional and CORRECT. You must NEVER flag paraphrasing, rephrasing, reorganisation, or compression as errors. The note-taking AI's job is to restructure, not transcribe verbatim.
 
-## WHAT TO FIND
+**Cross-chunk context:** The FULL PROCESSED NOTES above contain all Q&As from this call. When checking for missing content, check the FULL NOTES — if a piece of transcript content is captured *anywhere* in the full notes (even outside the PORTION TO ANNOTATE), do NOT flag it as missing.
 
-**1. MISSING CONTENT** (most important)
-Substantive facts from the transcript that are absent from the notes:
-- Specific numbers, percentages, monetary values, metrics
-- Named entities: companies, people, products, geographies
-- Key examples, anecdotes, or case studies
-- Important qualifiers or conditions that change meaning (e.g., "usually," "only in cases where," "roughly")
-- Distinct claims or reasoning chains the expert made that have no corresponding bullet
+## WHAT TO FIND — BE RIGOROUS
 
-**2. MISREPRESENTATION**
-Content in the notes that factually contradicts or distorts the transcript:
-- Wrong number or metric (e.g., notes say 20% but transcript says 30%)
-- Wrong direction of a claim (e.g., notes say growth when transcript says decline)
-- Wrong entity name or attribution
-- Overstated or understated confidence vs. what the expert actually expressed
+**1. MISSING CONTENT** (most important — go fact by fact)
+
+Walk through the TRANSCRIPT systematically, exchange by exchange. For each expert response, check the FULL NOTES for every one of the following:
+
+- **Every specific number, percentage, monetary value, metric, or growth rate** — even a single missing figure is a gap
+- **Every named entity** — companies, people, product names, geographies, regulatory bodies, specific time periods
+- **Every distinct example, anecdote, or case study** the expert used to illustrate a point — these are high-value and frequently dropped
+- **Every qualifier or hedge that changes meaning** — "roughly," "typically," "only in certain cases," "except when," "approximately," "we think," "possibly" — omitting these alters the meaning materially
+- **Every distinct reasoning chain or cause-effect link** — e.g., "because X, Y happened, which led to Z"
+- **Every comparison or contrast** — if the expert compared two companies, sectors, or time periods, check both sides are captured
+- **Every explicitly stated uncertainty or caveat** — if the expert said they were unsure, speculating, or hedging, that tone must be preserved
+
+Only flag as MISSING if the fact, name, number, or nuance genuinely does not appear anywhere in the FULL NOTES.
+
+**2. MISREPRESENTATION** (apply sparingly but precisely)
+
+Content in the PORTION TO ANNOTATE that factually contradicts or distorts the transcript:
+- Wrong number (transcript: 30%, notes: 20%)
+- Wrong direction (transcript: declining, notes: growing)
+- Wrong entity name or wrong speaker attribution
+- Expert expressed uncertainty but notes state it as established fact, or vice versa
+- A "could" or "might" in the transcript rendered as a definitive claim in the notes
 
 ## WHAT NOT TO FLAG
 
-- Paraphrasing or rephrasing → CORRECT, ignore completely
-- Restructuring or reordering of points → CORRECT, ignore completely
-- Compression or summarisation where the key facts are still present → CORRECT, ignore completely
-- Clean-up of filler, false starts, or rambling → CORRECT, ignore completely
-
-## APPROACH
-
-Walk through the transcript exchange by exchange. For each exchange:
-1. Find the corresponding Q&A in the notes
-2. Check: was the question fully captured (including key framing or multi-part scope)?
-3. Check: were all substantive facts in the answer captured?
-4. Check: is anything misrepresented?
+- Paraphrasing → CORRECT
+- Restructuring or reordering → CORRECT
+- Compression where key facts are still present → CORRECT
+- Filler, false starts, rambling clean-up → CORRECT
+- Minor synonym substitutions that preserve meaning → CORRECT
 
 ## ANNOTATIONS — TWO TYPES ONLY
 
-Do NOT use any annotation type other than these two.
+Do NOT use any markup other than these two exact formats.
 
-**MISSING CONTENT** — insert a gap note immediately after the Q&A pair where the gap occurred:
-`<div style="background:#fef9c3;border-left:3px solid #ca8a04;padding:5px 10px;margin:6px 0;font-size:0.88em;color:#78350f">⚠️ <strong>Missing:</strong> [describe specifically what the transcript says that is not captured in the notes — include the actual fact, number, name, or claim]</div>`
+**MISSING CONTENT** — insert immediately after the Q&A pair in the PORTION TO ANNOTATE where the gap is most relevant:
+`<div style="background:#fef9c3;border-left:3px solid #ca8a04;padding:5px 10px;margin:6px 0;font-size:0.88em;color:#78350f">⚠️ <strong>Missing:</strong> [quote or precisely describe the specific fact, number, name, qualifier, or example from the transcript that is absent from the full notes]</div>`
 
-**MISREPRESENTATION** — wrap only the specific wrong text and add an inline correction immediately after:
+**MISREPRESENTATION** — wrap only the specific wrong text, immediately followed by an inline correction:
 `<del style="color:#dc2626">the wrong text as it appears in the notes</del><span style="color:#16a34a;font-size:0.9em"> → [what the transcript actually says]</span>`
 
 **Correct content** — leave exactly as-is. No annotation whatsoever.
 
 ## OUTPUT
 
-Output the full annotated notes, preserving the exact original structure (bold questions, bullet points, spacing). Do NOT add any summary, footer, header, preamble, or meta-commentary of any kind. The output must look like the original notes with annotations inserted inline only where genuine issues exist."""
+Output ONLY the annotated PORTION TO ANNOTATE, preserving its exact structure (bold questions, bullet points, spacing). Do NOT output the full notes section, and do NOT add any summary, preamble, footer, or meta-commentary of any kind."""
 
 def cleanup_stitched_notes(notes_text: str) -> str:
     """Deterministic cleanup of stitched notes — no LLM call, zero risk of content loss.
@@ -1656,12 +1662,14 @@ def _confirm_delete_dialog(note_id: str, note_name: str):
 def run_validation_in_chunks(notes: str, transcript: str, model_name: str) -> list:
     """Run per-Q&A HTML-annotated validation.
 
-    Splits the notes at a Q&A boundary near the midpoint when the notes are
-    long, so each API call stays within token limits. Returns a list of 1 or
-    2 HTML-annotated result strings.
+    Always passes the FULL NOTES for context to both chunks so neither pass
+    incorrectly flags content as missing that is actually captured in the other
+    chunk. Splits only the PORTION TO ANNOTATE at Q&A boundaries.
+
+    Returns a list of 1 or 2 annotated HTML strings.
     """
     model = genai.GenerativeModel(model_name)
-    tx_limit = 35000  # characters sent to model per chunk
+    tx_limit = 40000  # characters of transcript per call
 
     # Find bold question lines — lines that start AND end with ** (markdown bold)
     note_lines = notes.split('\n')
@@ -1670,38 +1678,43 @@ def run_validation_in_chunks(notes: str, transcript: str, model_name: str) -> li
         if line.strip().startswith('**') and line.strip().endswith('**') and len(line.strip()) > 4
     ]
 
-    # Single-pass: notes are short or too few Q&As to bother splitting
-    if len(bold_indices) < 4 or len(notes) < 6000:
+    # Single-pass when notes are short or have too few Q&As to justify splitting
+    if len(bold_indices) < 4 or len(notes) < 8000:
         prompt = VALIDATION_DETAILED_PROMPT.format(
             chunk_info="Full Notes",
-            processed_output=notes,
+            full_notes=notes,
+            chunk_to_annotate=notes,
             transcript=transcript[:tx_limit]
         )
         r = generate_with_retry(model, prompt)
         return [r.text]
 
-    # Two-pass: split at the Q&A midpoint
+    # Two-pass: split the PORTION TO ANNOTATE at the Q&A midpoint.
+    # Both passes receive the FULL NOTES for context — this prevents Part 1
+    # from flagging content as missing that is captured in Part 2 and vice versa.
     split_q = len(bold_indices) // 2
     split_line = bold_indices[split_q]
     chunk1_notes = '\n'.join(note_lines[:split_line]).strip()
     chunk2_notes = '\n'.join(note_lines[split_line:]).strip()
 
-    # Both chunks receive the full transcript (up to tx_limit) so neither chunk
-    # is starved of context — a Q in the first half of the notes may have its
-    # answer anywhere in the transcript.
-    tx_for_both = transcript[:tx_limit]
+    # Transcript: transcript is sequential, so the first half maps to Part 1
+    # Q&As and the second half maps to Part 2. Send the full slice to both so
+    # neither is starved of context for edge cases.
+    tx_slice = transcript[:tx_limit]
 
     prompt1 = VALIDATION_DETAILED_PROMPT.format(
-        chunk_info="Part 1 of 2",
-        processed_output=chunk1_notes,
-        transcript=tx_for_both
+        chunk_info="Part 1 of 2 — first half of Q&As",
+        full_notes=notes,
+        chunk_to_annotate=chunk1_notes,
+        transcript=tx_slice
     )
     r1 = generate_with_retry(model, prompt1)
 
     prompt2 = VALIDATION_DETAILED_PROMPT.format(
-        chunk_info="Part 2 of 2",
-        processed_output=chunk2_notes,
-        transcript=tx_for_both
+        chunk_info="Part 2 of 2 — second half of Q&As",
+        full_notes=notes,
+        chunk_to_annotate=chunk2_notes,
+        transcript=tx_slice
     )
     r2 = generate_with_retry(model, prompt2)
 
