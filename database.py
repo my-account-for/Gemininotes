@@ -2,13 +2,18 @@
 # |   START OF database.py FILE   |
 # \------------------------------/
 
+import os
 import sqlite3
 import time
 import random
 from datetime import datetime, timedelta
 from collections import OrderedDict
 
-DB_FILE = "synthnotes.db"
+# Allow the database path to be overridden via environment variable.
+# In production (Docker), set DB_PATH=/data/synthnotes.db and mount a
+# persistent volume at /data so the database survives restarts/redeploys.
+# Falls back to the working directory for local development.
+DB_FILE = os.environ.get("DB_PATH", "synthnotes.db")
 
 DEFAULT_SECTORS = {
     "IT Services": """Future investments related comments (Including GenAI, AI, Data, Cloud, etc):
