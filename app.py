@@ -374,80 +374,51 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 {chunk_text}
 """
 
-VALIDATION_PROMPT = """You are a strict Quality Assurance Auditor. Your task is to compare a set of generated meeting notes against the original transcript to identify any gaps, inaccuracies, or quality issues.
+VALIDATION_DETAILED_PROMPT = """You are an expert Q&A Completeness Auditor. Your task is to validate processed meeting notes against the source transcript question-by-question, then produce an HTML-annotated version of the notes that visually marks every error, unsupported addition, and piece of missing content.
 
 ## INPUTS
 
-### PROCESSED NOTES (Generated Output):
+### PROCESSED NOTES ({chunk_info}):
 {processed_output}
 
 ### SOURCE TRANSCRIPT (Ground Truth):
 {transcript}
 
-## VALIDATION CRITERIA
+## YOUR TASK
 
-Perform a comprehensive audit across the following dimensions:
+Work through the processed notes sequentially, Q&A pair by Q&A pair:
 
-### 1. MISSING INFORMATION
-Identify substantive content from the transcript that is NOT captured in the notes:
-- Facts, figures, percentages, monetary values present in the transcript but absent from notes
-- Examples, anecdotes, or case studies mentioned by the expert but not captured
-- Named entities (companies, people, products, geographies) mentioned but omitted
-- Qualifiers, conditions, or hedging language that changes the meaning of a statement
+**STEP 1 — Locate:** Find the corresponding exchange in the source transcript.
+**STEP 2 — Validate the Question:** Is it accurate and complete? Does it preserve the full scope including any interviewer preamble or multi-part framing?
+**STEP 3 — Validate Each Bullet:** Is each answer bullet factually grounded in the transcript? Is the phrasing accurate? Is anything substantive missing?
+**STEP 4 — Annotate:** Apply the HTML markup rules below inline in the output.
 
-### 2. INCOMPLETE QUESTIONS
-Flag questions in the notes that:
-- Are truncated or missing key parts of the original question
-- Lose the multi-part nature of the original question
-- Omit important framing or context provided by the questioner
-- Incorrectly split interviewer preamble/context into the answer section
+## HTML ANNOTATION RULES
 
-### 3. INCORRECT ANSWERS
-Identify answers in the notes that:
-- Contradict what was actually said in the transcript
-- Contain factual errors or misattributions
-- Overstate or understate the expert's confidence, certainty, or tone
-- Merge or conflate distinct points made at different times
+Apply these annotations exactly as specified. Do NOT invent other markup.
 
-### 4. UNSUPPORTED ASSUMPTIONS
-Flag content in the notes that:
-- Was not said in the transcript (fabricated or hallucinated)
-- Represents an inference rather than a stated fact (without labeling it as such)
-- Attributes statements to the wrong speaker
+**INCORRECT or INACCURATE content** (contradicts the transcript or misrepresents what was said):
+`<del style="color:#dc2626">the inaccurate text here</del>`
 
-### 5. FORMATTING ISSUES
-Note any structural problems:
-- "Q:", "Q.", "Question:", or similar labels appearing before questions (questions should be bold text only, no labels)
-- Missing blank line between Q&A pairs (there should be one blank line between the end of an answer and the next question)
-- Questions where the interviewer's long preamble has been incorrectly placed inside the answer section instead of as part of the bold question
+**UNSUPPORTED ADDITIONS** (content not present in the transcript — hallucinated or inferred without basis):
+`<span style="background:#fee2e2;color:#991b1b;border-radius:3px;padding:1px 4px;font-style:italic">[ADDED: the unsupported text]</span>`
 
-## OUTPUT FORMAT
+**MISSING CONTENT** (substantive content in the transcript that is absent from the notes) — insert a gap note immediately after the Q&A pair where the gap occurs:
+`<div style="background:#fef9c3;border-left:3px solid #ca8a04;padding:5px 10px;margin:6px 0;font-size:0.88em;color:#78350f">⚠️ <strong>Missing:</strong> [describe what was said in the transcript that is not captured in the notes, include specifics like numbers, names, or key points]</div>`
 
-Respond ONLY with the structured report below. For each finding, be specific — quote the relevant text from both the notes and the transcript where applicable. If there are no issues in a category, write "None found."
+**CORRECT content** — leave exactly as-is. No annotation.
 
----
+## CRITICAL RULES
 
-## VALIDATION REPORT
+- Output the FULL annotated notes — do NOT skip, summarise, or truncate any Q&A pair or bullet
+- Only annotate things that are genuinely wrong or missing — do not over-flag correct content
+- Maintain all original bold question formatting and bullet structure throughout
+- Apply annotations surgically: wrap only the specific wrong words/phrases, not entire bullets or paragraphs, unless the entire unit is wrong
+- After all Q&A pairs, append a `## Validation Summary` section with 3–5 concise bullet points covering the most significant issues found. If the notes are high quality with no material issues, say so clearly.
 
-### 1. MISSING INFORMATION
-[List each missing item as a bullet: • **[Topic]:** [What is in the transcript that is absent from the notes]]
+## OUTPUT
 
-### 2. INCOMPLETE QUESTIONS
-[List each issue as a bullet: • **[Question as shown in notes]:** [What is missing or incorrectly truncated]]
-
-### 3. INCORRECT ANSWERS
-[List each issue as a bullet: • **[Claim in notes]:** [What the transcript actually says]]
-
-### 4. UNSUPPORTED ASSUMPTIONS
-[List each issue as a bullet: • **[Statement in notes]:** [Why it is unsupported by the transcript]]
-
-### 5. FORMATTING ISSUES
-[List each issue as a bullet: • [Description of the specific formatting problem and where it occurs]]
-
-### OVERALL ASSESSMENT
-[2-3 sentence summary of the overall quality, completeness, and fidelity of the notes relative to the transcript. Note the severity of findings.]
-
----"""
+Begin directly with the annotated notes (no preamble). End with the `## Validation Summary` section."""
 
 def cleanup_stitched_notes(notes_text: str) -> str:
     """Deterministic cleanup of stitched notes — no LLM call, zero risk of content loss.
@@ -1666,6 +1637,63 @@ def _confirm_delete_dialog(note_id: str, note_name: str):
         st.toast(f"Note '{display_name}' deleted.")
         st.rerun()
 
+def run_validation_in_chunks(notes: str, transcript: str, model_name: str) -> list:
+    """Run per-Q&A HTML-annotated validation.
+
+    Splits the notes at a Q&A boundary near the midpoint when the notes are
+    long, so each API call stays within token limits. Returns a list of 1 or
+    2 HTML-annotated result strings.
+    """
+    model = genai.GenerativeModel(model_name)
+    tx_limit = 35000  # characters sent to model per chunk
+
+    # Find bold question lines — lines that start AND end with ** (markdown bold)
+    note_lines = notes.split('\n')
+    bold_indices = [
+        i for i, line in enumerate(note_lines)
+        if line.strip().startswith('**') and line.strip().endswith('**') and len(line.strip()) > 4
+    ]
+
+    # Single-pass: notes are short or too few Q&As to bother splitting
+    if len(bold_indices) < 4 or len(notes) < 6000:
+        prompt = VALIDATION_DETAILED_PROMPT.format(
+            chunk_info="Full Notes",
+            processed_output=notes,
+            transcript=transcript[:tx_limit]
+        )
+        r = generate_with_retry(model, prompt)
+        return [r.text]
+
+    # Two-pass: split at the Q&A midpoint
+    split_q = len(bold_indices) // 2
+    split_line = bold_indices[split_q]
+    chunk1_notes = '\n'.join(note_lines[:split_line]).strip()
+    chunk2_notes = '\n'.join(note_lines[split_line:]).strip()
+
+    # For each notes chunk, send the most relevant portion of the transcript.
+    # Give chunk 1 the first half (+overlap) and chunk 2 the second half (+overlap).
+    tx_total = len(transcript)
+    tx_mid = tx_total // 2
+    tx_chunk1 = transcript[:min(tx_total, tx_limit)]
+    tx_chunk2 = transcript[max(0, tx_mid - 4000):max(0, tx_mid - 4000) + tx_limit]
+
+    prompt1 = VALIDATION_DETAILED_PROMPT.format(
+        chunk_info="Part 1 of 2",
+        processed_output=chunk1_notes,
+        transcript=tx_chunk1
+    )
+    r1 = generate_with_retry(model, prompt1)
+
+    prompt2 = VALIDATION_DETAILED_PROMPT.format(
+        chunk_info="Part 2 of 2",
+        processed_output=chunk2_notes,
+        transcript=tx_chunk2
+    )
+    r2 = generate_with_retry(model, prompt2)
+
+    return [r1.text, r2.text]
+
+
 def render_output_and_history_tab(state: AppState):
     notes = database.get_all_notes()
 
@@ -1776,35 +1804,47 @@ Your generated notes, transcripts, and chat history will appear here.
     if final_transcript:
         st.divider()
         st.subheader("Validate Output Completeness")
-        st.caption("Runs a strict completeness and fidelity check by comparing the processed notes against the source transcript. Identifies missing information, incomplete questions, incorrect answers, and unsupported assumptions.")
+        st.caption(
+            "Performs a detailed per-Q&A audit: each question and every answer bullet is checked "
+            "against the source transcript. Long notes are automatically split into two parts. "
+            "Results are displayed inline with colour-coded annotations."
+        )
 
         val_key = f"validation_result_{active_note['id']}"
 
         if st.button("Validate Output Completeness", key=f"validate_btn_{active_note['id']}", type="secondary", use_container_width=False):
-            with st.spinner("Running completeness and fidelity validation..."):
+            with st.spinner("Running detailed per-Q&A validation — this may take a moment..."):
                 try:
-                    transcript_for_validation = final_transcript[:50000]
-                    truncation_note = ""
-                    if len(final_transcript) > 50000:
-                        truncation_note = f"\n\n[Note: Transcript truncated from {len(final_transcript):,} to 50,000 characters for validation. Findings are based on the available portion.]"
-                    validation_prompt = VALIDATION_PROMPT.format(
-                        processed_output=edited_content,
-                        transcript=transcript_for_validation + truncation_note
-                    )
                     val_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-2.5-pro")
-                    val_model = genai.GenerativeModel(val_model_name)
-                    val_response = generate_with_retry(val_model, validation_prompt)
-                    st.session_state[val_key] = val_response.text
+                    chunks = run_validation_in_chunks(edited_content, final_transcript, val_model_name)
+                    st.session_state[val_key] = chunks
                 except Exception as e:
-                    st.session_state[val_key] = f"Validation failed: {str(e)}"
+                    st.session_state[val_key] = [f"**Validation failed:** {str(e)}"]
 
         if val_key in st.session_state:
-            st.text_area(
-                "Gap Findings",
-                value=st.session_state[val_key],
-                height=450,
-                key=f"validation_output_{active_note['id']}",
+            chunks = st.session_state[val_key]
+            # Legend
+            st.markdown(
+                "<div style='font-size:0.82em;margin:4px 0 8px 0;line-height:2'>"
+                "<span style='background:#fee2e2;color:#991b1b;border-radius:3px;"
+                "padding:2px 6px;font-style:italic;margin-right:8px'>[ADDED: …]</span>"
+                "Unsupported addition not in transcript &nbsp;|&nbsp; "
+                "<span style='color:#dc2626;text-decoration:line-through;margin-right:8px'>"
+                "strikethrough red</span> Inaccurate / contradicts transcript &nbsp;|&nbsp; "
+                "<span style='background:#fef9c3;color:#78350f;border-radius:3px;"
+                "padding:2px 6px'>⚠️ yellow block</span> Missing content"
+                "</div>",
+                unsafe_allow_html=True
             )
+            if len(chunks) == 2:
+                tab1, tab2 = st.tabs(["Part 1", "Part 2"])
+                for tab, chunk_html in zip([tab1, tab2], chunks):
+                    with tab:
+                        with st.container(height=620, border=True):
+                            st.markdown(chunk_html, unsafe_allow_html=True)
+            else:
+                with st.container(height=620, border=True):
+                    st.markdown(chunks[0], unsafe_allow_html=True)
 
     # --- CHAT ---
     st.divider()
