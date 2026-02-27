@@ -374,7 +374,7 @@ Below is a summary of the notes generated from the previous transcript chunk. Us
 {chunk_text}
 """
 
-VALIDATION_DETAILED_PROMPT = """You are an expert Q&A Completeness Auditor. Your task is to validate processed meeting notes against the source transcript question-by-question, then produce an HTML-annotated version of the notes that visually marks every error, unsupported addition, and piece of missing content.
+VALIDATION_DETAILED_PROMPT = """You are a Transcript Completeness Auditor. Your job is to verify that processed meeting notes accurately and completely capture the content of the source transcript.
 
 ## INPUTS
 
@@ -384,41 +384,57 @@ VALIDATION_DETAILED_PROMPT = """You are an expert Q&A Completeness Auditor. Your
 ### SOURCE TRANSCRIPT (Ground Truth):
 {transcript}
 
-## YOUR TASK
+## CRITICAL UNDERSTANDING
 
-Work through the processed notes sequentially, Q&A pair by Q&A pair:
+Notes are always paraphrased and restructured versions of the transcript — this is intentional and correct. You must NEVER flag paraphrasing, rephrasing, reorganisation, or clean compression as an error. The note-taking model's job is to restructure, not transcribe verbatim.
 
-**STEP 1 — Locate:** Find the corresponding exchange in the source transcript.
-**STEP 2 — Validate the Question:** Is it accurate and complete? Does it preserve the full scope including any interviewer preamble or multi-part framing?
-**STEP 3 — Validate Each Bullet:** Is each answer bullet factually grounded in the transcript? Is the phrasing accurate? Is anything substantive missing?
-**STEP 4 — Annotate:** Apply the HTML markup rules below inline in the output.
+## WHAT TO FIND
 
-## HTML ANNOTATION RULES
+**1. MISSING CONTENT** (most important)
+Substantive facts from the transcript that are absent from the notes:
+- Specific numbers, percentages, monetary values, metrics
+- Named entities: companies, people, products, geographies
+- Key examples, anecdotes, or case studies
+- Important qualifiers or conditions that change meaning (e.g., "usually," "only in cases where," "roughly")
+- Distinct claims or reasoning chains the expert made that have no corresponding bullet
 
-Apply these annotations exactly as specified. Do NOT invent other markup.
+**2. MISREPRESENTATION**
+Content in the notes that factually contradicts or distorts the transcript:
+- Wrong number or metric (e.g., notes say 20% but transcript says 30%)
+- Wrong direction of a claim (e.g., notes say growth when transcript says decline)
+- Wrong entity name or attribution
+- Overstated or understated confidence vs. what the expert actually expressed
 
-**INCORRECT or INACCURATE content** (contradicts the transcript or misrepresents what was said):
-`<del style="color:#dc2626">the inaccurate text here</del>`
+## WHAT NOT TO FLAG
 
-**UNSUPPORTED ADDITIONS** (content not present in the transcript — hallucinated or inferred without basis):
-`<span style="background:#fee2e2;color:#991b1b;border-radius:3px;padding:1px 4px;font-style:italic">[ADDED: the unsupported text]</span>`
+- Paraphrasing or rephrasing → CORRECT, ignore completely
+- Restructuring or reordering of points → CORRECT, ignore completely
+- Compression or summarisation where the key facts are still present → CORRECT, ignore completely
+- Clean-up of filler, false starts, or rambling → CORRECT, ignore completely
 
-**MISSING CONTENT** (substantive content in the transcript that is absent from the notes) — insert a gap note immediately after the Q&A pair where the gap occurs:
-`<div style="background:#fef9c3;border-left:3px solid #ca8a04;padding:5px 10px;margin:6px 0;font-size:0.88em;color:#78350f">⚠️ <strong>Missing:</strong> [describe what was said in the transcript that is not captured in the notes, include specifics like numbers, names, or key points]</div>`
+## APPROACH
 
-**CORRECT content** — leave exactly as-is. No annotation.
+Walk through the transcript exchange by exchange. For each exchange:
+1. Find the corresponding Q&A in the notes
+2. Check: was the question fully captured (including key framing or multi-part scope)?
+3. Check: were all substantive facts in the answer captured?
+4. Check: is anything misrepresented?
 
-## CRITICAL RULES
+## ANNOTATIONS — TWO TYPES ONLY
 
-- Output the FULL annotated notes — do NOT skip, summarise, or truncate any Q&A pair or bullet
-- Only annotate things that are genuinely wrong or missing — do not over-flag correct content
-- Maintain all original bold question formatting and bullet structure throughout
-- Apply annotations surgically: wrap only the specific wrong words/phrases, not entire bullets or paragraphs, unless the entire unit is wrong
-- After all Q&A pairs, append a `## Validation Summary` section with 3–5 concise bullet points covering the most significant issues found. If the notes are high quality with no material issues, say so clearly.
+Do NOT use any annotation type other than these two.
+
+**MISSING CONTENT** — insert a gap note immediately after the Q&A pair where the gap occurred:
+`<div style="background:#fef9c3;border-left:3px solid #ca8a04;padding:5px 10px;margin:6px 0;font-size:0.88em;color:#78350f">⚠️ <strong>Missing:</strong> [describe specifically what the transcript says that is not captured in the notes — include the actual fact, number, name, or claim]</div>`
+
+**MISREPRESENTATION** — wrap only the specific wrong text and add an inline correction immediately after:
+`<del style="color:#dc2626">the wrong text as it appears in the notes</del><span style="color:#16a34a;font-size:0.9em"> → [what the transcript actually says]</span>`
+
+**Correct content** — leave exactly as-is. No annotation whatsoever.
 
 ## OUTPUT
 
-Begin directly with the annotated notes (no preamble). End with the `## Validation Summary` section."""
+Output the full annotated notes, preserving the exact original structure (bold questions, bullet points, spacing). Do NOT add any summary, footer, header, preamble, or meta-commentary of any kind. The output must look like the original notes with annotations inserted inline only where genuine issues exist."""
 
 def cleanup_stitched_notes(notes_text: str) -> str:
     """Deterministic cleanup of stitched notes — no LLM call, zero risk of content loss.
@@ -1670,24 +1686,22 @@ def run_validation_in_chunks(notes: str, transcript: str, model_name: str) -> li
     chunk1_notes = '\n'.join(note_lines[:split_line]).strip()
     chunk2_notes = '\n'.join(note_lines[split_line:]).strip()
 
-    # For each notes chunk, send the most relevant portion of the transcript.
-    # Give chunk 1 the first half (+overlap) and chunk 2 the second half (+overlap).
-    tx_total = len(transcript)
-    tx_mid = tx_total // 2
-    tx_chunk1 = transcript[:min(tx_total, tx_limit)]
-    tx_chunk2 = transcript[max(0, tx_mid - 4000):max(0, tx_mid - 4000) + tx_limit]
+    # Both chunks receive the full transcript (up to tx_limit) so neither chunk
+    # is starved of context — a Q in the first half of the notes may have its
+    # answer anywhere in the transcript.
+    tx_for_both = transcript[:tx_limit]
 
     prompt1 = VALIDATION_DETAILED_PROMPT.format(
         chunk_info="Part 1 of 2",
         processed_output=chunk1_notes,
-        transcript=tx_chunk1
+        transcript=tx_for_both
     )
     r1 = generate_with_retry(model, prompt1)
 
     prompt2 = VALIDATION_DETAILED_PROMPT.format(
         chunk_info="Part 2 of 2",
         processed_output=chunk2_notes,
-        transcript=tx_chunk2
+        transcript=tx_for_both
     )
     r2 = generate_with_retry(model, prompt2)
 
@@ -1826,13 +1840,13 @@ Your generated notes, transcripts, and chat history will appear here.
             # Legend
             st.markdown(
                 "<div style='font-size:0.82em;margin:4px 0 8px 0;line-height:2'>"
-                "<span style='background:#fee2e2;color:#991b1b;border-radius:3px;"
-                "padding:2px 6px;font-style:italic;margin-right:8px'>[ADDED: …]</span>"
-                "Unsupported addition not in transcript &nbsp;|&nbsp; "
-                "<span style='color:#dc2626;text-decoration:line-through;margin-right:8px'>"
-                "strikethrough red</span> Inaccurate / contradicts transcript &nbsp;|&nbsp; "
                 "<span style='background:#fef9c3;color:#78350f;border-radius:3px;"
-                "padding:2px 6px'>⚠️ yellow block</span> Missing content"
+                "padding:2px 6px;margin-right:8px'>⚠️ yellow block</span>"
+                "Content missing from notes (present in transcript) &nbsp;|&nbsp; "
+                "<span style='color:#dc2626;text-decoration:line-through;margin-right:4px'>"
+                "strikethrough</span>"
+                "<span style='color:#16a34a;margin-right:8px'> → green correction</span>"
+                "Misrepresentation / factual error"
                 "</div>",
                 unsafe_allow_html=True
             )
