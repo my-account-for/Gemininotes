@@ -1379,17 +1379,26 @@ NEW TRANSCRIPT CHUNK TO REFINE:
                 prev_notes = all_notes_chunks[i-1]
                 current_notes = all_notes_chunks[i]
 
-                last_q_match = list(re.finditer(r"(\*\*.*?\*\*)", prev_notes))
+                # Match only standalone bold headings (full line), not inline bold within bullets.
+                # The old r"(\*\*.*?\*\*)" pattern matched any bold text including inline
+                # items like **$5B** or **important**, causing stitch points to land in the
+                # middle of bullet content and silently drop portions of the notes.
+                HEADING_RE = r"(?m)^(\*\*[^*\n]+\*\*)\s*$"
+
+                last_q_match = list(re.finditer(HEADING_RE, prev_notes))
                 if not last_q_match:
                     final_notes_content += "\n\n" + current_notes
                     continue
 
                 last_heading = last_q_match[-1].group(1)
 
-                stitch_point = current_notes.find(last_heading)
+                # Use a line-anchored search so we don't accidentally land on an
+                # inline occurrence of the same text inside a bullet point.
+                stitch_match = re.search(r"(?m)^" + re.escape(last_heading) + r"\s*$", current_notes)
+                stitch_point = stitch_match.start() if stitch_match else -1
 
                 if stitch_point != -1:
-                    next_q_match = re.search(r"(\*\*.*?\*\*)", current_notes[stitch_point + len(last_heading):])
+                    next_q_match = re.search(HEADING_RE, current_notes[stitch_point + len(last_heading):])
                     if next_q_match:
                         final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading) + next_q_match.start():]
                     else:
