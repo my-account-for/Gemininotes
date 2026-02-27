@@ -17,11 +17,14 @@ COPY . .
 # Mount a volume here in production: DB_PATH=/data/synthnotes.db
 RUN mkdir -p /data
 
-EXPOSE 8501
+# Default to 8501; Railway overrides PORT at runtime with its own dynamic value.
+# Shell form (not exec form) is used so ${PORT} is expanded correctly.
+ENV PORT=8501
+EXPOSE ${PORT}
 
-CMD ["streamlit", "run", "app.py", \
-     "--server.port=8501", \
-     "--server.address=0.0.0.0", \
-     "--server.headless=true", \
-     "--server.enableCORS=false", \
-     "--server.enableXsrfProtection=false"]
+CMD streamlit run app.py \
+    --server.port=${PORT} \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --server.enableCORS=false \
+    --server.enableXsrfProtection=false
