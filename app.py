@@ -418,6 +418,13 @@ Content in the PORTION TO ANNOTATE that factually contradicts or distorts the tr
 - Expert expressed uncertainty but notes state it as established fact, or vice versa
 - A "could" or "might" in the transcript rendered as a definitive claim in the notes
 
+**3. REPEATED Q&A** (check the FULL NOTES)
+
+Scan the FULL PROCESSED NOTES for Q&A pairs that cover substantially the same question or repeat the same answer content. This happens when chunked note generation produces near-duplicate sections due to transcript overlap. Flag as repeated if:
+- Two bold questions ask essentially the same thing (even if worded differently)
+- An answer block appears twice with the same or very similar bullet points
+- A topic or data point is covered in near-identical language in two separate Q&A pairs
+
 ## WHAT NOT TO FLAG
 
 - Paraphrasing → CORRECT
@@ -425,16 +432,20 @@ Content in the PORTION TO ANNOTATE that factually contradicts or distorts the tr
 - Compression where key facts are still present → CORRECT
 - Filler, false starts, rambling clean-up → CORRECT
 - Minor synonym substitutions that preserve meaning → CORRECT
+- A topic mentioned briefly in one Q&A and fully covered in another → NOT a repeat (only flag true duplicates)
 
-## ANNOTATIONS — TWO TYPES ONLY
+## ANNOTATIONS — THREE TYPES ONLY
 
-Do NOT use any markup other than these two exact formats.
+Do NOT use any markup other than these three exact formats.
 
 **MISSING CONTENT** — insert immediately after the Q&A pair in the PORTION TO ANNOTATE where the gap is most relevant:
 `<div style="background:#fef9c3;border-left:3px solid #ca8a04;padding:5px 10px;margin:6px 0;font-size:0.88em;color:#78350f">⚠️ <strong>Missing:</strong> [quote or precisely describe the specific fact, number, name, qualifier, or example from the transcript that is absent from the full notes]</div>`
 
 **MISREPRESENTATION** — wrap only the specific wrong text, immediately followed by an inline correction:
 `<del style="color:#dc2626">the wrong text as it appears in the notes</del><span style="color:#16a34a;font-size:0.9em"> → [what the transcript actually says]</span>`
+
+**REPEATED Q&A** — insert immediately before the duplicate bold question in the PORTION TO ANNOTATE:
+`<div style="background:#ede9fe;border-left:3px solid #7c3aed;padding:5px 10px;margin:6px 0;font-size:0.88em;color:#5b21b6">🔁 <strong>Duplicate:</strong> This Q&A substantially repeats [describe which earlier Q&A it duplicates and what the overlapping content is]</div>`
 
 **Correct content** — leave exactly as-is. No annotation whatsoever.
 
@@ -1854,12 +1865,15 @@ Your generated notes, transcripts, and chat history will appear here.
             st.markdown(
                 "<div style='font-size:0.82em;margin:4px 0 8px 0;line-height:2'>"
                 "<span style='background:#fef9c3;color:#78350f;border-radius:3px;"
-                "padding:2px 6px;margin-right:8px'>⚠️ yellow block</span>"
-                "Content missing from notes (present in transcript) &nbsp;|&nbsp; "
-                "<span style='color:#dc2626;text-decoration:line-through;margin-right:4px'>"
+                "padding:2px 6px;margin-right:8px'>⚠️ yellow</span>"
+                "Missing content &nbsp;|&nbsp; "
+                "<span style='color:#dc2626;text-decoration:line-through;margin-right:2px'>"
                 "strikethrough</span>"
-                "<span style='color:#16a34a;margin-right:8px'> → green correction</span>"
-                "Misrepresentation / factual error"
+                "<span style='color:#16a34a;margin-right:8px'> → green</span>"
+                "Misrepresentation &nbsp;|&nbsp; "
+                "<span style='background:#ede9fe;color:#5b21b6;border-radius:3px;"
+                "padding:2px 6px;margin-right:8px'>🔁 purple</span>"
+                "Repeated / duplicate Q&A"
                 "</div>",
                 unsafe_allow_html=True
             )
