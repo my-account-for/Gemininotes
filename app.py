@@ -2158,7 +2158,7 @@ SOURCE TRANSCRIPT:
 
 def _build_ia_prompt_template(meeting_type: str, tone: str) -> str:
     """Return the IA prompt with tone instruction filled in; {transcript} left as placeholder."""
-    tone_text = IA_TONE_INSTRUCTIONS.get(tone, IA_TONE_INSTRUCTIONS["Research Tone"])
+    tone_text = IA_TONE_INSTRUCTIONS.get(tone, IA_TONE_INSTRUCTIONS["Neutral"])
     base = IA_MANAGEMENT_KTA_PROMPT if meeting_type == "management" else IA_EXPERT_KTA_PROMPT
     return base.replace("{tone_instruction}", tone_text)
 
