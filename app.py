@@ -593,131 +593,117 @@ SOURCE NOTES:
 
 # --- INVESTMENT ANALYST PROCESSING PROMPTS ---
 
-IA_MANAGEMENT_KTA_PROMPT = """{tone_instruction}
-
-You are a senior equity research analyst processing a Company Management Meeting transcript.
+IA_MANAGEMENT_KTA_PROMPT = """You are a senior equity research analyst processing a Company Management Meeting transcript.
 
 Generate exactly TWO clearly separated sections as shown below.
 
 ============================================================
-OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Clean, Structured)
+OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Framework-Structured)
 ============================================================
 
-Rules:
-- Select the 4–5 most investment-relevant points only. Prioritise what directly affects the investment thesis.
-- No storytelling. No filler. No repetition. No generic commentary.
-- Each bullet = one complete, factual, investable statement.
-- Include every number mentioned (%, bps, ₹, $, multiples, timelines).
-- State direction explicitly: note if trend is improving, deteriorating, or stable.
-- Filter noise aggressively.
-- If management was vague on a topic → write: "Mgmt vague on [topic]."
-- Do NOT add interpretation beyond what was stated in the transcript.
+Instructions:
+- Map the transcript findings to the framework below.
+- Only include a section if the meeting covered it meaningfully. Skip sections not discussed.
+- Each included section gets exactly ONE concise, factual bullet.
+- No storytelling. No filler. No repetition.
+- Include all numbers stated (%, bps, ₹, $, multiples, timelines).
+- State direction where clear: improving / deteriorating / stable.
+- If management was vague → write: "Mgmt vague on [topic]."
+- Do NOT add interpretation beyond what was stated.
+- Framing of findings: {tone_instruction}
 
-Format: Exactly 4–5 bullet points (•). Example style:
-• Margins expected to expand 20–30 bps over next 2–3 quarters.
-• Capex cycle likely to accelerate in H2; quantum not disclosed.
-• Management targets 20% ROCE at steady state.
-• Demand recovery timeline: Mgmt vague.
+Framework — include only sections discussed, preserve this order:
+
+  Strategy        → Overall strategic direction, long-term priorities, positioning
+  Industry        → Changes in industry structure, competitive dynamics, regulatory shifts
+  Thematic        → Macro, sector-level, or cross-cutting thematic trends discussed
+  Org / Structure → Organisational changes, leadership, reporting structure
+  Execution       → Operational delivery, GTM, product, supply chain, capacity
+  Revenue         → Revenue growth, volume, pricing, mix, segments
+  Margins         → Gross margin, EBITDA margin, cost structure, levers
+  Capital Alloc.  → Capex, M&A, dividends, buybacks, debt, working capital
+  Mgmt Culture    → Management tone, accountability, credibility, transparency signals
+
+Format: Bold section label followed by the bullet on the same line. Example:
+**Revenue:** Volume-led growth expected in H2; management not guiding for price increases.
+**Margins:** EBITDA margin expansion of 20–30 bps over next 2–3 quarters.
+**Capital Alloc.:** Net debt declining; target net-cash position by FY26. Capex quantum not disclosed.
+**Execution:** Supply chain normalisation on track; Mgmt vague on exact timeline.
 
 ============================================================
-OUTPUT 2: ROUGH NOTES (Raw Analyst Notebook Style)
+OUTPUT 2: ROUGH NOTES (Meeting Notes)
 ============================================================
 
-Rules:
-- Comprehensive coverage — capture ALL substantive points discussed, not just the top ones.
-- Organise by topic (Revenue, Volume/Pricing, Margins, Opex, Capex, Balance Sheet, Guidance, Competition, Demand, etc.).
+Instructions:
+- Capture ALL substantive points discussed — comprehensive, not selective.
+- Write as neutral, unbiased meeting notes. State what was said. No editorial framing or spin.
+- Organise by topic with bold headers matching what was discussed.
 - Short bullets per topic. Raw. Unpolished.
-- Abbreviations strongly encouraged: Mgmt, Rev, Vol, ASP, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, D/E, WC, etc.
-- Include qualitative colour and context, not just numbers.
-- Write exactly like an analyst scribbling live during the meeting.
-- Do NOT polish or complete sentences.
-- If something was unclear or unquantified → write "unclear" or "not quantified."
+- Abbreviations: Mgmt, Rev, Vol, ASP, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, D/E, WC, etc.
+- Include qualitative context alongside numbers — what was the tone, what was stressed, what was avoided.
+- Do NOT complete sentences. Do NOT add positive/negative spin.
+- If unclear or unquantified → write "unclear" or "not quantified."
 
-Format: Bold topic headers, short dashes (-) under each. Example:
-
-**Revenue / Volume:**
-- Rev guidance maintained
-- Volume-led growth; price hikes unlikely near-term
-
-**Margins:**
-- GM stable QoQ; EBITDA margin expansion 20–30 bps next 2–3Q
-- Fixed cost leverage kicking in
-
-**Capex / Balance Sheet:**
-- H2 acceleration likely; quantum not shared
-- Net debt declining; target net-cash by FY26
-
-**Guidance / Targets:**
-- ROCE target 20% at steady state
-- No FY guidance change; H2 to be stronger
+Format: Bold topic headers, short dashes (-) under each. Cover all topics from the meeting.
 
 ---
 TRANSCRIPT:
 {transcript}
 """
 
-IA_EXPERT_KTA_PROMPT = """{tone_instruction}
-
-You are a senior equity research analyst processing an Expert / Industry Expert / Channel Check Meeting transcript.
+IA_EXPERT_KTA_PROMPT = """You are a senior equity research analyst processing an Expert / Industry Expert / Channel Check Meeting transcript.
 
 Generate exactly TWO clearly separated sections as shown below.
 
 ============================================================
-OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Clean, Structured)
+OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Framework-Structured)
 ============================================================
 
-Rules:
-- Select the 4–5 most investment-relevant points only. Prioritise what directly affects the investment thesis.
-- No storytelling. No filler. No repetition. No generic commentary.
-- Each bullet = one complete, factual, investable statement.
-- Include every number mentioned (%, bps, ₹, $, multiples, timelines, volumes).
+Instructions:
+- Map the transcript findings to the framework below.
+- Only include a section if the meeting covered it meaningfully. Skip sections not discussed.
+- Each included section gets exactly ONE concise, factual bullet.
+- No storytelling. No filler. No repetition.
+- Include all numbers stated (%, bps, ₹, $, multiples, timelines, volumes).
 - Tag the source type where distinguishable — prefix with [Expert view], [Channel check], or [Industry data].
-- State direction explicitly: note if trend is improving, deteriorating, or stable.
-- Filter noise aggressively.
-- If the expert was vague or speculative → write: "Expert unclear on [topic]."
-- Do NOT add interpretation beyond what was stated in the transcript.
+- State direction where clear: improving / deteriorating / stable.
+- If the expert was vague → write: "Expert unclear on [topic]."
+- Do NOT add interpretation beyond what was stated.
+- Framing of findings: {tone_instruction}
 
-Format: Exactly 4–5 bullet points (•). Example style:
-• [Channel check] Dealer inventory at 45–60 days vs. historical norm of 30 days — deteriorating.
-• [Expert view] Demand weakening across Tier-2 cities, particularly in discretionary categories.
-• [Industry data] Organised players gaining ~200 bps share annually from unorganised segment.
-• Expert unclear on timeline for demand recovery.
+Framework — include only sections discussed, preserve this order:
+
+  Industry        → Industry structure, competitive landscape, organised vs. unorganised
+  Demand          → Consumer/end-customer demand trends, geographic or category split
+  Channel / Trade → Distributor, dealer, retailer behaviour, trade sentiment
+  Inventory       → Channel inventory levels, days vs. norm, restocking / destocking
+  Pricing         → Pricing trends, discounting, premium vs. mass dynamics
+  Margins         → Industry-level or dealer-level profitability, cost pressures
+  Competition     → Market share shifts, new entrants, key competitive moves
+  Regulatory/Macro→ Regulatory changes, macro factors, government policies
+  Outlook         → Near-term and medium-term trajectory per expert
+
+Format: Bold section label followed by the bullet on the same line. Example:
+**Inventory:** [Channel check] Dealer inventory at 45–60 days vs. norm of 30 — ongoing destocking.
+**Demand:** [Expert view] Demand weakening across Tier-2 cities; discretionary most impacted.
+**Industry:** [Industry data] Organised players gaining ~200 bps share annually from unorganised.
+**Outlook:** Expert unclear on recovery timeline; cautious on H1.
 
 ============================================================
-OUTPUT 2: ROUGH NOTES (Raw Analyst Notebook Style)
+OUTPUT 2: ROUGH NOTES (Meeting Notes)
 ============================================================
 
-Rules:
-- Comprehensive coverage — capture ALL substantive points discussed, not just the top ones.
-- Organise by topic (Demand, Channel/Trade, Inventory, Pricing, Competition, Industry Structure, Outlook, etc.).
+Instructions:
+- Capture ALL substantive points discussed — comprehensive, not selective.
+- Write as neutral, unbiased meeting notes. State what was said. No editorial framing or spin.
+- Organise by topic with bold headers matching what was discussed.
 - Short bullets per topic. Raw. Unpolished.
-- Abbreviations strongly encouraged: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, ASP, inv, dist, etc.
-- Include qualitative colour and context, not just numbers.
-- Write exactly like an analyst scribbling live during the meeting.
-- Do NOT polish or complete sentences.
-- If something was unclear or unquantified → write "unclear" or "not quantified."
+- Abbreviations: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, ASP, inv, dist, etc.
+- Include qualitative context alongside numbers — what was stressed, what was avoided, any caveats given.
+- Do NOT complete sentences. Do NOT add positive/negative spin.
+- If unclear or unquantified → write "unclear" or "not quantified."
 
-Format: Bold topic headers, short dashes (-) under each. Example:
-
-**Demand / Consumer:**
-- Demand weak in T2/T3; disc categories worse
-- Urban recovery faster than rural
-
-**Channel / Inventory:**
-- Dealer inv: 45–60d vs norm 30d; deteriorating
-- Destocking ongoing; unlikely to resolve Q1
-
-**Pricing / Margins:**
-- No pricing power; discounting to clear stock
-- GM under pressure; exact quantum unclear
-
-**Industry / Competition:**
-- Org. players gaining ~200 bps/yr vs unorg.
-- Online channel growing fast
-
-**Outlook:**
-- Recovery timeline: expert unclear
-- Expert cautious on H1; possible H2 pick-up
+Format: Bold topic headers, short dashes (-) under each. Cover all topics from the meeting.
 
 ---
 TRANSCRIPT:
@@ -725,8 +711,11 @@ TRANSCRIPT:
 """
 
 IA_TONE_INSTRUCTIONS = {
-    "Research Tone": "Tone: Write in a formal, precise, investment-grade research style. Use analytical language. Avoid colloquialisms or conversational phrasing.",
-    "As Is": "Tone: Preserve the language and style from the transcript as closely as possible. Reflect the speaker's own words and expressions where relevant. Do not over-formalise.",
+    "Very Positive": "Frame Output 1 findings in the most constructive investment light. Lead with strengths, growth, and opportunity. Challenges are acknowledged only as temporary or manageable context.",
+    "Positive": "Frame Output 1 findings constructively. Opportunities lead. Risks acknowledged but not alarming. Overall tone is favourable.",
+    "Neutral": "Frame Output 1 findings objectively. Present facts as stated. Balanced where evidence is mixed. No tilting positive or negative.",
+    "Negative": "Frame Output 1 findings with risks and headwinds leading. Positives are noted but insufficient to offset structural concerns.",
+    "Very Negative": "Frame Output 1 findings around structural problems, execution gaps, and risks. Even positives are presented as temporary or inadequate.",
 }
 
 # --- EARNINGS CALL MULTI-FILE ANALYSIS PROMPTS ---
@@ -2180,11 +2169,13 @@ def render_ia_processing(state: AppState):
     # --- Session state init ---
     for key, default in [
         ("ia_meeting_type", "management"),
-        ("ia_tone", "Research Tone"),
+        ("ia_tone", "Neutral"),
         ("ia_transcript", ""),
         ("ia_output", ""),
         ("ia_prompt_text", ""),
         ("ia_prompt_seed", ("", "")),
+        ("ia_company_name", ""),
+        ("ia_area", ""),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
@@ -2200,17 +2191,36 @@ def render_ia_processing(state: AppState):
     )
     st.session_state.ia_meeting_type = "management" if meeting_type_opt.startswith("1") else "expert"
 
-    st.markdown("#### Note Style")
+    # Company / area fields
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        st.session_state.ia_company_name = st.text_input(
+            "Company / Entity Name",
+            value=st.session_state.ia_company_name,
+            placeholder="e.g. Reliance, Hero MotoCorp",
+            key="ia_company_name_input",
+        )
+    with _c2:
+        if st.session_state.ia_meeting_type == "expert":
+            st.session_state.ia_area = st.text_input(
+                "Coverage Area / Sector",
+                value=st.session_state.ia_area,
+                placeholder="e.g. Two-Wheeler Dealerships, Quick Commerce",
+                key="ia_area_input",
+            )
+
+    st.markdown("#### Tone (Output 1 framing)")
+    _ia_tone_keys = list(IA_TONE_INSTRUCTIONS.keys())
     tone = st.radio(
         "Tone",
-        options=list(IA_TONE_INSTRUCTIONS.keys()),
-        index=list(IA_TONE_INSTRUCTIONS.keys()).index(
-            st.session_state.ia_tone if st.session_state.ia_tone in IA_TONE_INSTRUCTIONS else "Research Tone"
+        options=_ia_tone_keys,
+        index=_ia_tone_keys.index(
+            st.session_state.ia_tone if st.session_state.ia_tone in IA_TONE_INSTRUCTIONS else "Neutral"
         ),
         horizontal=True,
         label_visibility="collapsed",
         key="ia_tone_radio",
-        help="Research Tone: formal investment-grade language.  As Is: preserve the transcript's own language and phrasing.",
+        help="Controls how Output 1 findings are framed. Output 2 (Rough Notes) is always neutral.",
     )
     st.session_state.ia_tone = tone
 
@@ -2295,10 +2305,28 @@ def render_ia_processing(state: AppState):
                 rough_text = raw[idx:].strip()
                 break
 
+        # Build dynamic headings
+        _co = st.session_state.ia_company_name.strip()
+        _ar = st.session_state.ia_area.strip()
+        if st.session_state.ia_meeting_type == "management":
+            _kta_heading = f"KTAs — Management of {_co}" if _co else "Key Investment Takeaways — Management Meeting"
+            _rough_heading = f"Meeting Notes — {_co} Management" if _co else "Rough Notes — Management Meeting"
+        else:
+            _kta_heading = (
+                f"KTAs — Expert on {_co}" + (f" | {_ar}" if _ar else "")
+                if _co else
+                "Key Investment Takeaways — Expert Meeting"
+            )
+            _rough_heading = (
+                f"Meeting Notes — Expert on {_co}" + (f" ({_ar})" if _ar else "")
+                if _co else
+                "Rough Notes — Expert Meeting"
+            )
+
         col_kta, col_rough = st.columns(2, gap="large")
 
         with col_kta:
-            st.markdown("### Key Investment Takeaways")
+            st.markdown(f"### {_kta_heading}")
             with st.container(border=True):
                 st.markdown(kta_text)
             copy_to_clipboard_button(kta_text, "Copy KTAs")
@@ -2312,7 +2340,7 @@ def render_ia_processing(state: AppState):
             )
 
         with col_rough:
-            st.markdown("### Rough Notes")
+            st.markdown(f"### {_rough_heading}")
             with st.container(border=True):
                 st.markdown(rough_text if rough_text else raw)
             copy_to_clipboard_button(rough_text if rough_text else raw, "Copy Rough Notes")
