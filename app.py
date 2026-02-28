@@ -591,6 +591,100 @@ SOURCE NOTES:
 """
 
 
+# --- INVESTMENT ANALYST PROCESSING PROMPTS ---
+
+IA_MANAGEMENT_KTA_PROMPT = """You are a senior equity research analyst processing a Company Management Meeting transcript.
+
+Generate exactly TWO clearly separated sections as shown below.
+
+============================================================
+OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Clean, Structured)
+============================================================
+
+Rules:
+- No storytelling. No filler. No repetition. No generic commentary.
+- Each bullet = one complete, investable statement.
+- Include every number mentioned (%, bps, ₹, $, multiples, timelines).
+- Reflect tone where clear — suffix bullets with [Confident], [Cautious], or [Promotional] where applicable.
+- Show direction explicitly: note if trend is improving, deteriorating, or stable.
+- Filter noise aggressively.
+- If management was vague on a topic → write: "Mgmt vague on [topic]."
+- Do NOT add interpretation beyond what was implied in the transcript.
+
+Format: Bullet points (•). Example style:
+• Margins expected to expand 20–30 bps over next 2–3 quarters. [Confident]
+• Capex cycle likely to accelerate in H2; quantum not disclosed. [Mgmt vague]
+• Management confident on reaching 20% ROCE at steady state.
+• Regulatory stance becoming more favourable per management view. [Promotional]
+
+============================================================
+OUTPUT 2: ROUGH NOTES (Raw Analyst Notebook Style)
+============================================================
+
+Rules:
+- Short bullets. Raw. Unpolished.
+- Abbreviations strongly encouraged: Mgmt, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, etc.
+- Write exactly like an analyst scribbling live during the meeting.
+- Do NOT polish or complete sentences.
+- If something was unclear or unquantified → write "unclear" or "not quantified."
+
+Format: Short dashes (-). Example style:
+- Rev guidance maintained; mgmt confident
+- Margins: 20–30 bps expansion next 2–3Q
+- Capex: H2 acceleration likely; quantum not shared
+- ROCE target 20% at steady state
+
+---
+TRANSCRIPT:
+{transcript}
+"""
+
+IA_EXPERT_KTA_PROMPT = """You are a senior equity research analyst processing an Expert / Industry Expert / Channel Check Meeting transcript.
+
+Generate exactly TWO clearly separated sections as shown below.
+
+============================================================
+OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Clean, Structured)
+============================================================
+
+Rules:
+- No storytelling. No filler. No repetition. No generic commentary.
+- Each bullet = one complete, investable statement.
+- Include every number mentioned (%, bps, ₹, $, multiples, timelines, volumes).
+- Tag the source type where distinguishable — prefix with [Expert view], [Channel check], or [Industry data].
+- Show direction explicitly: note if trend is improving, deteriorating, or stable.
+- Filter noise aggressively.
+- If the expert was vague or speculative → write: "Expert unclear on [topic]."
+- Do NOT add interpretation beyond what was implied in the transcript.
+
+Format: Bullet points (•). Example style:
+• [Channel check] Dealer inventory at 45–60 days vs. historical norm of 30 days — deteriorating.
+• [Expert view] Demand environment weakening across Tier-2 cities, particularly in discretionary categories.
+• Expert unclear on timeline for demand recovery.
+• [Industry data] Organised players gaining ~200 bps share annually from unorganised segment.
+
+============================================================
+OUTPUT 2: ROUGH NOTES (Raw Analyst Notebook Style)
+============================================================
+
+Rules:
+- Short bullets. Raw. Unpolished.
+- Abbreviations strongly encouraged: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, etc.
+- Write exactly like an analyst scribbling live during the meeting.
+- Do NOT polish or complete sentences.
+- If something was unclear or unquantified → write "unclear" or "not quantified."
+
+Format: Short dashes (-). Example style:
+- Dealer inv: 45–60d vs norm 30d; deteriorating
+- Demand weak in T2/T3; disc categories worse
+- Org. players gaining ~200 bps/yr vs unorg.
+- Recovery timeline: expert unclear
+
+---
+TRANSCRIPT:
+{transcript}
+"""
+
 # --- EARNINGS CALL MULTI-FILE ANALYSIS PROMPTS ---
 
 EC_TOPIC_DISCOVERY_PROMPT = """You are an expert equity research analyst. Analyze the following earnings call transcripts and identify the key topics discussed.
@@ -2029,8 +2123,146 @@ SOURCE TRANSCRIPT:
                 if st.button("Delete", key=f"del_{note['id']}", use_container_width=True, type="tertiary"):
                     _confirm_delete_dialog(note['id'], note['file_name'])
 
+def render_ia_processing(state: AppState):
+    """Investment Analyst Processing: two-step transcript → dual output (KTAs + Rough Notes)."""
+
+    # --- Session state init ---
+    for key, default in [
+        ("ia_meeting_type", None),
+        ("ia_transcript", ""),
+        ("ia_output", ""),
+    ]:
+        if key not in st.session_state:
+            st.session_state[key] = default
+
+    # --- Step 1: Meeting type selection ---
+    st.markdown("#### Step 1 — Select Meeting Type")
+    meeting_type = st.radio(
+        "Meeting type",
+        options=["1 — Company Management Meeting", "2 — Expert / Industry Expert / Channel Check Meeting"],
+        index=0 if st.session_state.ia_meeting_type != "expert" else 1,
+        label_visibility="collapsed",
+        key="ia_meeting_type_radio",
+    )
+    st.session_state.ia_meeting_type = "management" if meeting_type.startswith("1") else "expert"
+
+    st.divider()
+
+    # --- Step 2: Transcript input ---
+    st.markdown("#### Step 2 — Paste the Transcript")
+    st.session_state.ia_transcript = st.text_area(
+        "Transcript",
+        value=st.session_state.ia_transcript,
+        height=320,
+        placeholder="Paste the full meeting transcript here…",
+        label_visibility="collapsed",
+        key="ia_transcript_input",
+    )
+
+    if not st.session_state.ia_transcript.strip():
+        st.info("Paste the transcript above to continue.")
+        return
+
+    wc = len(st.session_state.ia_transcript.split())
+    st.caption(f"{wc:,} words")
+
+    st.divider()
+
+    # --- Generate ---
+    if st.button("Generate Investment Analysis", type="primary", use_container_width=True, key="ia_generate_btn"):
+        with st.spinner("Generating key takeaways and rough notes…"):
+            try:
+                model = _get_cached_model(state.notes_model)
+                if st.session_state.ia_meeting_type == "management":
+                    prompt = IA_MANAGEMENT_KTA_PROMPT.format(transcript=st.session_state.ia_transcript)
+                else:
+                    prompt = IA_EXPERT_KTA_PROMPT.format(transcript=st.session_state.ia_transcript)
+                response = generate_with_retry(model, prompt)
+                st.session_state.ia_output = response.text
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to generate analysis: {e}")
+
+    # --- Display output ---
+    if st.session_state.ia_output:
+        st.divider()
+
+        raw = st.session_state.ia_output
+
+        # Split on the OUTPUT 2 header to separate the two sections
+        sep_markers = [
+            "OUTPUT 2: ROUGH NOTES",
+            "OUTPUT 2:",
+            "ROUGH NOTES",
+        ]
+        kta_text = raw
+        rough_text = ""
+        for marker in sep_markers:
+            idx = raw.find(marker)
+            if idx != -1:
+                kta_text = raw[:idx].strip()
+                rough_text = raw[idx:].strip()
+                break
+
+        col_kta, col_rough = st.columns(2, gap="large")
+
+        with col_kta:
+            st.markdown("### Key Investment Takeaways")
+            with st.container(border=True):
+                st.markdown(kta_text)
+            copy_to_clipboard_button(kta_text, "Copy KTAs")
+            st.download_button(
+                "Download KTAs (.txt)",
+                data=kta_text,
+                file_name="Key_Investment_Takeaways.txt",
+                mime="text/plain",
+                use_container_width=True,
+                key="ia_dl_kta",
+            )
+
+        with col_rough:
+            st.markdown("### Rough Notes")
+            with st.container(border=True):
+                st.markdown(rough_text if rough_text else raw)
+            copy_to_clipboard_button(rough_text if rough_text else raw, "Copy Rough Notes")
+            st.download_button(
+                "Download Rough Notes (.txt)",
+                data=rough_text if rough_text else raw,
+                file_name="Rough_Notes.txt",
+                mime="text/plain",
+                use_container_width=True,
+                key="ia_dl_rough",
+            )
+
+        st.divider()
+        copy_to_clipboard_button(raw, "Copy Full Output")
+        st.download_button(
+            "Download Full Output (.txt)",
+            data=raw,
+            file_name="Investment_Analysis_Full.txt",
+            mime="text/plain",
+            use_container_width=True,
+            key="ia_dl_full",
+        )
+
+
 def render_otg_notes_tab(state: AppState):
-    st.subheader("Convert Notes to Research Style")
+    st.subheader("OTG Notes")
+
+    # --- Top-level mode selector ---
+    otg_mode = st.pills(
+        "Mode",
+        ["Research Style", "Investment Analyst"],
+        default="Research Style",
+        key="otg_mode_pills",
+    )
+
+    st.divider()
+
+    if otg_mode == "Investment Analyst":
+        render_ia_processing(state)
+        return
+
     st.caption("Paste detailed meeting notes to convert them into concise, narrative-style research notes. Select entities, topics, tone, and data emphasis to control the output.")
 
     # --- OTG State init ---
