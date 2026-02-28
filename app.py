@@ -2180,6 +2180,14 @@ def render_ia_processing(state: AppState):
         if key not in st.session_state:
             st.session_state[key] = default
 
+    # Sanitize tone — if a stale value (e.g. "Research Tone") is no longer a valid
+    # option, reset both the logical value and the widget's own session state key.
+    # Without this, st.radio raises KeyError internally on the stale value.
+    if st.session_state.get("ia_tone") not in IA_TONE_INSTRUCTIONS:
+        st.session_state["ia_tone"] = "Neutral"
+    if st.session_state.get("ia_tone_radio") not in IA_TONE_INSTRUCTIONS:
+        st.session_state.pop("ia_tone_radio", None)
+
     # --- Step 1: Meeting type + tone ---
     st.markdown("#### Step 1 — Meeting Type")
     meeting_type_opt = st.radio(
