@@ -593,7 +593,9 @@ SOURCE NOTES:
 
 # --- INVESTMENT ANALYST PROCESSING PROMPTS ---
 
-IA_MANAGEMENT_KTA_PROMPT = """You are a senior equity research analyst processing a Company Management Meeting transcript.
+IA_MANAGEMENT_KTA_PROMPT = """{tone_instruction}
+
+You are a senior equity research analyst processing a Company Management Meeting transcript.
 
 Generate exactly TWO clearly separated sections as shown below.
 
@@ -602,44 +604,61 @@ OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Clean, Structured)
 ============================================================
 
 Rules:
+- Select the 4–5 most investment-relevant points only. Prioritise what directly affects the investment thesis.
 - No storytelling. No filler. No repetition. No generic commentary.
-- Each bullet = one complete, investable statement.
+- Each bullet = one complete, factual, investable statement.
 - Include every number mentioned (%, bps, ₹, $, multiples, timelines).
-- Reflect tone where clear — suffix bullets with [Confident], [Cautious], or [Promotional] where applicable.
-- Show direction explicitly: note if trend is improving, deteriorating, or stable.
+- State direction explicitly: note if trend is improving, deteriorating, or stable.
 - Filter noise aggressively.
 - If management was vague on a topic → write: "Mgmt vague on [topic]."
-- Do NOT add interpretation beyond what was implied in the transcript.
+- Do NOT add interpretation beyond what was stated in the transcript.
 
-Format: Bullet points (•). Example style:
-• Margins expected to expand 20–30 bps over next 2–3 quarters. [Confident]
-• Capex cycle likely to accelerate in H2; quantum not disclosed. [Mgmt vague]
-• Management confident on reaching 20% ROCE at steady state.
-• Regulatory stance becoming more favourable per management view. [Promotional]
+Format: Exactly 4–5 bullet points (•). Example style:
+• Margins expected to expand 20–30 bps over next 2–3 quarters.
+• Capex cycle likely to accelerate in H2; quantum not disclosed.
+• Management targets 20% ROCE at steady state.
+• Demand recovery timeline: Mgmt vague.
 
 ============================================================
 OUTPUT 2: ROUGH NOTES (Raw Analyst Notebook Style)
 ============================================================
 
 Rules:
-- Short bullets. Raw. Unpolished.
-- Abbreviations strongly encouraged: Mgmt, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, etc.
+- Comprehensive coverage — capture ALL substantive points discussed, not just the top ones.
+- Organise by topic (Revenue, Volume/Pricing, Margins, Opex, Capex, Balance Sheet, Guidance, Competition, Demand, etc.).
+- Short bullets per topic. Raw. Unpolished.
+- Abbreviations strongly encouraged: Mgmt, Rev, Vol, ASP, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, D/E, WC, etc.
+- Include qualitative colour and context, not just numbers.
 - Write exactly like an analyst scribbling live during the meeting.
 - Do NOT polish or complete sentences.
 - If something was unclear or unquantified → write "unclear" or "not quantified."
 
-Format: Short dashes (-). Example style:
-- Rev guidance maintained; mgmt confident
-- Margins: 20–30 bps expansion next 2–3Q
-- Capex: H2 acceleration likely; quantum not shared
+Format: Bold topic headers, short dashes (-) under each. Example:
+
+**Revenue / Volume:**
+- Rev guidance maintained
+- Volume-led growth; price hikes unlikely near-term
+
+**Margins:**
+- GM stable QoQ; EBITDA margin expansion 20–30 bps next 2–3Q
+- Fixed cost leverage kicking in
+
+**Capex / Balance Sheet:**
+- H2 acceleration likely; quantum not shared
+- Net debt declining; target net-cash by FY26
+
+**Guidance / Targets:**
 - ROCE target 20% at steady state
+- No FY guidance change; H2 to be stronger
 
 ---
 TRANSCRIPT:
 {transcript}
 """
 
-IA_EXPERT_KTA_PROMPT = """You are a senior equity research analyst processing an Expert / Industry Expert / Channel Check Meeting transcript.
+IA_EXPERT_KTA_PROMPT = """{tone_instruction}
+
+You are a senior equity research analyst processing an Expert / Industry Expert / Channel Check Meeting transcript.
 
 Generate exactly TWO clearly separated sections as shown below.
 
@@ -648,42 +667,67 @@ OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Clean, Structured)
 ============================================================
 
 Rules:
+- Select the 4–5 most investment-relevant points only. Prioritise what directly affects the investment thesis.
 - No storytelling. No filler. No repetition. No generic commentary.
-- Each bullet = one complete, investable statement.
+- Each bullet = one complete, factual, investable statement.
 - Include every number mentioned (%, bps, ₹, $, multiples, timelines, volumes).
 - Tag the source type where distinguishable — prefix with [Expert view], [Channel check], or [Industry data].
-- Show direction explicitly: note if trend is improving, deteriorating, or stable.
+- State direction explicitly: note if trend is improving, deteriorating, or stable.
 - Filter noise aggressively.
 - If the expert was vague or speculative → write: "Expert unclear on [topic]."
-- Do NOT add interpretation beyond what was implied in the transcript.
+- Do NOT add interpretation beyond what was stated in the transcript.
 
-Format: Bullet points (•). Example style:
+Format: Exactly 4–5 bullet points (•). Example style:
 • [Channel check] Dealer inventory at 45–60 days vs. historical norm of 30 days — deteriorating.
-• [Expert view] Demand environment weakening across Tier-2 cities, particularly in discretionary categories.
-• Expert unclear on timeline for demand recovery.
+• [Expert view] Demand weakening across Tier-2 cities, particularly in discretionary categories.
 • [Industry data] Organised players gaining ~200 bps share annually from unorganised segment.
+• Expert unclear on timeline for demand recovery.
 
 ============================================================
 OUTPUT 2: ROUGH NOTES (Raw Analyst Notebook Style)
 ============================================================
 
 Rules:
-- Short bullets. Raw. Unpolished.
-- Abbreviations strongly encouraged: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, etc.
+- Comprehensive coverage — capture ALL substantive points discussed, not just the top ones.
+- Organise by topic (Demand, Channel/Trade, Inventory, Pricing, Competition, Industry Structure, Outlook, etc.).
+- Short bullets per topic. Raw. Unpolished.
+- Abbreviations strongly encouraged: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, ASP, inv, dist, etc.
+- Include qualitative colour and context, not just numbers.
 - Write exactly like an analyst scribbling live during the meeting.
 - Do NOT polish or complete sentences.
 - If something was unclear or unquantified → write "unclear" or "not quantified."
 
-Format: Short dashes (-). Example style:
-- Dealer inv: 45–60d vs norm 30d; deteriorating
+Format: Bold topic headers, short dashes (-) under each. Example:
+
+**Demand / Consumer:**
 - Demand weak in T2/T3; disc categories worse
+- Urban recovery faster than rural
+
+**Channel / Inventory:**
+- Dealer inv: 45–60d vs norm 30d; deteriorating
+- Destocking ongoing; unlikely to resolve Q1
+
+**Pricing / Margins:**
+- No pricing power; discounting to clear stock
+- GM under pressure; exact quantum unclear
+
+**Industry / Competition:**
 - Org. players gaining ~200 bps/yr vs unorg.
+- Online channel growing fast
+
+**Outlook:**
 - Recovery timeline: expert unclear
+- Expert cautious on H1; possible H2 pick-up
 
 ---
 TRANSCRIPT:
 {transcript}
 """
+
+IA_TONE_INSTRUCTIONS = {
+    "Research Tone": "Tone: Write in a formal, precise, investment-grade research style. Use analytical language. Avoid colloquialisms or conversational phrasing.",
+    "As Is": "Tone: Preserve the language and style from the transcript as closely as possible. Reflect the speaker's own words and expressions where relevant. Do not over-formalise.",
+}
 
 # --- EARNINGS CALL MULTI-FILE ANALYSIS PROMPTS ---
 
@@ -2123,28 +2167,79 @@ SOURCE TRANSCRIPT:
                 if st.button("Delete", key=f"del_{note['id']}", use_container_width=True, type="tertiary"):
                     _confirm_delete_dialog(note['id'], note['file_name'])
 
+def _build_ia_prompt_template(meeting_type: str, tone: str) -> str:
+    """Return the IA prompt with tone instruction filled in; {transcript} left as placeholder."""
+    tone_text = IA_TONE_INSTRUCTIONS.get(tone, IA_TONE_INSTRUCTIONS["Research Tone"])
+    base = IA_MANAGEMENT_KTA_PROMPT if meeting_type == "management" else IA_EXPERT_KTA_PROMPT
+    return base.replace("{tone_instruction}", tone_text)
+
+
 def render_ia_processing(state: AppState):
     """Investment Analyst Processing: two-step transcript → dual output (KTAs + Rough Notes)."""
 
     # --- Session state init ---
     for key, default in [
-        ("ia_meeting_type", None),
+        ("ia_meeting_type", "management"),
+        ("ia_tone", "Research Tone"),
         ("ia_transcript", ""),
         ("ia_output", ""),
+        ("ia_prompt_text", ""),
+        ("ia_prompt_seed", ("", "")),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
 
-    # --- Step 1: Meeting type selection ---
-    st.markdown("#### Step 1 — Select Meeting Type")
-    meeting_type = st.radio(
+    # --- Step 1: Meeting type + tone ---
+    st.markdown("#### Step 1 — Meeting Type")
+    meeting_type_opt = st.radio(
         "Meeting type",
         options=["1 — Company Management Meeting", "2 — Expert / Industry Expert / Channel Check Meeting"],
         index=0 if st.session_state.ia_meeting_type != "expert" else 1,
         label_visibility="collapsed",
         key="ia_meeting_type_radio",
     )
-    st.session_state.ia_meeting_type = "management" if meeting_type.startswith("1") else "expert"
+    st.session_state.ia_meeting_type = "management" if meeting_type_opt.startswith("1") else "expert"
+
+    st.markdown("#### Note Style")
+    tone = st.radio(
+        "Tone",
+        options=list(IA_TONE_INSTRUCTIONS.keys()),
+        index=list(IA_TONE_INSTRUCTIONS.keys()).index(
+            st.session_state.ia_tone if st.session_state.ia_tone in IA_TONE_INSTRUCTIONS else "Research Tone"
+        ),
+        horizontal=True,
+        label_visibility="collapsed",
+        key="ia_tone_radio",
+        help="Research Tone: formal investment-grade language.  As Is: preserve the transcript's own language and phrasing.",
+    )
+    st.session_state.ia_tone = tone
+
+    # --- Auto-reset prompt when meeting type or tone changes ---
+    current_seed = (st.session_state.ia_meeting_type, st.session_state.ia_tone)
+    if st.session_state.ia_prompt_seed != current_seed or not st.session_state.ia_prompt_text:
+        st.session_state.ia_prompt_text = _build_ia_prompt_template(
+            st.session_state.ia_meeting_type, st.session_state.ia_tone
+        )
+        st.session_state.ia_prompt_seed = current_seed
+
+    # --- Editable prompt ---
+    with st.expander("Edit Prompt (optional)", expanded=False):
+        reset_col, note_col = st.columns([1, 3])
+        with reset_col:
+            if st.button("Reset to Default", key="ia_reset_prompt", use_container_width=True):
+                st.session_state.ia_prompt_text = _build_ia_prompt_template(
+                    st.session_state.ia_meeting_type, st.session_state.ia_tone
+                )
+                st.rerun()
+        with note_col:
+            st.caption("`{transcript}` in the prompt will be replaced with your transcript at generation time.")
+        st.session_state.ia_prompt_text = st.text_area(
+            "Prompt template",
+            value=st.session_state.ia_prompt_text,
+            height=520,
+            label_visibility="collapsed",
+            key="ia_prompt_editor",
+        )
 
     st.divider()
 
@@ -2173,10 +2268,11 @@ def render_ia_processing(state: AppState):
         with st.spinner("Generating key takeaways and rough notes…"):
             try:
                 model = _get_cached_model(state.notes_model)
-                if st.session_state.ia_meeting_type == "management":
-                    prompt = IA_MANAGEMENT_KTA_PROMPT.format(transcript=st.session_state.ia_transcript)
+                prompt_template = st.session_state.ia_prompt_text
+                if "{transcript}" in prompt_template:
+                    prompt = prompt_template.format(transcript=st.session_state.ia_transcript)
                 else:
-                    prompt = IA_EXPERT_KTA_PROMPT.format(transcript=st.session_state.ia_transcript)
+                    prompt = prompt_template + "\n\n---\nTRANSCRIPT:\n" + st.session_state.ia_transcript
                 response = generate_with_retry(model, prompt)
                 st.session_state.ia_output = response.text
                 st.rerun()
@@ -2189,15 +2285,10 @@ def render_ia_processing(state: AppState):
 
         raw = st.session_state.ia_output
 
-        # Split on the OUTPUT 2 header to separate the two sections
-        sep_markers = [
-            "OUTPUT 2: ROUGH NOTES",
-            "OUTPUT 2:",
-            "ROUGH NOTES",
-        ]
+        # Split on OUTPUT 2 header to separate the two sections
         kta_text = raw
         rough_text = ""
-        for marker in sep_markers:
+        for marker in ("OUTPUT 2: ROUGH NOTES", "OUTPUT 2:", "ROUGH NOTES"):
             idx = raw.find(marker)
             if idx != -1:
                 kta_text = raw[:idx].strip()
