@@ -612,66 +612,46 @@ NOTES SEGMENT {chunk_num} of {total_chunks}:
 
 IA_MANAGEMENT_KTA_PROMPT = """You are a senior equity research analyst processing a Company Management Meeting transcript.
 
-Generate exactly TWO clearly separated sections as shown below.
+Generate two sections: Key Takeaways, then Rough Notes.
 
-============================================================
-OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Framework-Structured)
-============================================================
+KEY TAKEAWAYS
 
-Instructions:
-- Map the transcript findings to the framework below.
-- Only include a section if the meeting covered it meaningfully. Skip sections not discussed.
-- Each section gets 1–3 bullets capturing distinct findings — use as many as needed to cover the point fully.
-- Write each bullet as a complete, natural sentence. Be direct but human — avoid rigid formulaic phrasing.
-- Do NOT start a bullet with a label, prefix, or subheading (e.g., do NOT write "Revenue: ..." or "Mgmt Culture: ...").
-- Include all numbers stated (%, bps, ₹, $, multiples, timelines).
-- State direction where clear: improving / deteriorating / stable.
-- If management was vague on a topic, say so naturally within the bullet.
-- Do NOT add interpretation beyond what was stated.
-- Framing of findings: {tone_instruction}
+- Map findings to the framework below. Only include sections the meeting covered meaningfully.
+- 5–6 bullets in total across all sections. Each bullet is one short, punchy sentence — no padding.
+- Do NOT start a bullet with a label or category prefix (e.g., do NOT write "Revenue: ..." or "Execution: ...").
+- Include numbers stated (%, bps, ₹, $, multiples, timelines). State direction where clear.
+- If management was vague, say so in one brief phrase. No interpretation beyond what was stated.
 
-Framework — include only sections discussed, preserve this order:
+Framework (in order): Strategy → Industry → Thematic → Org/Structure → Execution → Revenue → Margins → Capital Alloc. → Mgmt Culture
 
-  Strategy        → Overall strategic direction, long-term priorities, positioning
-  Industry        → Changes in industry structure, competitive dynamics, regulatory shifts
-  Thematic        → Macro, sector-level, or cross-cutting thematic trends discussed
-  Org / Structure → Organisational changes, leadership, reporting structure
-  Execution       → Operational delivery, GTM, product, supply chain, capacity
-  Revenue         → Revenue growth, volume, pricing, mix, segments
-  Margins         → Gross margin, EBITDA margin, cost structure, levers
-  Capital Alloc.  → Capex, M&A, dividends, buybacks, debt, working capital
-  Mgmt Culture    → Management tone, accountability, credibility, transparency signals
-
-Format: Bold section header on its own line, followed by bullets as complete sentences (no leading labels or prefixes). Example:
+Format — bold section header, then bullet(s):
 
 **Revenue**
-- Volume-led growth is expected in H2, with management offering no guidance on price increases.
+- Volume-led growth expected in H2; no price increase guidance.
 
 **Margins**
-- EBITDA margins are expected to expand 20–30 bps over the next 2–3 quarters.
+- EBITDA margin expansion of 20–30 bps expected over the next 2–3 quarters.
 
 **Capital Alloc.**
-- Net debt is declining with a target net-cash position by FY26; capex quantum was not disclosed.
+- Net debt declining; net-cash target by FY26 — capex quantum not shared.
 
 **Execution**
-- Supply chain normalisation is on track, though management was vague on the exact timeline.
+- Supply chain on track; vague on exact timeline.
 
-============================================================
-OUTPUT 2: ROUGH NOTES (Meeting Notes)
-============================================================
+---
 
-Instructions:
-- Capture ALL substantive points discussed — comprehensive, not selective.
-- Write as neutral, unbiased meeting notes. State what was said. No editorial framing or spin.
-- Organise by topic with bold headers matching what was discussed.
-- Short bullets per topic. Raw. Unpolished.
+ROUGH NOTES
+
+- Capture ALL substantive points — comprehensive, not selective.
+- Neutral meeting notes. State what was said. No spin.
+- Organise by topic with bold headers. Short bullets. Raw. Unpolished.
 - Abbreviations: Mgmt, Rev, Vol, ASP, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, D/E, WC, etc.
-- Include qualitative context alongside numbers — what was the tone, what was stressed, what was avoided.
-- Do NOT complete sentences. Do NOT add positive/negative spin.
+- Include qualitative context alongside numbers — what was stressed, what was avoided.
+- Do NOT complete sentences. No positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
-- In Q&A-style transcripts: capture ONLY content from management's responses. Use the question to identify the topic heading, but do NOT transcribe question text as note content.
+- In Q&A-style transcripts: capture ONLY management's responses. Use the question only to identify the topic heading.
 
-Format: Bold topic headers, short dashes (-) under each. Cover all topics from the meeting.
+Format: Bold topic headers, short dashes (-) under each.
 
 ---
 TRANSCRIPT:
@@ -680,67 +660,47 @@ TRANSCRIPT:
 
 IA_EXPERT_KTA_PROMPT = """You are a senior equity research analyst processing an Expert / Industry Expert / Channel Check Meeting transcript.
 
-Generate exactly TWO clearly separated sections as shown below.
+Generate two sections: Key Takeaways, then Rough Notes.
 
-============================================================
-OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Framework-Structured)
-============================================================
+KEY TAKEAWAYS
 
-Instructions:
-- Map the transcript findings to the framework below.
-- Only include a section if the meeting covered it meaningfully. Skip sections not discussed.
-- Each section gets 1–3 bullets capturing distinct findings — use as many as needed to cover the point fully.
-- Write each bullet as a complete, natural sentence. Be direct but human — avoid rigid formulaic phrasing.
-- Do NOT start a bullet with a label, prefix, or subheading (e.g., do NOT write "Inventory: ..." or "Demand: ...").
-- Include all numbers stated (%, bps, ₹, $, multiples, timelines, volumes).
-- Tag the source type naturally within the sentence — mention [Expert view], [Channel check], or [Industry data] in the flow.
-- State direction where clear: improving / deteriorating / stable.
-- If the expert was vague on a topic, say so naturally within the bullet.
-- Do NOT add interpretation beyond what was stated.
-- Framing of findings: {tone_instruction}
+- Map findings to the framework below. Only include sections the meeting covered meaningfully.
+- 5–6 bullets in total across all sections. Each bullet is one short, punchy sentence — no padding.
+- Do NOT start a bullet with a label or category prefix (e.g., do NOT write "Inventory: ..." or "Demand: ...").
+- Include numbers stated (%, bps, ₹, $, multiples, timelines, volumes). State direction where clear.
+- Tag the source type naturally within the sentence — weave in [Expert view], [Channel check], or [Industry data] where relevant.
+- If the expert was vague, say so briefly. No interpretation beyond what was stated.
 
-Framework — include only sections discussed, preserve this order:
+Framework (in order): Industry → Demand → Channel/Trade → Inventory → Pricing → Margins → Competition → Regulatory/Macro → Outlook
 
-  Industry        → Industry structure, competitive landscape, organised vs. unorganised
-  Demand          → Consumer/end-customer demand trends, geographic or category split
-  Channel / Trade → Distributor, dealer, retailer behaviour, trade sentiment
-  Inventory       → Channel inventory levels, days vs. norm, restocking / destocking
-  Pricing         → Pricing trends, discounting, premium vs. mass dynamics
-  Margins         → Industry-level or dealer-level profitability, cost pressures
-  Competition     → Market share shifts, new entrants, key competitive moves
-  Regulatory/Macro→ Regulatory changes, macro factors, government policies
-  Outlook         → Near-term and medium-term trajectory per expert
-
-Format: Bold section header on its own line, followed by bullets as complete sentences (no leading labels or prefixes). Example:
+Format — bold section header, then bullet(s):
 
 **Inventory**
-- [Channel check] Dealer inventory is running at 45–60 days against a norm of 30, with destocking still ongoing.
+- [Channel check] Dealer inventory at 45–60 days vs. norm of 30 — destocking ongoing.
 
 **Demand**
-- [Expert view] Demand is weakening across Tier-2 cities, with discretionary categories the most impacted.
+- [Expert view] Demand weakening in Tier-2 cities; discretionary most hit.
 
 **Industry**
-- [Industry data] Organised players are gaining roughly 200 bps of market share annually from the unorganised segment.
+- [Industry data] Organised players gaining ~200 bps share annually from unorganised.
 
 **Outlook**
-- The expert was unclear on the recovery timeline and remains cautious on H1.
+- Expert unclear on recovery timeline; cautious on H1.
 
-============================================================
-OUTPUT 2: ROUGH NOTES (Meeting Notes)
-============================================================
+---
 
-Instructions:
-- Capture ALL substantive points discussed — comprehensive, not selective.
-- Write as neutral, unbiased meeting notes. State what was said. No editorial framing or spin.
-- Organise by topic with bold headers matching what was discussed.
-- Short bullets per topic. Raw. Unpolished.
+ROUGH NOTES
+
+- Capture ALL substantive points — comprehensive, not selective.
+- Neutral meeting notes. State what was said. No spin.
+- Organise by topic with bold headers. Short bullets. Raw. Unpolished.
 - Abbreviations: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, ASP, inv, dist, etc.
-- Include qualitative context alongside numbers — what was stressed, what was avoided, any caveats given.
-- Do NOT complete sentences. Do NOT add positive/negative spin.
+- Include qualitative context alongside numbers — what was stressed, what was avoided, any caveats.
+- Do NOT complete sentences. No positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
-- In Q&A-style transcripts: capture ONLY content from the expert's responses. Use the question to identify the topic heading, but do NOT transcribe question text as note content.
+- In Q&A-style transcripts: capture ONLY the expert's responses. Use the question only to identify the topic heading.
 
-Format: Bold topic headers, short dashes (-) under each. Cover all topics from the meeting.
+Format: Bold topic headers, short dashes (-) under each.
 
 ---
 TRANSCRIPT:
@@ -2211,11 +2171,9 @@ SOURCE TRANSCRIPT:
                 if st.button("Delete", key=f"del_{note['id']}", use_container_width=True, type="tertiary"):
                     _confirm_delete_dialog(note['id'], note['file_name'])
 
-def _build_ia_prompt_template(meeting_type: str, tone: str) -> str:
-    """Return the IA prompt with tone instruction filled in; {transcript} left as placeholder."""
-    tone_text = IA_TONE_INSTRUCTIONS.get(tone, IA_TONE_INSTRUCTIONS["Neutral"])
-    base = IA_MANAGEMENT_KTA_PROMPT if meeting_type == "management" else IA_EXPERT_KTA_PROMPT
-    return base.replace("{tone_instruction}", tone_text)
+def _build_ia_prompt_template(meeting_type: str) -> str:
+    """Return the IA prompt for the given meeting type; {transcript} left as placeholder."""
+    return IA_MANAGEMENT_KTA_PROMPT if meeting_type == "management" else IA_EXPERT_KTA_PROMPT
 
 
 def render_ia_processing(state: AppState):
@@ -2224,7 +2182,6 @@ def render_ia_processing(state: AppState):
     # --- Session state init ---
     for key, default in [
         ("ia_meeting_type", "management"),
-        ("ia_tone", "Neutral"),
         ("ia_transcript", ""),
         ("ia_output", ""),
         ("ia_prompt_text", ""),
@@ -2237,15 +2194,7 @@ def render_ia_processing(state: AppState):
         if key not in st.session_state:
             st.session_state[key] = default
 
-    # Sanitize tone — if a stale value (e.g. "Research Tone") is no longer a valid
-    # option, reset both the logical value and the widget's own session state key.
-    # Without this, st.radio raises KeyError internally on the stale value.
-    if st.session_state.get("ia_tone") not in IA_TONE_INSTRUCTIONS:
-        st.session_state["ia_tone"] = "Neutral"
-    if st.session_state.get("ia_tone_radio") not in IA_TONE_INSTRUCTIONS:
-        st.session_state.pop("ia_tone_radio", None)
-
-    # --- Step 1: Meeting type + tone ---
+    # --- Step 1: Meeting type ---
     st.markdown("#### Step 1 — Meeting Type")
     meeting_type_opt = st.radio(
         "Meeting type",
@@ -2274,27 +2223,12 @@ def render_ia_processing(state: AppState):
                 key="ia_area_input",
             )
 
-    st.markdown("#### Tone (Output 1 framing)")
-    _ia_tone_keys = list(IA_TONE_INSTRUCTIONS.keys())
-    tone = st.radio(
-        "Tone",
-        options=_ia_tone_keys,
-        index=_ia_tone_keys.index(
-            st.session_state.ia_tone if st.session_state.ia_tone in IA_TONE_INSTRUCTIONS else "Neutral"
-        ),
-        horizontal=True,
-        label_visibility="collapsed",
-        key="ia_tone_radio",
-        help="Controls how Output 1 findings are framed. Output 2 (Rough Notes) is always neutral.",
-    )
-    st.session_state.ia_tone = tone
-
-    # --- Auto-reset prompt when meeting type, tone, or prompt version changes ---
-    _IA_PROMPT_VERSION = "v2"  # bump when prompts are updated to force rebuild in existing sessions
-    current_seed = (_IA_PROMPT_VERSION, st.session_state.ia_meeting_type, st.session_state.ia_tone)
+    # --- Auto-reset prompt when meeting type or prompt version changes ---
+    _IA_PROMPT_VERSION = "v3"  # bump when prompts are updated to force rebuild in existing sessions
+    current_seed = (_IA_PROMPT_VERSION, st.session_state.ia_meeting_type)
     if st.session_state.ia_prompt_seed != current_seed or not st.session_state.ia_prompt_text:
         st.session_state.ia_prompt_text = _build_ia_prompt_template(
-            st.session_state.ia_meeting_type, st.session_state.ia_tone
+            st.session_state.ia_meeting_type
         )
         st.session_state.ia_prompt_seed = current_seed
 
@@ -2304,7 +2238,7 @@ def render_ia_processing(state: AppState):
         with reset_col:
             if st.button("Reset to Default", key="ia_reset_prompt", use_container_width=True):
                 st.session_state.ia_prompt_text = _build_ia_prompt_template(
-                    st.session_state.ia_meeting_type, st.session_state.ia_tone
+                    st.session_state.ia_meeting_type
                 )
                 st.rerun()
         with note_col:
@@ -2404,11 +2338,12 @@ def render_ia_processing(state: AppState):
 
         raw = st.session_state.ia_output
 
-        # Split on OUTPUT 2 header to separate the two sections
+        # Split into KTA and Rough Notes sections
         kta_text = raw
         rough_text = ""
+        raw_upper = raw.upper()
         for marker in ("OUTPUT 2: ROUGH NOTES", "OUTPUT 2:", "ROUGH NOTES"):
-            idx = raw.find(marker)
+            idx = raw_upper.find(marker)
             if idx != -1:
                 kta_text = raw[:idx].strip()
                 rough_text = raw[idx:].strip()
