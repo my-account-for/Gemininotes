@@ -612,7 +612,7 @@ NOTES SEGMENT {chunk_num} of {total_chunks}:
 
 IA_MANAGEMENT_KTA_PROMPT = """You are a senior equity research analyst processing a Company Management Meeting transcript.
 
-Generate two sections: Key Takeaways, then Rough Notes.
+Generate exactly two sections in this order. You MUST use the exact section headers shown below — do not rename, reformat, or omit them:
 
 KEY TAKEAWAYS
 
@@ -634,6 +634,8 @@ Format — No bold section header, then bullet(s):
 
 ROUGH NOTES
 
+IMPORTANT: The text "ROUGH NOTES" above is your required section header. Output it exactly as shown — plain text, on its own line, preceded by "---". Do not use markdown formatting (no ##, no bold) for this header.
+
 - Capture ALL substantive points — comprehensive, not selective.
 - Neutral meeting notes. State what was said. No spin.
 - Organise by topic with bold headers. Short bullets. Raw. Unpolished.
@@ -653,7 +655,7 @@ TRANSCRIPT:
 
 IA_EXPERT_KTA_PROMPT = """You are a senior equity research analyst processing an Expert / Industry Expert / Channel Check Meeting transcript.
 
-Generate two sections: Key Takeaways, then Rough Notes.
+Generate exactly two sections in this order. You MUST use the exact section headers shown below — do not rename, reformat, or omit them:
 
 KEY TAKEAWAYS
 
@@ -676,6 +678,8 @@ Format:
 
 ROUGH NOTES
 
+IMPORTANT: The text "ROUGH NOTES" above is your required section header. Output it exactly as shown — plain text, on its own line, preceded by "---". Do not use markdown formatting (no ##, no bold) for this header.
+
 - Capture ALL substantive points — comprehensive, not selective.
 - Neutral meeting notes. State what was said. No spin.
 - Organise by topic with bold headers. Short bullets. Raw. Unpolished.
@@ -684,9 +688,8 @@ ROUGH NOTES
 - Do NOT complete sentences. No positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
 - In Q&A-style transcripts: capture ONLY the expert's responses. Use the question only to identify the topic heading.
-- 
 
-Format:  topic headers, short dashes (-) under each.
+Format: Bold topic headers, short dashes (-) under each.
 Format headings in sentence case. Only capitalize the first word and proper nouns. Do not capitalize every word.
 ---
 TRANSCRIPT:
@@ -2210,7 +2213,7 @@ def render_ia_processing(state: AppState):
             )
 
     # --- Auto-reset prompt when meeting type or prompt version changes ---
-    _IA_PROMPT_VERSION = "v5"  # bump when prompts are updated to force rebuild in existing sessions
+    _IA_PROMPT_VERSION = "v6"  # bump when prompts are updated to force rebuild in existing sessions
     current_seed = (_IA_PROMPT_VERSION, st.session_state.ia_meeting_type)
     if st.session_state.ia_prompt_seed != current_seed or not st.session_state.ia_prompt_text:
         st.session_state.ia_prompt_text = _build_ia_prompt_template(
@@ -2337,12 +2340,38 @@ def render_ia_processing(state: AppState):
         kta_text = raw
         rough_text = ""
         raw_upper = raw.upper()
-        for marker in ("OUTPUT 2: ROUGH NOTES", "OUTPUT 2:", "ROUGH NOTES"):
+        # Try known markers first (ordered from most specific to least)
+        for marker in (
+            "OUTPUT 2: ROUGH NOTES",
+            "OUTPUT 2:",
+            "ROUGH NOTES",
+            "MEETING NOTES",
+            "RAW NOTES",
+            "DETAILED NOTES",
+        ):
             idx = raw_upper.find(marker)
             if idx != -1:
                 kta_text = raw[:idx].strip()
                 rough_text = raw[idx:].strip()
                 break
+
+        # Fallback: if no named marker found, try splitting on a "---" divider
+        # that appears after meaningful KTA content (skip the first --- in prompts)
+        if not rough_text:
+            divider = "---"
+            search_start = 0
+            while True:
+                div_idx = raw.find(divider, search_start)
+                if div_idx == -1:
+                    break
+                candidate_kta = raw[:div_idx].strip()
+                candidate_rough = raw[div_idx + len(divider):].strip()
+                # Accept split only if both halves have substantial content
+                if len(candidate_kta) > 50 and len(candidate_rough) > 50:
+                    kta_text = candidate_kta
+                    rough_text = candidate_rough
+                    break
+                search_start = div_idx + len(divider)
 
         # Build dynamic headings
         _co = st.session_state.ia_company_name.strip()
