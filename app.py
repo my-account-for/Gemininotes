@@ -747,6 +747,24 @@ TRANSCRIPT:
 {transcript}
 """
 
+IA_REFINE_CHUNK_PROMPT = """You are a research analyst cleaning up a segment of a meeting transcript.
+
+Your task: Identify all questions asked and the corresponding management/expert responses. Restructure them clearly.
+
+Rules:
+- Restate each question clearly in **bold** on its own line — no "Q:" prefix, no label.
+- Use bullet points (-) immediately below for each distinct point made in the response.
+- ONLY capture content from responses/answers. Do NOT include question text as note content.
+- Preserve every specific detail: numbers (%, bps, ₹, $, timelines), names, entities, data points, qualifiers.
+- Preserve the speaker's tone and caveats (confident, cautious, vague, speculative).
+- If a passage is not Q&A (e.g., opening remarks), organise it under a **bold topic header** with bullets.
+- Be comprehensive — every substantive point in the answer gets its own bullet.
+- Raw and unpolished is fine. Abbreviate freely.
+
+---
+TRANSCRIPT SEGMENT {chunk_num} of {total_chunks}:
+{chunk}"""
+
 IA_TONE_INSTRUCTIONS = {
     "Very Positive": "Frame Output 1 findings in the most constructive investment light. Lead with strengths, growth, and opportunity. Challenges are acknowledged only as temporary or manageable context.",
     "Positive": "Frame Output 1 findings constructively. Opportunities lead. Risks acknowledged but not alarming. Overall tone is favourable.",
@@ -2213,6 +2231,8 @@ def render_ia_processing(state: AppState):
         ("ia_prompt_seed", ("", "")),
         ("ia_company_name", ""),
         ("ia_area", ""),
+        ("ia_refine_enabled", False),
+        ("ia_refined_transcript", ""),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
@@ -2319,25 +2339,68 @@ def render_ia_processing(state: AppState):
 
     st.divider()
 
+    # --- Refinement toggle ---
+    refine_col, _ = st.columns([1, 2])
+    with refine_col:
+        ia_enable_refine = st.toggle(
+            "Refine transcript before generating",
+            value=st.session_state.ia_refine_enabled,
+            key="ia_refine_toggle",
+            help="Chunks the transcript and extracts structured Q&A from each chunk before generating. Improves output quality for long or messy transcripts.",
+        )
+    st.session_state.ia_refine_enabled = ia_enable_refine
+
     # --- Generate ---
     if st.button("Generate Investment Analysis", type="primary", use_container_width=True, key="ia_generate_btn"):
-        with st.spinner("Generating key takeaways and rough notes…"):
-            try:
-                model = _get_cached_model(state.notes_model)
+        try:
+            model = _get_cached_model(state.notes_model)
+            transcript_for_generation = st.session_state.ia_transcript
+            st.session_state.ia_refined_transcript = ""
+
+            # --- Optional refinement: chunk and extract Q&A ---
+            if ia_enable_refine:
+                raw_words = st.session_state.ia_transcript.split()
+                chunks = create_chunks_with_overlap(st.session_state.ia_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP) if len(raw_words) > CHUNK_WORD_SIZE else [st.session_state.ia_transcript]
+                total_chunks = len(chunks)
+                refined_parts = [None] * total_chunks
+
+                with st.spinner(f"Refining transcript ({total_chunks} chunk{'s' if total_chunks > 1 else ''})..."):
+                    def _refine_ia_chunk(idx, chunk):
+                        prompt = IA_REFINE_CHUNK_PROMPT.format(
+                            chunk_num=idx + 1,
+                            total_chunks=total_chunks,
+                            chunk=chunk,
+                        )
+                        resp = generate_with_retry(model, prompt)
+                        return idx, resp.text
+
+                    with ThreadPoolExecutor(max_workers=min(3, total_chunks)) as executor:
+                        futures = {executor.submit(_refine_ia_chunk, i, c): i for i, c in enumerate(chunks)}
+                        for future in as_completed(futures):
+                            idx, text = future.result()
+                            refined_parts[idx] = text
+
+                transcript_for_generation = "\n\n---\n\n".join(p for p in refined_parts if p)
+                st.session_state.ia_refined_transcript = transcript_for_generation
+
+            with st.spinner("Generating key takeaways and rough notes…"):
                 prompt_template = st.session_state.ia_prompt_text
                 if "{transcript}" in prompt_template:
-                    prompt = prompt_template.format(transcript=st.session_state.ia_transcript)
+                    prompt = prompt_template.format(transcript=transcript_for_generation)
                 else:
-                    prompt = prompt_template + "\n\n---\nTRANSCRIPT:\n" + st.session_state.ia_transcript
+                    prompt = prompt_template + "\n\n---\nTRANSCRIPT:\n" + transcript_for_generation
                 response = generate_with_retry(model, prompt)
                 st.session_state.ia_output = response.text
                 st.rerun()
-            except Exception as e:
-                st.error(f"Failed to generate analysis: {e}")
+        except Exception as e:
+            st.error(f"Failed to generate analysis: {e}")
 
     # --- Display output ---
     if st.session_state.ia_output:
         st.divider()
+        if st.session_state.ia_refined_transcript:
+            with st.expander("View refined Q&A transcript (intermediate step)", expanded=False):
+                st.markdown(st.session_state.ia_refined_transcript)
 
         raw = st.session_state.ia_output
 
