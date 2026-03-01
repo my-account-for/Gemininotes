@@ -644,6 +644,7 @@ ROUGH NOTES
 - In Q&A-style transcripts: capture ONLY management's responses. Use the question only to identify the topic heading.
 
 Format: Bold topic headers, short dashes (-) under each.
+Use sentence case for all headings—capitalize only the first word and proper nouns; do not use title case.
 
 ---
 TRANSCRIPT:
