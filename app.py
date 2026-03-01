@@ -624,18 +624,10 @@ KEY TAKEAWAYS
 
 Framework (in order): Strategy → Industry → Thematic → Org/Structure → Execution → Revenue → Margins → Capital Alloc. → Mgmt Culture
 
-Format — bold section header, then bullet(s):
-
-**Revenue**
+Format — No bold section header, then bullet(s):
 - Volume-led growth expected in H2; no price increase guidance.
-
-**Margins**
 - EBITDA margin expansion of 20–30 bps expected over the next 2–3 quarters.
-
-**Capital Alloc.**
 - Net debt declining; net-cash target by FY26 — capex quantum not shared.
-
-**Execution**
 - Supply chain on track; vague on exact timeline.
 
 ---
