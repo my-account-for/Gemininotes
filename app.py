@@ -665,18 +665,10 @@ KEY TAKEAWAYS
 
 Framework (in order): Industry → Demand → Channel/Trade → Inventory → Pricing → Margins → Competition → Regulatory/Macro → Outlook
 
-Format — bold section header, then bullet(s):
-
-**Inventory**
+Format:
 - [Channel check] Dealer inventory at 45–60 days vs. norm of 30 — destocking ongoing.
-
-**Demand**
 - [Expert view] Demand weakening in Tier-2 cities; discretionary most hit.
-
-**Industry**
 - [Industry data] Organised players gaining ~200 bps share annually from unorganised.
-
-**Outlook**
 - Expert unclear on recovery timeline; cautious on H1.
 
 ---
@@ -691,9 +683,10 @@ ROUGH NOTES
 - Do NOT complete sentences. No positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
 - In Q&A-style transcripts: capture ONLY the expert's responses. Use the question only to identify the topic heading.
+- 
 
-Format: Bold topic headers, short dashes (-) under each.
-
+Format:  topic headers, short dashes (-) under each.
+Format headings in sentence case. Only capitalize the first word and proper nouns. Do not capitalize every word.
 ---
 TRANSCRIPT:
 {transcript}
