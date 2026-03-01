@@ -590,6 +590,23 @@ SOURCE NOTES:
 {notes}
 """
 
+OTG_REFINE_CHUNK_PROMPT = """You are a research analyst extracting structured Q&A notes from a segment of meeting notes.
+
+Your task: Identify all questions asked and their corresponding responses. Structure them clearly so key information is easy to find.
+
+Rules:
+- Restate each question clearly in **bold** on its own line — no "Q:" prefix, no label.
+- Use bullet points (-) immediately below for each distinct answer point.
+- ONLY capture content from responses/answers. Do NOT transcribe question text as note content.
+- Preserve every specific detail: numbers (%, ₹, $, volumes, timelines), names, company mentions, data points.
+- If a passage has no clear Q&A structure, organise it by **bold topic header** with bullet points.
+- Be comprehensive — every substantive point in the answer gets its own bullet.
+- Raw and unpolished is fine. Abbreviate freely (Rev, Vol, GM, EBITDA, QoQ, YoY, etc.).
+
+---
+NOTES SEGMENT {chunk_num} of {total_chunks}:
+{chunk}"""
+
 
 # --- INVESTMENT ANALYST PROCESSING PROMPTS ---
 
@@ -604,11 +621,12 @@ OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Framework-Structured)
 Instructions:
 - Map the transcript findings to the framework below.
 - Only include a section if the meeting covered it meaningfully. Skip sections not discussed.
-- Each included section gets exactly ONE concise, factual bullet.
-- No storytelling. No filler. No repetition.
+- Each section gets 1–3 bullets capturing distinct findings — use as many as needed to cover the point fully.
+- Write each bullet as a complete, natural sentence. Be direct but human — avoid rigid formulaic phrasing.
+- Do NOT start a bullet with a label, prefix, or subheading (e.g., do NOT write "Revenue: ..." or "Mgmt Culture: ...").
 - Include all numbers stated (%, bps, ₹, $, multiples, timelines).
 - State direction where clear: improving / deteriorating / stable.
-- If management was vague → write: "Mgmt vague on [topic]."
+- If management was vague on a topic, say so naturally within the bullet.
 - Do NOT add interpretation beyond what was stated.
 - Framing of findings: {tone_instruction}
 
@@ -624,11 +642,19 @@ Framework — include only sections discussed, preserve this order:
   Capital Alloc.  → Capex, M&A, dividends, buybacks, debt, working capital
   Mgmt Culture    → Management tone, accountability, credibility, transparency signals
 
-Format: Bold section label followed by the bullet on the same line. Example:
-**Revenue:** Volume-led growth expected in H2; management not guiding for price increases.
-**Margins:** EBITDA margin expansion of 20–30 bps over next 2–3 quarters.
-**Capital Alloc.:** Net debt declining; target net-cash position by FY26. Capex quantum not disclosed.
-**Execution:** Supply chain normalisation on track; Mgmt vague on exact timeline.
+Format: Bold section header on its own line, followed by bullets as complete sentences (no leading labels or prefixes). Example:
+
+**Revenue**
+- Volume-led growth is expected in H2, with management offering no guidance on price increases.
+
+**Margins**
+- EBITDA margins are expected to expand 20–30 bps over the next 2–3 quarters.
+
+**Capital Alloc.**
+- Net debt is declining with a target net-cash position by FY26; capex quantum was not disclosed.
+
+**Execution**
+- Supply chain normalisation is on track, though management was vague on the exact timeline.
 
 ============================================================
 OUTPUT 2: ROUGH NOTES (Meeting Notes)
@@ -643,6 +669,7 @@ Instructions:
 - Include qualitative context alongside numbers — what was the tone, what was stressed, what was avoided.
 - Do NOT complete sentences. Do NOT add positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
+- In Q&A-style transcripts: capture ONLY content from management's responses. Use the question to identify the topic heading, but do NOT transcribe question text as note content.
 
 Format: Bold topic headers, short dashes (-) under each. Cover all topics from the meeting.
 
@@ -662,12 +689,13 @@ OUTPUT 1: KEY INVESTMENT TAKEAWAYS (Framework-Structured)
 Instructions:
 - Map the transcript findings to the framework below.
 - Only include a section if the meeting covered it meaningfully. Skip sections not discussed.
-- Each included section gets exactly ONE concise, factual bullet.
-- No storytelling. No filler. No repetition.
+- Each section gets 1–3 bullets capturing distinct findings — use as many as needed to cover the point fully.
+- Write each bullet as a complete, natural sentence. Be direct but human — avoid rigid formulaic phrasing.
+- Do NOT start a bullet with a label, prefix, or subheading (e.g., do NOT write "Inventory: ..." or "Demand: ...").
 - Include all numbers stated (%, bps, ₹, $, multiples, timelines, volumes).
-- Tag the source type where distinguishable — prefix with [Expert view], [Channel check], or [Industry data].
+- Tag the source type naturally within the sentence — mention [Expert view], [Channel check], or [Industry data] in the flow.
 - State direction where clear: improving / deteriorating / stable.
-- If the expert was vague → write: "Expert unclear on [topic]."
+- If the expert was vague on a topic, say so naturally within the bullet.
 - Do NOT add interpretation beyond what was stated.
 - Framing of findings: {tone_instruction}
 
@@ -683,11 +711,19 @@ Framework — include only sections discussed, preserve this order:
   Regulatory/Macro→ Regulatory changes, macro factors, government policies
   Outlook         → Near-term and medium-term trajectory per expert
 
-Format: Bold section label followed by the bullet on the same line. Example:
-**Inventory:** [Channel check] Dealer inventory at 45–60 days vs. norm of 30 — ongoing destocking.
-**Demand:** [Expert view] Demand weakening across Tier-2 cities; discretionary most impacted.
-**Industry:** [Industry data] Organised players gaining ~200 bps share annually from unorganised.
-**Outlook:** Expert unclear on recovery timeline; cautious on H1.
+Format: Bold section header on its own line, followed by bullets as complete sentences (no leading labels or prefixes). Example:
+
+**Inventory**
+- [Channel check] Dealer inventory is running at 45–60 days against a norm of 30, with destocking still ongoing.
+
+**Demand**
+- [Expert view] Demand is weakening across Tier-2 cities, with discretionary categories the most impacted.
+
+**Industry**
+- [Industry data] Organised players are gaining roughly 200 bps of market share annually from the unorganised segment.
+
+**Outlook**
+- The expert was unclear on the recovery timeline and remains cautious on H1.
 
 ============================================================
 OUTPUT 2: ROUGH NOTES (Meeting Notes)
@@ -702,6 +738,7 @@ Instructions:
 - Include qualitative context alongside numbers — what was stressed, what was avoided, any caveats given.
 - Do NOT complete sentences. Do NOT add positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
+- In Q&A-style transcripts: capture ONLY content from the expert's responses. Use the question to identify the topic heading, but do NOT transcribe question text as note content.
 
 Format: Bold topic headers, short dashes (-) under each. Cover all topics from the meeting.
 
@@ -2232,8 +2269,9 @@ def render_ia_processing(state: AppState):
     )
     st.session_state.ia_tone = tone
 
-    # --- Auto-reset prompt when meeting type or tone changes ---
-    current_seed = (st.session_state.ia_meeting_type, st.session_state.ia_tone)
+    # --- Auto-reset prompt when meeting type, tone, or prompt version changes ---
+    _IA_PROMPT_VERSION = "v2"  # bump when prompts are updated to force rebuild in existing sessions
+    current_seed = (_IA_PROMPT_VERSION, st.session_state.ia_meeting_type, st.session_state.ia_tone)
     if st.session_state.ia_prompt_seed != current_seed or not st.session_state.ia_prompt_text:
         st.session_state.ia_prompt_text = _build_ia_prompt_template(
             st.session_state.ia_meeting_type, st.session_state.ia_tone
@@ -2403,6 +2441,10 @@ def render_otg_notes_tab(state: AppState):
         st.session_state.otg_selected_topics = []
     if "otg_selected_entities" not in st.session_state:
         st.session_state.otg_selected_entities = []
+    if "otg_refine_enabled" not in st.session_state:
+        st.session_state.otg_refine_enabled = False
+    if "otg_refined_notes" not in st.session_state:
+        st.session_state.otg_refined_notes = ""
 
     # --- Input: paste notes or load from existing ---
     input_source = st.pills("Source", ["Paste Notes", "From Saved Note"], default="Paste Notes", key="otg_source_pills")
@@ -2489,6 +2531,7 @@ def render_otg_notes_tab(state: AppState):
                 st.session_state.otg_selected_topics = extracted.get("topics", [])
                 st.session_state.otg_selected_entities = extracted.get("entities", [])
                 st.session_state.otg_output = ""
+                st.session_state.otg_refined_notes = ""
                 st.rerun()
             except json.JSONDecodeError as je:
                 st.error(f"Failed to parse analysis results. The model returned invalid JSON. Try again or use a different model.")
@@ -2574,10 +2617,50 @@ def render_otg_notes_tab(state: AppState):
         st.warning("Select at least one entity to focus on.")
         return
 
+    # --- Refinement toggle ---
+    refine_col, _ = st.columns([1, 2])
+    with refine_col:
+        enable_refine = st.toggle(
+            "Refine notes before generating",
+            value=st.session_state.otg_refine_enabled,
+            key="otg_refine_toggle",
+            help="Chunks the source notes and extracts structured Q&A from each chunk before generating the final note. Improves output quality for long or unstructured notes.",
+        )
+    st.session_state.otg_refine_enabled = enable_refine
+
     if st.button("Generate Research Note", type="primary", use_container_width=True, key="otg_generate_btn"):
-        with st.spinner("Generating research note..."):
-            try:
-                otg_model = _get_cached_model(state.notes_model)
+        try:
+            otg_model = _get_cached_model(state.notes_model)
+            notes_for_generation = st.session_state.otg_input
+            st.session_state.otg_refined_notes = ""
+
+            # --- Optional refinement: chunk and extract Q&A ---
+            if enable_refine:
+                raw_words = st.session_state.otg_input.split()
+                chunks = create_chunks_with_overlap(st.session_state.otg_input, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP) if len(raw_words) > CHUNK_WORD_SIZE else [st.session_state.otg_input]
+                total_chunks = len(chunks)
+                refined_parts = [None] * total_chunks
+
+                with st.spinner(f"Refining notes ({total_chunks} chunk{'s' if total_chunks > 1 else ''})..."):
+                    def _refine_otg_chunk(idx, chunk):
+                        prompt = OTG_REFINE_CHUNK_PROMPT.format(
+                            chunk_num=idx + 1,
+                            total_chunks=total_chunks,
+                            chunk=chunk,
+                        )
+                        resp = generate_with_retry(otg_model, prompt)
+                        return idx, resp.text
+
+                    with ThreadPoolExecutor(max_workers=min(3, total_chunks)) as executor:
+                        futures = {executor.submit(_refine_otg_chunk, i, c): i for i, c in enumerate(chunks)}
+                        for future in as_completed(futures):
+                            idx, text = future.result()
+                            refined_parts[idx] = text
+
+                notes_for_generation = "\n\n---\n\n".join(p for p in refined_parts if p)
+                st.session_state.otg_refined_notes = notes_for_generation
+
+            with st.spinner("Generating research note..."):
                 topics_str = ", ".join(st.session_state.otg_selected_topics)
                 entities_str = ", ".join(st.session_state.otg_selected_entities) if st.session_state.otg_selected_entities else "all entities mentioned"
                 number_instruction = NUMBER_FOCUS_INSTRUCTIONS.get(number_focus, NUMBER_FOCUS_INSTRUCTIONS["Moderate"])
@@ -2590,17 +2673,20 @@ def render_otg_notes_tab(state: AppState):
                     number_focus_instruction=number_instruction,
                     length_instruction=length_instruction,
                     custom_instructions_block=custom_block,
-                    notes=st.session_state.otg_input
+                    notes=notes_for_generation,
                 )
                 response = generate_with_retry(otg_model, prompt)
                 st.session_state.otg_output = response.text
                 st.rerun()
-            except Exception as e:
-                st.error(f"Failed to generate research note: {e}")
+        except Exception as e:
+            st.error(f"Failed to generate research note: {e}")
 
     # --- Display output ---
     if st.session_state.otg_output:
         st.divider()
+        if st.session_state.otg_refined_notes:
+            with st.expander("View refined Q&A notes (intermediate step)", expanded=False):
+                st.markdown(st.session_state.otg_refined_notes)
         st.markdown("### Generated Research Note")
         with st.container(border=True):
             st.markdown(st.session_state.otg_output)
