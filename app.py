@@ -638,14 +638,15 @@ IMPORTANT: The text "ROUGH NOTES" above is your required section header. Output 
 
 - Capture ALL substantive points — comprehensive, not selective.
 - Neutral meeting notes. State what was said. No spin.
-- Organise by topic with bold headers. Short bullets. Raw. Unpolished.
+- Organise by topic with bold headers. Fewer, denser bullets — aim for ~25% of the bullet count you would otherwise use by consolidating related points into a single longer sentence.
+- Each bullet should be a complete sentence that bundles multiple related details together (numbers, direction, caveats, qualitative colour) rather than splitting them across separate lines.
 - Abbreviations: Mgmt, Rev, Vol, ASP, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, D/E, WC, etc.
 - Include qualitative context alongside numbers — what was stressed, what was avoided.
-- Do NOT complete sentences. No positive/negative spin.
-- If unclear or unquantified → write "unclear" or "not quantified."
+- No positive/negative spin.
+- If unclear or unquantified → note it inline within the sentence.
 - In Q&A-style transcripts: capture ONLY management's responses. Use the question only to identify the topic heading.
 
-Format: Bold topic headers, short dashes (-) under each.
+Format: Bold topic headers, dashes (-) under each.
 Use sentence case for all headings—capitalize only the first word and proper nouns; do not use title case.
 
 ---
@@ -682,14 +683,15 @@ IMPORTANT: The text "ROUGH NOTES" above is your required section header. Output 
 
 - Capture ALL substantive points — comprehensive, not selective.
 - Neutral meeting notes. State what was said. No spin.
-- Organise by topic with bold headers. Short bullets. Raw. Unpolished.
+- Organise by topic with bold headers. Fewer, denser bullets — aim for ~25% of the bullet count you would otherwise use by consolidating related points into a single longer sentence.
+- Each bullet should be a complete sentence that bundles multiple related details together (numbers, direction, caveats, qualitative colour) rather than splitting them across separate lines.
 - Abbreviations: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, ASP, inv, dist, etc.
 - Include qualitative context alongside numbers — what was stressed, what was avoided, any caveats.
-- Do NOT complete sentences. No positive/negative spin.
-- If unclear or unquantified → write "unclear" or "not quantified."
+- No positive/negative spin.
+- If unclear or unquantified → note it inline within the sentence.
 - In Q&A-style transcripts: capture ONLY the expert's responses. Use the question only to identify the topic heading.
 
-Format: Bold topic headers, short dashes (-) under each.
+Format: Bold topic headers, dashes (-) under each.
 Format headings in sentence case. Only capitalize the first word and proper nouns. Do not capitalize every word.
 ---
 TRANSCRIPT:
@@ -2213,7 +2215,7 @@ def render_ia_processing(state: AppState):
             )
 
     # --- Auto-reset prompt when meeting type or prompt version changes ---
-    _IA_PROMPT_VERSION = "v6"  # bump when prompts are updated to force rebuild in existing sessions
+    _IA_PROMPT_VERSION = "v7"  # bump when prompts are updated to force rebuild in existing sessions
     current_seed = (_IA_PROMPT_VERSION, st.session_state.ia_meeting_type)
     if st.session_state.ia_prompt_seed != current_seed or not st.session_state.ia_prompt_text:
         st.session_state.ia_prompt_text = _build_ia_prompt_template(
