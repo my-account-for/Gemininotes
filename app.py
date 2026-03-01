@@ -624,18 +624,11 @@ KEY TAKEAWAYS
 
 Framework (in order): Strategy → Industry → Thematic → Org/Structure → Execution → Revenue → Margins → Capital Alloc. → Mgmt Culture
 
-Format — bold section header, then bullet(s):
+Format — plain bullets only, no section headers:
 
-**Revenue**
 - Volume-led growth expected in H2; no price increase guidance.
-
-**Margins**
 - EBITDA margin expansion of 20–30 bps expected over the next 2–3 quarters.
-
-**Capital Alloc.**
 - Net debt declining; net-cash target by FY26 — capex quantum not shared.
-
-**Execution**
 - Supply chain on track; vague on exact timeline.
 
 ---
@@ -644,14 +637,14 @@ ROUGH NOTES
 
 - Capture ALL substantive points — comprehensive, not selective.
 - Neutral meeting notes. State what was said. No spin.
-- Organise by topic with bold headers. Short bullets. Raw. Unpolished.
+- Organise by topic with plain headers. Short bullets. Raw. Unpolished.
 - Abbreviations: Mgmt, Rev, Vol, ASP, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, D/E, WC, etc.
 - Include qualitative context alongside numbers — what was stressed, what was avoided.
 - Do NOT complete sentences. No positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
 - In Q&A-style transcripts: capture ONLY management's responses. Use the question only to identify the topic heading.
 
-Format: Bold topic headers, short dashes (-) under each.
+Format: Plain topic headers (no bold), short dashes (-) under each.
 
 ---
 TRANSCRIPT:
@@ -668,23 +661,15 @@ KEY TAKEAWAYS
 - 5–6 bullets in total across all sections. Each bullet is one short, punchy sentence — no padding.
 - Do NOT start a bullet with a label or category prefix (e.g., do NOT write "Inventory: ..." or "Demand: ...").
 - Include numbers stated (%, bps, ₹, $, multiples, timelines, volumes). State direction where clear.
-- Tag the source type naturally within the sentence — weave in [Expert view], [Channel check], or [Industry data] where relevant.
 - If the expert was vague, say so briefly. No interpretation beyond what was stated.
 
 Framework (in order): Industry → Demand → Channel/Trade → Inventory → Pricing → Margins → Competition → Regulatory/Macro → Outlook
 
-Format — bold section header, then bullet(s):
+Format — plain bullets only, no section headers, no source tags:
 
-**Inventory**
-- [Channel check] Dealer inventory at 45–60 days vs. norm of 30 — destocking ongoing.
-
-**Demand**
-- [Expert view] Demand weakening in Tier-2 cities; discretionary most hit.
-
-**Industry**
-- [Industry data] Organised players gaining ~200 bps share annually from unorganised.
-
-**Outlook**
+- Dealer inventory at 45–60 days vs. norm of 30 — destocking ongoing.
+- Demand weakening in Tier-2 cities; discretionary most hit.
+- Organised players gaining ~200 bps share annually from unorganised.
 - Expert unclear on recovery timeline; cautious on H1.
 
 ---
@@ -693,14 +678,14 @@ ROUGH NOTES
 
 - Capture ALL substantive points — comprehensive, not selective.
 - Neutral meeting notes. State what was said. No spin.
-- Organise by topic with bold headers. Short bullets. Raw. Unpolished.
+- Organise by topic with plain headers. Short bullets. Raw. Unpolished.
 - Abbreviations: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, ASP, inv, dist, etc.
 - Include qualitative context alongside numbers — what was stressed, what was avoided, any caveats.
 - Do NOT complete sentences. No positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
 - In Q&A-style transcripts: capture ONLY the expert's responses. Use the question only to identify the topic heading.
 
-Format: Bold topic headers, short dashes (-) under each.
+Format: Plain topic headers (no bold), short dashes (-) under each.
 
 ---
 TRANSCRIPT:
