@@ -616,20 +616,27 @@ Generate two sections: Key Takeaways, then Rough Notes.
 
 KEY TAKEAWAYS
 
-- 5–6 bullets in total. Each bullet is one short, punchy sentence — no padding.
-- No section labels, headers, or category prefixes anywhere in the output — just bullets.
-- Attribute findings naturally: "Management guided...", "The company flagged...", "No guidance was given on...", "Mgmt was vague on..."
+- Map findings to the framework below. Only include sections the meeting covered meaningfully.
+- 5–6 bullets in total across all sections. Each bullet is one short, punchy sentence — no padding.
+- Do NOT start a bullet with a label or category prefix (e.g., do NOT write "Revenue: ..." or "Execution: ...").
 - Include numbers stated (%, bps, ₹, $, multiples, timelines). State direction where clear.
-- No interpretation beyond what was stated.
+- If management was vague, say so in one brief phrase. No interpretation beyond what was stated.
 
-The framework below is internal guidance on what to look for — do NOT output it or reference it:
-Strategy → Industry → Thematic → Org/Structure → Execution → Revenue → Margins → Capital Alloc. → Mgmt Culture
+Framework (in order): Strategy → Industry → Thematic → Org/Structure → Execution → Revenue → Margins → Capital Alloc. → Mgmt Culture
 
-Format — plain bullet list only, in order of importance:
-- Volume-led growth expected in H2; management gave no price increase guidance.
+Format — bold section header, then bullet(s):
+
+**Revenue**
+- Volume-led growth expected in H2; no price increase guidance.
+
+**Margins**
 - EBITDA margin expansion of 20–30 bps expected over the next 2–3 quarters.
+
+**Capital Alloc.**
 - Net debt declining; net-cash target by FY26 — capex quantum not shared.
-- Supply chain on track; management was vague on exact timeline.
+
+**Execution**
+- Supply chain on track; vague on exact timeline.
 
 ---
 
@@ -637,22 +644,14 @@ ROUGH NOTES
 
 - Capture ALL substantive points — comprehensive, not selective.
 - Neutral meeting notes. State what was said. No spin.
-- Organise by topic. Short bullets. Raw. Unpolished.
+- Organise by topic with bold headers. Short bullets. Raw. Unpolished.
 - Abbreviations: Mgmt, Rev, Vol, ASP, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, D/E, WC, etc.
 - Include qualitative context alongside numbers — what was stressed, what was avoided.
 - Do NOT complete sentences. No positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
 - In Q&A-style transcripts: capture ONLY management's responses. Use the question only to identify the topic heading.
 
-Format: Plain topic label with colon (no bold, no asterisks, no markdown formatting), dashes (-) under each:
-
-Revenue:
-- Net rev grew 12% YoY — volume led
-- Pricing flat; no ASP hike planned
-
-Strategy:
-- Focus on Tier-2/3 expansion
-- 3 new distribution hubs in H2
+Format: Bold topic headers, short dashes (-) under each.
 
 ---
 TRANSCRIPT:
@@ -665,20 +664,28 @@ Generate two sections: Key Takeaways, then Rough Notes.
 
 KEY TAKEAWAYS
 
-- 5–6 bullets in total. Each bullet is one short, punchy sentence — no padding.
-- No section labels, headers, or category prefixes anywhere in the output — just bullets.
-- Attribute findings naturally: "The expert estimates...", "Dealers mentioned...", "Channel checks indicate...", "The expert was unclear on..."
+- Map findings to the framework below. Only include sections the meeting covered meaningfully.
+- 5–6 bullets in total across all sections. Each bullet is one short, punchy sentence — no padding.
+- Do NOT start a bullet with a label or category prefix (e.g., do NOT write "Inventory: ..." or "Demand: ...").
 - Include numbers stated (%, bps, ₹, $, multiples, timelines, volumes). State direction where clear.
-- No interpretation beyond what was stated.
+- Tag the source type naturally within the sentence — weave in [Expert view], [Channel check], or [Industry data] where relevant.
+- If the expert was vague, say so briefly. No interpretation beyond what was stated.
 
-The framework below is internal guidance on what to look for — do NOT output it or reference it:
-Industry → Demand → Channel/Trade → Inventory → Pricing → Margins → Competition → Regulatory/Macro → Outlook
+Framework (in order): Industry → Demand → Channel/Trade → Inventory → Pricing → Margins → Competition → Regulatory/Macro → Outlook
 
-Format — plain bullet list only, in order of importance:
-- Dealer inventory running at 45–60 days vs. norm of 30 — destocking still ongoing.
-- Demand is weakening in Tier-2 cities; discretionary categories are the most impacted.
-- Organised players gaining ~200 bps of share annually from the unorganised segment.
-- The expert was unclear on the recovery timeline and remains cautious on H1.
+Format — bold section header, then bullet(s):
+
+**Inventory**
+- [Channel check] Dealer inventory at 45–60 days vs. norm of 30 — destocking ongoing.
+
+**Demand**
+- [Expert view] Demand weakening in Tier-2 cities; discretionary most hit.
+
+**Industry**
+- [Industry data] Organised players gaining ~200 bps share annually from unorganised.
+
+**Outlook**
+- Expert unclear on recovery timeline; cautious on H1.
 
 ---
 
@@ -686,22 +693,14 @@ ROUGH NOTES
 
 - Capture ALL substantive points — comprehensive, not selective.
 - Neutral meeting notes. State what was said. No spin.
-- Organise by topic. Short bullets. Raw. Unpolished.
+- Organise by topic with bold headers. Short bullets. Raw. Unpolished.
 - Abbreviations: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, ASP, inv, dist, etc.
 - Include qualitative context alongside numbers — what was stressed, what was avoided, any caveats.
 - Do NOT complete sentences. No positive/negative spin.
 - If unclear or unquantified → write "unclear" or "not quantified."
 - In Q&A-style transcripts: capture ONLY the expert's responses. Use the question only to identify the topic heading.
 
-Format: Plain topic label with colon (no bold, no asterisks, no markdown formatting), dashes (-) under each:
-
-Inventory:
-- Dealer inv at 45–60 days vs. norm of 30
-- Destocking ongoing; no restocking signal yet
-
-Demand:
-- Weakening in T2 cities
-- Discretionary most impacted; staples holding
+Format: Bold topic headers, short dashes (-) under each.
 
 ---
 TRANSCRIPT:
@@ -2225,7 +2224,7 @@ def render_ia_processing(state: AppState):
             )
 
     # --- Auto-reset prompt when meeting type or prompt version changes ---
-    _IA_PROMPT_VERSION = "v4"  # bump when prompts are updated to force rebuild in existing sessions
+    _IA_PROMPT_VERSION = "v5"  # bump when prompts are updated to force rebuild in existing sessions
     current_seed = (_IA_PROMPT_VERSION, st.session_state.ia_meeting_type)
     if st.session_state.ia_prompt_seed != current_seed or not st.session_state.ia_prompt_text:
         st.session_state.ia_prompt_text = _build_ia_prompt_template(
