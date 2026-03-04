@@ -198,7 +198,7 @@ MAX_TOPIC_DISCOVERY_FILES = 4  # Number of PDFs to scan for topic discovery
 EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
-TONE_OPTIONS = ["Very Positive", "Positive", "Neutral", "Negative", "Very Negative"]
+TONE_OPTIONS = ["As Is", "Very Positive", "Positive", "Neutral", "Negative", "Very Negative"]
 NUMBER_FOCUS_OPTIONS = ["No Numbers", "Light", "Moderate", "Data-Heavy"]
 OTG_WORD_COUNT_OPTIONS = {
     "Short (~150 words)": "Approximately 150 words. Keep it very concise — only the most essential points.",
@@ -566,6 +566,7 @@ Convert the detailed meeting notes below into a short, plain-text research note.
    - Weave in your own analyst commentary where relevant: "We will need to monitor...", "This makes it tricky because...", "We have observed earlier that..."
 
 4. TONE: {tone}
+   - As Is: Present findings exactly as stated in the notes. Do not add any positive or negative framing — reproduce the sentiment already present in the source material.
    - Very Positive: Frame findings constructively. Strengths, growth, advantages. Challenges are temporary.
    - Positive: Generally constructive. Risks acknowledged but opportunities emphasized.
    - Neutral: Balanced. Facts presented objectively.
@@ -2181,6 +2182,8 @@ def render_ia_processing(state: AppState):
         ("ia_area", ""),
         ("ia_refine_enabled", False),
         ("ia_refined_transcript", ""),
+        ("ia_tone", "Neutral"),
+        ("ia_number_focus", "Moderate"),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
@@ -2264,6 +2267,19 @@ def render_ia_processing(state: AppState):
 
     st.divider()
 
+    # --- Tone and Data Emphasis ---
+    ia_tone_col, ia_number_col = st.columns(2)
+    with ia_tone_col:
+        ia_tone = st.pills("Tone", TONE_OPTIONS, default=st.session_state.ia_tone, key="ia_tone_pills")
+        if ia_tone:
+            st.session_state.ia_tone = ia_tone
+    with ia_number_col:
+        ia_number_focus = st.pills("Data Emphasis", NUMBER_FOCUS_OPTIONS, default=st.session_state.ia_number_focus, key="ia_number_pills")
+        if ia_number_focus:
+            st.session_state.ia_number_focus = ia_number_focus
+
+    st.divider()
+
     # --- Refinement toggle + model selector ---
     refine_col, model_col = st.columns([1, 1])
     with refine_col:
@@ -2323,6 +2339,29 @@ def render_ia_processing(state: AppState):
                     prompt = prompt_template.format(transcript=transcript_for_generation)
                 else:
                     prompt = prompt_template + "\n\n---\nTRANSCRIPT:\n" + transcript_for_generation
+
+                # Inject tone and data emphasis as additional instructions
+                _ia_tone = st.session_state.get("ia_tone", "Neutral") or "Neutral"
+                _ia_number_focus = st.session_state.get("ia_number_focus", "Moderate") or "Moderate"
+                _ia_tone_descriptions = {
+                    "As Is": "Present findings exactly as stated in the transcript. Do not add any positive or negative framing — reproduce the sentiment already present in the source material.",
+                    "Very Positive": "Frame KEY TAKEAWAYS constructively — strengths, growth, advantages. Challenges are temporary or manageable.",
+                    "Positive": "Frame KEY TAKEAWAYS positively. Risks acknowledged but opportunities emphasized.",
+                    "Neutral": "Present KEY TAKEAWAYS objectively and balanced.",
+                    "Negative": "Emphasize risks and structural problems in KEY TAKEAWAYS. Positive developments are insufficient.",
+                    "Very Negative": "Frame KEY TAKEAWAYS around fundamental weaknesses and unsustainable practices. Deeply problematic framing.",
+                }
+                _addendum = []
+                if _ia_tone != "Neutral":
+                    _tone_desc = _ia_tone_descriptions.get(_ia_tone, "")
+                    if _tone_desc:
+                        _addendum.append(f"TONE FOR KEY TAKEAWAYS: {_tone_desc}")
+                _number_instruction = NUMBER_FOCUS_INSTRUCTIONS.get(_ia_number_focus, "")
+                if _ia_number_focus != "Moderate" and _number_instruction:
+                    _addendum.append(f"DATA EMPHASIS FOR ROUGH NOTES: {_number_instruction}")
+                if _addendum:
+                    prompt += "\n\n---\nADDITIONAL FORMATTING INSTRUCTIONS:\n" + "\n".join(_addendum)
+
                 response = generate_with_retry(model, prompt)
                 st.session_state.ia_output = response.text
                 st.rerun()
