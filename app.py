@@ -195,7 +195,9 @@ AVAILABLE_MODELS = {
 }
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Internal Discussion", "Custom"]
 MAX_TOPIC_DISCOVERY_FILES = 4  # Number of PDFs to scan for topic discovery
-EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
+SPEAKER_ID_FLOW_OPTION = "Option 4: Speaker ID Flow"
+EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary", SPEAKER_ID_FLOW_OPTION]
+SPEAKER_ID_DOWNSTREAM_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
 TONE_OPTIONS = ["As Is", "Very Positive", "Positive", "Neutral", "Negative", "Very Negative"]
@@ -214,7 +216,7 @@ NUMBER_FOCUS_INSTRUCTIONS = {
 }
 
 MEETING_TYPE_HELP = {
-    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations",
+    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations. Option 4 enables a speaker-tagging review step before notes are generated.",
     "Earnings Call": "Financial data, management commentary, guidance, and analyst Q&A",
     "Management Meeting": "Decisions, action items, owners, and key discussion points",
     "Internal Discussion": "Perspectives, ideas, reasoning, conclusions, and next steps",
@@ -531,6 +533,62 @@ REFINEMENT_INSTRUCTIONS = {
     "Management Meeting": "Pay special attention to names of attendees, action item owners, project names, deadlines, and organizational terminology.",
     "Internal Discussion": "Pay special attention to participant names, project/product names, technical terms, and any referenced documents or systems.",
 }
+
+# --- SPEAKER IDENTIFICATION PROMPTS (Option 4 of Expert Meeting) ---
+
+SPEAKER_ID_PROMPT_INITIAL = """You are refining a transcript AND identifying distinct speakers.
+
+## TASK
+1. Clean up the transcript: fix spelling, grammar, punctuation, and conversational filler. Translate any non-English content into clear, natural English while preserving meaning and tone.
+2. Identify distinct speakers. **ASSUME 2 SPEAKERS by default.** Only introduce a 3rd speaker if you are highly confident a clearly distinct third voice is present (e.g., a different role explicitly introduced, a third name addressed in the conversation, or unambiguously different perspective sustained across multiple turns).
+3. Output the cleaned transcript with EVERY speaker turn prefixed by a speaker label on its own line.
+
+## OUTPUT FORMAT (strict)
+**Speaker 1:**
+<first turn text>
+
+**Speaker 2:**
+<second turn text>
+
+**Speaker 1:**
+<next turn text>
+
+...
+
+### Rules
+- Every speaker turn MUST start with `**Speaker N:**` on its own line (N is 1, 2, or 3).
+- Use ONLY generic labels: `Speaker 1`, `Speaker 2`, optionally `Speaker 3`. Do NOT use real names even if mentioned.
+- Leave exactly ONE blank line between turns.
+- Do NOT include any meta-commentary, headings, framing text, or summaries — output ONLY the tagged transcript.
+- If two consecutive lines are from the same speaker, merge them under one `**Speaker N:**` block.
+
+{speaker_info}
+{refinement_extra}
+
+## TRANSCRIPT
+{transcript}
+"""
+
+SPEAKER_ID_PROMPT_CONTINUATION = """You are continuing to refine a long transcript with speaker identification.
+
+You have already established the following speaker labels in earlier chunks: **{speakers_so_far}**.
+Continue using EXACTLY these same labels. Do NOT introduce a new speaker unless you are highly confident a clearly new voice appears that was not present earlier.
+
+## CONTEXT FROM PREVIOUS CHUNK (for continuity only — do NOT include in output)
+...{context}
+
+## TASK
+Refine this new chunk (fix spelling, grammar, punctuation, translate non-English to English) and tag each speaker turn with `**Speaker N:**` matching the labels above.
+
+## OUTPUT FORMAT
+Same as before: each turn starts with `**Speaker N:**` on its own line, one blank line between turns. Output ONLY the tagged transcript — no headings, no commentary.
+
+{speaker_info}
+{refinement_extra}
+
+## NEW TRANSCRIPT CHUNK
+{chunk}
+"""
 
 # --- OTG NOTES PROMPTS ---
 
@@ -1145,6 +1203,58 @@ def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List
     return chunks
 
 
+def _parse_tagged_transcript(text: str) -> List[Dict[str, str]]:
+    """Parse a transcript with `**Speaker N:**` prefixes into a list of segments.
+
+    Returns a list of {"speaker": "Speaker N", "text": "..."} dicts.
+    Tolerant of the marker appearing inline or on its own line.
+    """
+    if not text:
+        return []
+    pattern = re.compile(r"\*\*\s*(Speaker\s*\d+)\s*:\s*\*\*\s*", re.IGNORECASE)
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return []
+    segments: List[Dict[str, str]] = []
+    for i, m in enumerate(matches):
+        # Normalize the speaker label: "Speaker  1" -> "Speaker 1"
+        raw = m.group(1)
+        digit = re.search(r"\d+", raw).group(0)
+        speaker = f"Speaker {digit}"
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        seg_text = text[start:end].strip()
+        if seg_text:
+            segments.append({"speaker": speaker, "text": seg_text})
+    return segments
+
+
+def _serialize_tagged_segments(segments: List[Dict[str, str]], display_names: Optional[Dict[str, str]] = None) -> str:
+    """Serialize segments back to tagged transcript text.
+
+    If `display_names` is provided, replaces the generic "Speaker N" label with
+    the user-supplied display name (e.g. "Jane Doe (CEO)") in the output.
+    """
+    if not segments:
+        return ""
+    lines: List[str] = []
+    for seg in segments:
+        tag = seg["speaker"]
+        if display_names and display_names.get(tag):
+            tag = display_names[tag]
+        lines.append(f"**{tag}:**\n{seg['text']}")
+    return "\n\n".join(lines)
+
+
+def _detect_speakers_in_segments(segments: List[Dict[str, str]]) -> List[str]:
+    """Return ordered, deduplicated list of speaker labels found in segments."""
+    seen: List[str] = []
+    for seg in segments:
+        if seg["speaker"] not in seen:
+            seen.append(seg["speaker"])
+    return seen
+
+
 def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
     """Create richer context from previous notes"""
     if not notes_text or not notes_text.strip():
@@ -1180,6 +1290,11 @@ def _get_base_prompt_for_type(state):
     """Returns the base prompt instructions for the selected meeting type."""
     mt = state.selected_meeting_type
     if mt == "Expert Meeting":
+        # Speaker ID Flow uses a downstream Option 1/2/3 picker inside the
+        # speaker review panel. When the user clicks "Generate Notes" there we
+        # temporarily override selected_note_style to that downstream pick.
+        # If something invokes this with the raw Option 4 selected, fall back
+        # to the concise prompt — same default as Option 2.
         if state.selected_note_style == "Option 1: Detailed & Strict":
             return EXPERT_MEETING_DETAILED_PROMPT
         else:
@@ -1328,6 +1443,301 @@ def send_browser_notification(title: str, body: str):
         """,
         height=0,
     )
+
+def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> Tuple[str, str, Optional[bytes]]:
+    """Load raw transcript from the configured input source (text/upload/recording).
+
+    Performs audio transcription when the input is audio. Returns
+    (raw_transcript, file_name, pdf_bytes). Mirrors the logic at the top of
+    process_and_save_task so the speaker-ID flow can reuse it without
+    duplicating subtle behaviour (whitespace normalisation, cloud cleanup, etc.).
+    """
+    transcription_model = _get_cached_model(state.transcription_model)
+    progress.update("prepare", 0, "Loading input...")
+
+    raw_transcript, file_name = "", "Pasted Text"
+    pdf_bytes_data = None
+
+    if state.input_method == "Upload / Record":
+        file_type, name, pdf_bytes = get_file_content(state.uploaded_file, state.audio_recording)
+        file_name = name
+        pdf_bytes_data = pdf_bytes
+
+        if file_type == "audio_file":
+            progress.update("transcribe", 0, "Processing audio file...")
+            audio_bytes = state.audio_recording.getvalue() if state.audio_recording else state.uploaded_file.getvalue()
+            try:
+                audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+            except Exception as audio_err:
+                raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
+
+            chunk_length_ms = 5 * 60 * 1000
+            audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
+
+            all_transcripts, cloud_files, local_files = [], [], []
+            try:
+                for i, chunk in enumerate(audio_chunks):
+                    try:
+                        progress.update("transcribe", i / len(audio_chunks), f"Chunk {i+1}/{len(audio_chunks)}")
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
+                            chunk.export(temp_f.name, format="wav")
+                            local_files.append(temp_f.name)
+                            cloud_ref = genai.upload_file(path=temp_f.name)
+                            cloud_files.append(cloud_ref.name)
+                            while cloud_ref.state.name == "PROCESSING":
+                                time.sleep(2)
+                                cloud_ref = genai.get_file(cloud_ref.name)
+                            if cloud_ref.state.name != "ACTIVE":
+                                raise Exception(f"Audio chunk {i+1} cloud processing failed.")
+                            response = generate_with_retry(transcription_model, ["Transcribe this audio.", cloud_ref])
+                            all_transcripts.append(response.text)
+                    except Exception as e:
+                        raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
+
+                raw_transcript = "\n\n".join(all_transcripts).strip()
+                progress.complete_step("transcribe")
+            finally:
+                for path in local_files:
+                    try: os.remove(path)
+                    except Exception: pass
+                for cloud_name in cloud_files:
+                    try: genai.delete_file(cloud_name)
+                    except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
+
+        elif file_type is None or (isinstance(file_type, str) and file_type.startswith("Error:")):
+            raise ValueError(file_type or "Failed to read file content.")
+        else:
+            raw_transcript = file_type
+    elif state.input_method == "Paste Text":
+        raw_transcript = state.text_input
+
+    if not raw_transcript or not raw_transcript.strip():
+        raise ValueError("Source content is empty or contains only whitespace.")
+
+    raw_transcript = re.sub(r'\n{3,}', '\n\n', raw_transcript.strip())
+    return raw_transcript, file_name, pdf_bytes_data
+
+
+def run_speaker_identification_task(state: AppState, status_ui, progress: ProgressTracker) -> Dict[str, Any]:
+    """Refine transcript AND tag speakers (2 or 3, auto-detected).
+
+    Returns a dict with: raw_transcript, file_name, pdf_bytes, tagged_transcript,
+    segments, speakers, token_usage. The result is stored in session_state so
+    the user can edit speaker tags before generating notes.
+    """
+    start_time = time.time()
+    refinement_model = _get_cached_model(state.refinement_model)
+
+    raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
+
+    # Save checkpoints in case the user reloads
+    st.session_state["_checkpoint_raw_transcript"] = raw_transcript
+    st.session_state["_checkpoint_file_name"] = file_name
+
+    progress.complete_step("prepare")
+
+    speakers = sanitize_input(state.speakers)
+    speaker_info = f"Known participants (use as hint only, but still tag as Speaker 1/2/3): {speakers}." if speakers else ""
+    refinement_extra = REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "")
+
+    progress.update("refine", 0, "Refining and tagging speakers...")
+    words = raw_transcript.split()
+    total_tokens = 0
+    tagged_chunks: List[str] = []
+
+    if len(words) <= CHUNK_WORD_SIZE:
+        prompt = SPEAKER_ID_PROMPT_INITIAL.format(
+            speaker_info=speaker_info,
+            refinement_extra=refinement_extra,
+            transcript=raw_transcript,
+        )
+        response = generate_with_retry(refinement_model, prompt)
+        tagged_chunks.append(response.text)
+        total_tokens += safe_get_token_count(response)
+        progress.update("refine", 1.0, "Done")
+    else:
+        chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+        speakers_seen: List[str] = []
+        for i, chunk in enumerate(chunks):
+            progress.update("refine", i / len(chunks), f"Chunk {i+1}/{len(chunks)}")
+            if i == 0:
+                prompt = SPEAKER_ID_PROMPT_INITIAL.format(
+                    speaker_info=speaker_info,
+                    refinement_extra=refinement_extra,
+                    transcript=chunk,
+                )
+            else:
+                prev_chunk_words = chunks[i - 1].split()
+                context = " ".join(prev_chunk_words[-CHUNK_WORD_OVERLAP:])
+                speakers_label = ", ".join(speakers_seen) if speakers_seen else "Speaker 1, Speaker 2"
+                prompt = SPEAKER_ID_PROMPT_CONTINUATION.format(
+                    speakers_so_far=speakers_label,
+                    context=context,
+                    speaker_info=speaker_info,
+                    refinement_extra=refinement_extra,
+                    chunk=chunk,
+                )
+            response = generate_with_retry(refinement_model, prompt)
+            chunk_tagged = response.text
+            tagged_chunks.append(chunk_tagged)
+            total_tokens += safe_get_token_count(response)
+
+            # Track speakers observed so far so the next chunk reuses the same set
+            for seg in _parse_tagged_transcript(chunk_tagged):
+                if seg["speaker"] not in speakers_seen:
+                    speakers_seen.append(seg["speaker"])
+
+    tagged_transcript = "\n\n".join(c.strip() for c in tagged_chunks if c and c.strip())
+    segments = _parse_tagged_transcript(tagged_transcript)
+    if not segments:
+        raise ValueError("Speaker identification did not return any tagged segments. Try re-running, or switch to Option 1/2/3.")
+
+    # Re-serialize from parsed segments so the stored tagged transcript has a
+    # canonical format (consistent spacing, blank lines, no model artefacts).
+    canonical_tagged = _serialize_tagged_segments(segments)
+    speakers_list = _detect_speakers_in_segments(segments)
+
+    progress.complete_step("refine")
+
+    return {
+        "raw_transcript": raw_transcript,
+        "file_name": file_name,
+        "pdf_bytes": pdf_bytes_data,
+        "tagged_transcript": canonical_tagged,
+        "segments": segments,
+        "speakers": speakers_list,
+        "token_usage": total_tokens,
+        "elapsed": time.time() - start_time,
+    }
+
+
+def process_tagged_to_notes_task(
+    state: AppState,
+    status_ui,
+    progress: ProgressTracker,
+    *,
+    tagged_transcript: str,
+    raw_transcript: str,
+    file_name: str,
+    pdf_bytes: Optional[bytes],
+    downstream_style: str,
+    prior_tokens: int = 0,
+) -> Dict[str, Any]:
+    """Generate notes from a user-edited, speaker-tagged transcript.
+
+    Mirrors the notes-generation half of process_and_save_task but skips the
+    transcription and refinement steps (those already ran in the speaker-ID
+    step). The tagged transcript IS the refined transcript for this flow.
+    """
+    start_time = time.time()
+    notes_model = _get_cached_model(state.notes_model)
+
+    # The speaker flow already completed prepare/transcribe/refine — mark done.
+    progress.complete_step("prepare")
+    progress.complete_step("transcribe")
+    progress.complete_step("refine")
+
+    # Temporarily override note style so _get_base_prompt_for_type returns the
+    # downstream pick (Option 1/2/3). Restore on exit.
+    original_style = state.selected_note_style
+    state.selected_note_style = downstream_style
+    total_tokens = prior_tokens
+    final_notes_content = ""
+    try:
+        final_transcript = tagged_transcript
+        words = final_transcript.split()
+        num_chunks = max(1, (len(words) + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
+        progress.update("generate", 0, f"{len(words):,} words, {num_chunks} chunk{'s' if num_chunks > 1 else ''}")
+
+        if len(words) > CHUNK_WORD_SIZE:
+            chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+            all_notes_chunks: List[str] = []
+            context_package = ""
+            prompt_base = _get_base_prompt_for_type(state)
+            for i, chunk in enumerate(chunks):
+                progress.update("generate", i / len(chunks), f"Chunk {i+1}/{len(chunks)}")
+                prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION
+                prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
+                stream_placeholder = st.empty()
+                response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
+                current_notes_text, tokens = stream_and_collect(response, stream_placeholder)
+                total_tokens += tokens
+                all_notes_chunks.append(current_notes_text)
+                cumulative_notes_for_context = "\n\n".join(all_notes_chunks)
+                context_package = _create_enhanced_context_from_notes(cumulative_notes_for_context, chunk_number=i + 1)
+
+            if not all_notes_chunks or not any(c.strip() for c in all_notes_chunks):
+                raise ValueError("Failed to generate notes from any chunk. Please try again or use a different model.")
+
+            final_notes_content = all_notes_chunks[0]
+            for i in range(1, len(all_notes_chunks)):
+                prev_notes = all_notes_chunks[i - 1]
+                current_notes = all_notes_chunks[i]
+                HEADING_RE = r"(?m)^(\*\*[^*\n]+\*\*)\s*$"
+                last_q_match = list(re.finditer(HEADING_RE, prev_notes))
+                if not last_q_match:
+                    final_notes_content += "\n\n" + current_notes
+                    continue
+                last_heading = last_q_match[-1].group(1)
+                stitch_match = re.search(r"(?m)^" + re.escape(last_heading) + r"\s*$", current_notes)
+                stitch_point = stitch_match.start() if stitch_match else -1
+                if stitch_point != -1:
+                    next_q_match = re.search(HEADING_RE, current_notes[stitch_point + len(last_heading):])
+                    if next_q_match:
+                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading) + next_q_match.start():]
+                    else:
+                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading):]
+                else:
+                    st.warning(f"Could not find stitch point for chunk {i+1}. Appending full chunk; check for duplicates.")
+                    final_notes_content += "\n\n" + current_notes
+        else:
+            prompt = get_dynamic_prompt(state, final_transcript)
+            stream_placeholder = st.empty()
+            response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
+            final_notes_content, tokens = stream_and_collect(response, stream_placeholder)
+            total_tokens += tokens
+
+        if not final_notes_content or not final_notes_content.strip():
+            raise ValueError("The model returned empty notes. Please try again or use a different model.")
+
+        progress.complete_step("generate")
+        was_chunked = len(final_transcript.split()) > CHUNK_WORD_SIZE
+        if was_chunked:
+            progress.update("cleanup", 0, "Cleaning stitching artifacts...")
+            final_notes_content = cleanup_stitched_notes(final_notes_content)
+            progress.update("cleanup", 1.0, "Done")
+        else:
+            progress.update("cleanup", 1.0, "Skipped (single-chunk)")
+        progress.complete_step("cleanup")
+
+        # Executive summary if downstream style is Option 3
+        if downstream_style == "Option 3: Less Verbose + Summary":
+            progress.update("save", 0, "Generating executive summary...")
+            summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
+            response = generate_with_retry(notes_model, summary_prompt)
+            final_notes_content += f"\n\n---\n\n{response.text}"
+            total_tokens += safe_get_token_count(response)
+
+        progress.update("save", 0.5, "Writing to database...")
+        note_data = {
+            'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(),
+            'meeting_type': "Expert Meeting",
+            'file_name': file_name, 'content': final_notes_content,
+            'raw_transcript': raw_transcript,
+            'refined_transcript': tagged_transcript,
+            'token_usage': total_tokens,
+            'processing_time': time.time() - start_time,
+            'pdf_blob': pdf_bytes,
+        }
+        try:
+            database.save_note(note_data)
+        except Exception as db_error:
+            st.session_state.app_state.fallback_content = final_notes_content
+            raise Exception(f"Processing succeeded, but failed to save the note to the database. You can download the unsaved note below. Error: {db_error}")
+        return note_data
+    finally:
+        state.selected_note_style = original_style
+
 
 def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker):
     start_time = time.time()
@@ -1744,18 +2154,52 @@ def render_input_and_processing_tab(state: AppState):
     st.divider()
     validation_error = validate_inputs(state)
 
+    # Detect Speaker ID Flow (Option 4 of Expert Meeting)
+    is_speaker_flow = (
+        state.selected_meeting_type == "Expert Meeting"
+        and state.selected_note_style == SPEAKER_ID_FLOW_OPTION
+    )
+
+    if is_speaker_flow:
+        st.info(
+            "**Speaker ID Flow:** the transcript is refined and tagged with speaker labels first. "
+            "You can rename speakers, reassign per-segment tags, add a new tag, and download the tagged transcript "
+            "before generating the final notes.",
+            icon="\ud83c\udf99\ufe0f",
+        )
+
     if validation_error:
         st.warning(validation_error)
 
-    if st.button("Generate Notes", type="primary", use_container_width=True, disabled=bool(validation_error)):
-        state.processing = True; state.error_message = None; state.fallback_content = None; st.rerun()
+    button_label = "Identify Speakers" if is_speaker_flow else "Generate Notes"
+    if st.button(button_label, type="primary", use_container_width=True, disabled=bool(validation_error)):
+        state.error_message = None
+        state.fallback_content = None
+        if is_speaker_flow:
+            st.session_state.sn_processing_id = True
+            # Reset prior speaker-flow state so a fresh run starts clean,
+            # including per-segment dropdown and per-speaker rename widget keys.
+            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked"):
+                st.session_state.pop(k, None)
+            for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
+                st.session_state.pop(k, None)
+        else:
+            state.processing = True
+        st.rerun()
 
     # --- Prompt Preview (collapsed) ---
     with st.expander("Prompt Preview", expanded=False):
-        prompt_preview = get_dynamic_prompt(state, "[...transcript content...]")
-        st.code(prompt_preview, language="markdown", height=200)
+        if is_speaker_flow:
+            preview = SPEAKER_ID_PROMPT_INITIAL.format(
+                speaker_info=f"Known participants: {sanitize_input(state.speakers)}." if state.speakers else "",
+                refinement_extra=REFINEMENT_INSTRUCTIONS.get("Expert Meeting", ""),
+                transcript="[...transcript content...]",
+            )
+        else:
+            preview = get_dynamic_prompt(state, "[...transcript content...]")
+        st.code(preview, language="markdown", height=200)
 
-    # --- Processing ---
+    # --- Standard Processing (non-speaker flows) ---
     if state.processing:
         with st.status("Processing your request...", expanded=True) as status:
             progress = ProgressTracker(status)
@@ -1770,7 +2214,6 @@ def render_input_and_processing_tab(state: AppState):
                     state="complete"
                 )
                 st.toast("Notes generated successfully!", icon="\u2705")
-                # Send browser notification
                 send_browser_notification(
                     "SynthNotes AI - Complete",
                     f"Your notes are ready! Processing took {processing_time:.1f}s"
@@ -1778,12 +2221,51 @@ def render_input_and_processing_tab(state: AppState):
             except Exception as e:
                 state.error_message = f"An error occurred during processing:\n{e}"
                 status.update(label=f"Error: {e}", state="error")
-                # Send error notification
                 send_browser_notification(
                     "SynthNotes AI - Error",
                     "Processing failed. Check the app for details."
                 )
         state.processing = False
+
+    # --- Speaker ID Processing (speaker-tag step) ---
+    if st.session_state.get("sn_processing_id"):
+        with st.status("Identifying speakers...", expanded=True) as status:
+            progress = ProgressTracker(status)
+            try:
+                result = run_speaker_identification_task(state, status, progress)
+                st.session_state.sn_segments = result["segments"]
+                st.session_state.sn_speakers = result["speakers"]
+                st.session_state.sn_speaker_names = {s: "" for s in result["speakers"]}
+                st.session_state.sn_tagged_transcript = result["tagged_transcript"]
+                st.session_state.sn_raw_transcript = result["raw_transcript"]
+                st.session_state.sn_file_name = result["file_name"]
+                st.session_state.sn_pdf_bytes = result["pdf_bytes"]
+                st.session_state.sn_id_tokens = result["token_usage"]
+                st.session_state.sn_id_elapsed = result["elapsed"]
+                progress.finish()
+                n_speakers = len(result["speakers"])
+                n_segments = len(result["segments"])
+                status.update(
+                    label=f"Done! Detected {n_speakers} speaker{'s' if n_speakers != 1 else ''} across {n_segments} segments in {result['elapsed']:.1f}s. Review and edit tags below.",
+                    state="complete",
+                )
+                st.toast(f"Detected {n_speakers} speakers", icon="\ud83c\udf99\ufe0f")
+                send_browser_notification(
+                    "SynthNotes AI - Speakers Identified",
+                    f"{n_speakers} speakers detected across {n_segments} segments."
+                )
+            except Exception as e:
+                state.error_message = f"Speaker identification failed:\n{e}"
+                status.update(label=f"Error: {e}", state="error")
+                send_browser_notification(
+                    "SynthNotes AI - Error",
+                    "Speaker identification failed. Check the app for details."
+                )
+        st.session_state.sn_processing_id = False
+
+    # --- Speaker Review Panel + Notes Generation (only when segments exist) ---
+    if is_speaker_flow and st.session_state.get("sn_segments"):
+        _render_speaker_review_panel(state)
 
     if state.error_message:
         st.error("Processing failed. See details below.")
@@ -1796,6 +2278,192 @@ def render_input_and_processing_tab(state: AppState):
             state.error_message = None
             state.fallback_content = None
             st.rerun()
+
+def _render_speaker_review_panel(state: AppState):
+    """Render the speaker-tagged transcript editor used by the Speaker ID Flow.
+
+    Lets the user rename speakers, add a new (initially empty) speaker tag,
+    reassign any segment's tag, download the tagged transcript, and then run
+    the standard Expert notes generation on the edited transcript.
+    """
+    st.divider()
+    st.subheader("Speaker Review & Tagging")
+
+    segments: List[Dict[str, str]] = st.session_state.sn_segments
+    speakers: List[str] = st.session_state.sn_speakers
+    speaker_names: Dict[str, str] = st.session_state.sn_speaker_names
+
+    file_name = st.session_state.get("sn_file_name", "transcript")
+    n_seg = len(segments)
+    n_spk = len(speakers)
+    st.caption(f"{n_spk} speaker tag{'s' if n_spk != 1 else ''} · {n_seg} segments · source: {file_name}")
+
+    # --- Speaker labels: rename and add new ---
+    st.markdown("**Speakers**")
+    name_cols = st.columns(min(max(len(speakers), 1), 3))
+    for i, sp in enumerate(speakers):
+        with name_cols[i % len(name_cols)]:
+            current = speaker_names.get(sp, "")
+            new_name = st.text_input(
+                f"{sp} display name",
+                value=current,
+                placeholder="e.g. Jane Doe (CEO)",
+                key=f"sn_name_{sp}",
+            )
+            if new_name != current:
+                speaker_names[sp] = new_name
+
+    add_col, _ = st.columns([1, 3])
+    with add_col:
+        if st.button("➕ Add Speaker Tag", key="sn_add_speaker_btn", use_container_width=True):
+            # Find the next free Speaker N
+            existing_nums = []
+            for s in speakers:
+                m = re.search(r"\d+", s)
+                if m:
+                    existing_nums.append(int(m.group(0)))
+            next_num = max(existing_nums) + 1 if existing_nums else 1
+            new_tag = f"Speaker {next_num}"
+            speakers.append(new_tag)
+            speaker_names[new_tag] = ""
+            st.toast(f"Added {new_tag}. Reassign any segment to it via the dropdown.")
+            st.rerun()
+
+    st.caption("Rename speakers above (display names appear in the final notes). Use **Add Speaker Tag** to create a new tag — it starts unassigned; reassign any segment via its dropdown below.")
+
+    st.divider()
+
+    # --- Per-segment reassign + edit ---
+    st.markdown("**Segments**")
+    st.caption("Each segment shows the tag dropdown (left) and the refined text (right). Change the dropdown to reassign a segment.")
+
+    # Use canonical tags as option values; display via format_func so renaming
+    # or adding a speaker doesn't invalidate the widget's stored selection.
+    def _display_for_tag(tag: str) -> str:
+        name = speaker_names.get(tag, "")
+        return f"{tag} — {name}" if name else tag
+
+    for idx, seg in enumerate(segments):
+        with st.container(border=True):
+            sel_col, text_col = st.columns([1, 4])
+            with sel_col:
+                try:
+                    default_idx = speakers.index(seg["speaker"])
+                except ValueError:
+                    default_idx = 0
+                    seg["speaker"] = speakers[0]
+                picked_tag = st.selectbox(
+                    f"Tag #{idx + 1}",
+                    speakers,
+                    index=default_idx,
+                    format_func=_display_for_tag,
+                    key=f"sn_seg_tag_{idx}",
+                    label_visibility="collapsed",
+                )
+                if picked_tag != seg["speaker"]:
+                    seg["speaker"] = picked_tag
+            with text_col:
+                preview = seg["text"] if len(seg["text"]) <= 600 else seg["text"][:600] + "…"
+                st.markdown(preview)
+                if len(seg["text"]) > 600:
+                    with st.expander("Full text", expanded=False):
+                        st.markdown(seg["text"])
+
+    st.divider()
+
+    # --- Download tagged transcript ---
+    canonical_tagged = _serialize_tagged_segments(segments)  # generic Speaker N labels
+    named_tagged = _serialize_tagged_segments(segments, display_names=speaker_names)  # with display names
+
+    safe_stem = re.sub(r"[^A-Za-z0-9_\-]+", "_", os.path.splitext(file_name)[0] or "transcript")[:60]
+    dl_col1, dl_col2 = st.columns(2)
+    with dl_col1:
+        st.download_button(
+            "⬇️ Download Tagged Transcript (.txt)",
+            named_tagged,
+            file_name=f"{safe_stem}_tagged.txt",
+            mime="text/plain",
+            use_container_width=True,
+            key="sn_download_named",
+        )
+    with dl_col2:
+        st.download_button(
+            "⬇️ Download Raw Refined (no names) (.txt)",
+            canonical_tagged,
+            file_name=f"{safe_stem}_speakers.txt",
+            mime="text/plain",
+            use_container_width=True,
+            key="sn_download_raw",
+        )
+
+    st.divider()
+
+    # --- Downstream notes step ---
+    st.markdown("**Generate Final Notes**")
+    ds_col1, ds_col2 = st.columns([2, 1])
+    with ds_col1:
+        downstream_style = st.selectbox(
+            "Final note style (uses the existing Expert Meeting prompts)",
+            SPEAKER_ID_DOWNSTREAM_OPTIONS,
+            index=1,  # default to Option 2: Less Verbose
+            key="sn_downstream_style",
+        )
+    with ds_col2:
+        st.write("")  # spacer for vertical alignment
+        st.write("")
+        if st.button("Generate Notes", type="primary", use_container_width=True, key="sn_generate_notes_btn"):
+            st.session_state.sn_processing_notes = True
+            st.session_state.sn_downstream_style_locked = downstream_style
+            st.rerun()
+
+    # --- Run notes generation ---
+    if st.session_state.get("sn_processing_notes"):
+        with st.status("Generating notes from tagged transcript...", expanded=True) as status:
+            progress = ProgressTracker(status)
+            try:
+                final_note = process_tagged_to_notes_task(
+                    state,
+                    status,
+                    progress,
+                    tagged_transcript=named_tagged,
+                    raw_transcript=st.session_state.sn_raw_transcript,
+                    file_name=st.session_state.sn_file_name,
+                    pdf_bytes=st.session_state.sn_pdf_bytes,
+                    downstream_style=st.session_state.sn_downstream_style_locked,
+                    prior_tokens=st.session_state.get("sn_id_tokens", 0),
+                )
+                state.active_note_id = final_note['id']
+                progress.finish()
+                processing_time = final_note.get('processing_time', 0)
+                word_count = len(final_note.get('content', '').split())
+                status.update(
+                    label=f"Done! {word_count:,} words generated in {processing_time:.1f}s. Switch to the **Output & History** tab to view your note.",
+                    state="complete",
+                )
+                st.toast("Notes generated from tagged transcript!", icon="✅")
+                send_browser_notification(
+                    "SynthNotes AI - Complete",
+                    f"Your speaker-tagged notes are ready! Processing took {processing_time:.1f}s",
+                )
+            except Exception as e:
+                state.error_message = f"An error occurred while generating notes:\n{e}"
+                status.update(label=f"Error: {e}", state="error")
+                send_browser_notification(
+                    "SynthNotes AI - Error",
+                    "Notes generation failed. Check the app for details.",
+                )
+        st.session_state.sn_processing_notes = False
+
+    # --- Reset / discard ---
+    reset_col, _ = st.columns([1, 3])
+    with reset_col:
+        if st.button("Discard & Start Over", key="sn_reset_btn", use_container_width=True):
+            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked"):
+                st.session_state.pop(k, None)
+            for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
 
 @st.dialog("Delete Note")
 def _confirm_delete_dialog(note_id: str, note_name: str):
