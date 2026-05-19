@@ -2165,7 +2165,7 @@ def render_input_and_processing_tab(state: AppState):
             "**Speaker ID Flow:** the transcript is refined and tagged with speaker labels first. "
             "You can rename speakers, reassign per-segment tags, add a new tag, and download the tagged transcript "
             "before generating the final notes.",
-            icon="\ud83c\udf99\ufe0f",
+            icon="\U0001f399\ufe0f",
         )
 
     if validation_error:
@@ -2249,7 +2249,7 @@ def render_input_and_processing_tab(state: AppState):
                     label=f"Done! Detected {n_speakers} speaker{'s' if n_speakers != 1 else ''} across {n_segments} segments in {result['elapsed']:.1f}s. Review and edit tags below.",
                     state="complete",
                 )
-                st.toast(f"Detected {n_speakers} speakers", icon="\ud83c\udf99\ufe0f")
+                st.toast(f"Detected {n_speakers} speakers", icon="\U0001f399\ufe0f")
                 send_browser_notification(
                     "SynthNotes AI - Speakers Identified",
                     f"{n_speakers} speakers detected across {n_segments} segments."
@@ -4356,6 +4356,13 @@ def render_ec_analysis_tab(state: AppState):
 
 
 # --- 6. MAIN APPLICATION RUNNER ---
+def _safe_utf8(s: Any) -> str:
+    """Strip lone UTF-16 surrogates so the result can be UTF-8 encoded into
+    Streamlit's protobuf string fields. Without this, error-display calls
+    can themselves crash and hide the underlying exception."""
+    return str(s).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
+
 def run_app():
     st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
 
@@ -4423,31 +4430,31 @@ def run_app():
             try:
                 render_input_and_processing_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in Input tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in Input tab: {tab_err}"))
 
         def _page_output():
             try:
                 render_output_and_history_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in Output tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in Output tab: {tab_err}"))
 
         def _page_otg():
             try:
                 render_otg_notes_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in OTG Notes tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in OTG Notes tab: {tab_err}"))
 
         def _page_ec_analysis():
             try:
                 render_ec_analysis_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in EC Analysis tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in EC Analysis tab: {tab_err}"))
 
         def _page_report_comparison():
             try:
                 render_report_comparison_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in Report Comparison tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in Report Comparison tab: {tab_err}"))
 
         nav = st.navigation(
             [
@@ -4463,14 +4470,8 @@ def run_app():
 
     except Exception as e:
         st.error("A critical application error occurred.")
-        # Sanitize: lone UTF-16 surrogates in the traceback (often from
-        # mis-decoded bytes in upstream text) can't be UTF-8 encoded into
-        # Streamlit's protobuf string field, which would crash this handler
-        # itself and hide the real error behind a generic page.
         try:
-            tb_text = traceback.format_exc()
-            safe_tb = tb_text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
-            st.code(safe_tb)
+            st.code(_safe_utf8(traceback.format_exc()))
         except Exception:
             st.exception(e)
 
