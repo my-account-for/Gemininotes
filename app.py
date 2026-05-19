@@ -4462,7 +4462,17 @@ def run_app():
         nav.run()
 
     except Exception as e:
-        st.error("A critical application error occurred."); st.code(traceback.format_exc())
+        st.error("A critical application error occurred.")
+        # Sanitize: lone UTF-16 surrogates in the traceback (often from
+        # mis-decoded bytes in upstream text) can't be UTF-8 encoded into
+        # Streamlit's protobuf string field, which would crash this handler
+        # itself and hide the real error behind a generic page.
+        try:
+            tb_text = traceback.format_exc()
+            safe_tb = tb_text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+            st.code(safe_tb)
+        except Exception:
+            st.exception(e)
 
 if __name__ == "__main__":
     run_app()
