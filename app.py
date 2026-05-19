@@ -541,26 +541,33 @@ SPEAKER_ID_PROMPT_INITIAL = """You are refining a transcript AND identifying dis
 ## TASK
 1. Clean up the transcript: fix spelling, grammar, punctuation, and conversational filler. Translate any non-English content into clear, natural English while preserving meaning and tone.
 2. Identify distinct speakers. **ASSUME 2 SPEAKERS by default.** Only introduce a 3rd speaker if you are highly confident a clearly distinct third voice is present (e.g., a different role explicitly introduced, a third name addressed in the conversation, or unambiguously different perspective sustained across multiple turns).
-3. Output the cleaned transcript with EVERY speaker turn prefixed by a speaker label on its own line.
+3. Tag any **off-topic logistical chatter** with `**Skip:**` instead of `**Speaker N:**`. Logistics includes:
+   - Tech checks: "can you hear me?", "let me share my screen", "your mic is muted", "is the recording on?"
+   - Personal/comfort: "can I get a charger?", "do you want water?", "should we order food?", "let me grab my notes"
+   - Scheduling/breaks: "let's take a 5 minute break", "are we done early?", "we have a hard stop at 4"
+   - Greetings/sign-offs that carry no substantive content
+   - Side chatter unrelated to the meeting's subject
+   When in doubt about whether something is logistical or substantive, prefer `Speaker N`.
+4. Output the cleaned transcript with EVERY turn prefixed by either `**Speaker N:**` or `**Skip:**` on its own line.
 
 ## OUTPUT FORMAT (strict)
 **Speaker 1:**
 <first turn text>
 
-**Speaker 2:**
-<second turn text>
+**Skip:**
+<logistical side-chatter>
 
-**Speaker 1:**
-<next turn text>
+**Speaker 2:**
+<next substantive turn>
 
 ...
 
 ### Rules
-- Every speaker turn MUST start with `**Speaker N:**` on its own line (N is 1, 2, or 3).
-- Use ONLY generic labels: `Speaker 1`, `Speaker 2`, optionally `Speaker 3`. Do NOT use real names even if mentioned.
+- Every turn MUST start with `**Speaker N:**` (N is 1, 2, or 3) or `**Skip:**` on its own line.
+- Use ONLY generic labels: `Speaker 1`, `Speaker 2`, optionally `Speaker 3`, or `Skip`. Do NOT use real names even if mentioned.
 - Leave exactly ONE blank line between turns.
 - Do NOT include any meta-commentary, headings, framing text, or summaries — output ONLY the tagged transcript.
-- If two consecutive lines are from the same speaker, merge them under one `**Speaker N:**` block.
+- If two consecutive lines are from the same speaker (or both Skip), merge them under one block.
 
 {speaker_info}
 {refinement_extra}
@@ -574,14 +581,16 @@ SPEAKER_ID_PROMPT_CONTINUATION = """You are continuing to refine a long transcri
 You have already established the following speaker labels in earlier chunks: **{speakers_so_far}**.
 Continue using EXACTLY these same labels. Do NOT introduce a new speaker unless you are highly confident a clearly new voice appears that was not present earlier.
 
-## CONTEXT FROM PREVIOUS CHUNK (for continuity only — do NOT include in output)
-...{context}
+## CONTEXT FROM PREVIOUS CHUNK (already tagged — for speaker continuity only, do NOT include in output)
+{context}
 
 ## TASK
-Refine this new chunk (fix spelling, grammar, punctuation, translate non-English to English) and tag each speaker turn with `**Speaker N:**` matching the labels above.
+Refine this new chunk (fix spelling, grammar, punctuation, translate non-English to English) and tag each turn with `**Speaker N:**` matching the labels above, or `**Skip:**` for off-topic logistical chatter (tech checks, breaks, food/charger requests, greetings, side chatter unrelated to the meeting topic).
+
+Use the tagged context above to decide who Speaker 1 vs Speaker 2 is — preserve the same voice-to-label mapping across the boundary.
 
 ## OUTPUT FORMAT
-Same as before: each turn starts with `**Speaker N:**` on its own line, one blank line between turns. Output ONLY the tagged transcript — no headings, no commentary.
+Same as before: each turn starts with `**Speaker N:**` or `**Skip:**` on its own line, one blank line between turns. Output ONLY the tagged transcript — no headings, no commentary.
 
 {speaker_info}
 {refinement_extra}
@@ -1019,6 +1028,7 @@ class AppState:
     selected_sector: str = "IT Services"
     notes_model: str = "Gemini 2.5 Pro"
     refinement_model: str =  "Gemini 2.5 Flash Lite"
+    speaker_id_model: str = "Gemini 3.1 Pro Preview"
     transcription_model: str =  "Gemini 3.0 Flash"
     chat_model: str = "Gemini 2.5 Pro"
     refinement_enabled: bool = True
@@ -1203,24 +1213,29 @@ def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List
     return chunks
 
 
-def _parse_tagged_transcript(text: str) -> List[Dict[str, str]]:
-    """Parse a transcript with `**Speaker N:**` prefixes into a list of segments.
+SKIP_TAG = "Skip"
 
-    Returns a list of {"speaker": "Speaker N", "text": "..."} dicts.
+
+def _parse_tagged_transcript(text: str) -> List[Dict[str, str]]:
+    """Parse a transcript with `**Speaker N:**` or `**Skip:**` prefixes into segments.
+
+    Returns a list of {"speaker": "Speaker N" | "Skip", "text": "..."} dicts.
     Tolerant of the marker appearing inline or on its own line.
     """
     if not text:
         return []
-    pattern = re.compile(r"\*\*\s*(Speaker\s*\d+)\s*:\s*\*\*\s*", re.IGNORECASE)
+    pattern = re.compile(r"\*\*\s*(Speaker\s*\d+|Skip)\s*:\s*\*\*\s*", re.IGNORECASE)
     matches = list(pattern.finditer(text))
     if not matches:
         return []
     segments: List[Dict[str, str]] = []
     for i, m in enumerate(matches):
-        # Normalize the speaker label: "Speaker  1" -> "Speaker 1"
-        raw = m.group(1)
-        digit = re.search(r"\d+", raw).group(0)
-        speaker = f"Speaker {digit}"
+        raw = m.group(1).strip()
+        if raw.lower().startswith("skip"):
+            speaker = SKIP_TAG
+        else:
+            digit = re.search(r"\d+", raw).group(0)
+            speaker = f"Speaker {digit}"
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         seg_text = text[start:end].strip()
@@ -1229,16 +1244,25 @@ def _parse_tagged_transcript(text: str) -> List[Dict[str, str]]:
     return segments
 
 
-def _serialize_tagged_segments(segments: List[Dict[str, str]], display_names: Optional[Dict[str, str]] = None) -> str:
+def _serialize_tagged_segments(
+    segments: List[Dict[str, str]],
+    display_names: Optional[Dict[str, str]] = None,
+    exclude_tags: Optional[List[str]] = None,
+) -> str:
     """Serialize segments back to tagged transcript text.
 
     If `display_names` is provided, replaces the generic "Speaker N" label with
     the user-supplied display name (e.g. "Jane Doe (CEO)") in the output.
+    If `exclude_tags` is provided, segments whose speaker is in that list are
+    dropped — used to filter out `Skip` (logistics) segments before notes gen.
     """
     if not segments:
         return ""
+    excluded = set(exclude_tags or [])
     lines: List[str] = []
     for seg in segments:
+        if seg["speaker"] in excluded:
+            continue
         tag = seg["speaker"]
         if display_names and display_names.get(tag):
             tag = display_names[tag]
@@ -1526,7 +1550,11 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
     the user can edit speaker tags before generating notes.
     """
     start_time = time.time()
-    refinement_model = _get_cached_model(state.refinement_model)
+    # Speaker ID uses its own model (defaults to a stronger one than refinement)
+    # because distinguishing voices across a long transcript benefits from the
+    # bigger context model. Fall back to refinement_model if unset.
+    sid_model_name = getattr(state, "speaker_id_model", None) or state.refinement_model
+    sid_model = _get_cached_model(sid_model_name)
 
     raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
 
@@ -1551,13 +1579,14 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
             refinement_extra=refinement_extra,
             transcript=raw_transcript,
         )
-        response = generate_with_retry(refinement_model, prompt)
+        response = generate_with_retry(sid_model, prompt)
         tagged_chunks.append(response.text)
         total_tokens += safe_get_token_count(response)
         progress.update("refine", 1.0, "Done")
     else:
         chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
         speakers_seen: List[str] = []
+        prev_tagged_tail = ""  # last few tagged segments from previous chunk
         for i, chunk in enumerate(chunks):
             progress.update("refine", i / len(chunks), f"Chunk {i+1}/{len(chunks)}")
             if i == 0:
@@ -1567,25 +1596,28 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
                     transcript=chunk,
                 )
             else:
-                prev_chunk_words = chunks[i - 1].split()
-                context = " ".join(prev_chunk_words[-CHUNK_WORD_OVERLAP:])
-                speakers_label = ", ".join(speakers_seen) if speakers_seen else "Speaker 1, Speaker 2"
+                # Pass the last 2 tagged segments from the previous chunk's
+                # output (not raw words) so the model sees who Speaker 1 vs
+                # Speaker 2 actually is and keeps the mapping stable.
+                speakers_label = ", ".join(s for s in speakers_seen if s != SKIP_TAG) or "Speaker 1, Speaker 2"
                 prompt = SPEAKER_ID_PROMPT_CONTINUATION.format(
                     speakers_so_far=speakers_label,
-                    context=context,
+                    context=prev_tagged_tail or "(no prior tagged context)",
                     speaker_info=speaker_info,
                     refinement_extra=refinement_extra,
                     chunk=chunk,
                 )
-            response = generate_with_retry(refinement_model, prompt)
+            response = generate_with_retry(sid_model, prompt)
             chunk_tagged = response.text
             tagged_chunks.append(chunk_tagged)
             total_tokens += safe_get_token_count(response)
 
-            # Track speakers observed so far so the next chunk reuses the same set
-            for seg in _parse_tagged_transcript(chunk_tagged):
+            # Track speakers observed so far and remember the tail for next chunk
+            chunk_segments = _parse_tagged_transcript(chunk_tagged)
+            for seg in chunk_segments:
                 if seg["speaker"] not in speakers_seen:
                     speakers_seen.append(seg["speaker"])
+            prev_tagged_tail = _serialize_tagged_segments(chunk_segments[-2:]) if chunk_segments else ""
 
     tagged_transcript = "\n\n".join(c.strip() for c in tagged_chunks if c and c.strip())
     segments = _parse_tagged_transcript(tagged_transcript)
@@ -2124,6 +2156,13 @@ def render_input_and_processing_tab(state: AppState):
             st.divider()
             state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
             state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
+            _sid_default = state.speaker_id_model if state.speaker_id_model in AVAILABLE_MODELS else list(AVAILABLE_MODELS.keys())[0]
+            state.speaker_id_model = st.selectbox(
+                "Speaker ID Model",
+                list(AVAILABLE_MODELS.keys()),
+                index=list(AVAILABLE_MODELS.keys()).index(_sid_default),
+                help="Used only for the Speaker ID Flow (Expert Meeting Option 4). A stronger model produces better speaker separation and tag continuity across long transcripts.",
+            )
             state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
             state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
 
@@ -2279,12 +2318,24 @@ def render_input_and_processing_tab(state: AppState):
             state.fallback_content = None
             st.rerun()
 
+def _on_speaker_name_change(speaker_tag: str):
+    """Push the latest text_input value for `speaker_tag` into the speaker_names
+    dict immediately on commit, so dropdown labels reflect the new name on the
+    next render without depending on stale-vs-current comparisons."""
+    new_val = st.session_state.get(f"sn_name_{speaker_tag}", "")
+    names = st.session_state.get("sn_speaker_names")
+    if names is not None:
+        names[speaker_tag] = new_val
+
+
 def _render_speaker_review_panel(state: AppState):
     """Render the speaker-tagged transcript editor used by the Speaker ID Flow.
 
     Lets the user rename speakers, add a new (initially empty) speaker tag,
-    reassign any segment's tag, download the tagged transcript, and then run
-    the standard Expert notes generation on the edited transcript.
+    reassign any segment's tag (including `Skip` for logistics), download the
+    tagged transcript, and then run the standard Expert notes generation on
+    the edited transcript. `Skip`-tagged segments are excluded from the
+    transcript that feeds the notes prompt.
     """
     st.divider()
     st.subheader("Speaker Review & Tagging")
@@ -2293,43 +2344,61 @@ def _render_speaker_review_panel(state: AppState):
     speakers: List[str] = st.session_state.sn_speakers
     speaker_names: Dict[str, str] = st.session_state.sn_speaker_names
 
+    # Ensure Skip is always available as a tag option, ordered last
+    if SKIP_TAG not in speakers:
+        speakers.append(SKIP_TAG)
+    else:
+        speakers[:] = [s for s in speakers if s != SKIP_TAG] + [SKIP_TAG]
+    speaker_names.setdefault(SKIP_TAG, "")
+
     file_name = st.session_state.get("sn_file_name", "transcript")
     n_seg = len(segments)
-    n_spk = len(speakers)
-    st.caption(f"{n_spk} speaker tag{'s' if n_spk != 1 else ''} · {n_seg} segments · source: {file_name}")
+    real_speakers = [s for s in speakers if s != SKIP_TAG]
+    n_spk = len(real_speakers)
+    n_skip = sum(1 for s in segments if s["speaker"] == SKIP_TAG)
+    st.caption(
+        f"{n_spk} speaker tag{'s' if n_spk != 1 else ''} · {n_seg} segments"
+        + (f" · {n_skip} skipped (logistics)" if n_skip else "")
+        + f" · source: {file_name}"
+    )
 
-    # --- Speaker labels: rename and add new ---
+    # --- Speaker labels: rename and add new (Skip is not renameable) ---
     st.markdown("**Speakers**")
-    name_cols = st.columns(min(max(len(speakers), 1), 3))
-    for i, sp in enumerate(speakers):
+    name_cols = st.columns(min(max(len(real_speakers), 1), 3))
+    for i, sp in enumerate(real_speakers):
         with name_cols[i % len(name_cols)]:
-            current = speaker_names.get(sp, "")
-            new_name = st.text_input(
+            st.text_input(
                 f"{sp} display name",
-                value=current,
+                value=speaker_names.get(sp, ""),
                 placeholder="e.g. Jane Doe (CEO)",
                 key=f"sn_name_{sp}",
+                on_change=_on_speaker_name_change,
+                args=(sp,),
             )
-            if new_name != current:
-                speaker_names[sp] = new_name
 
     add_col, _ = st.columns([1, 3])
     with add_col:
         if st.button("➕ Add Speaker Tag", key="sn_add_speaker_btn", use_container_width=True):
-            # Find the next free Speaker N
+            # Find the next free Speaker N (ignore Skip)
             existing_nums = []
-            for s in speakers:
+            for s in real_speakers:
                 m = re.search(r"\d+", s)
                 if m:
                     existing_nums.append(int(m.group(0)))
             next_num = max(existing_nums) + 1 if existing_nums else 1
             new_tag = f"Speaker {next_num}"
-            speakers.append(new_tag)
+            # Insert before Skip so Skip stays last
+            speakers.insert(len(speakers) - 1, new_tag)
             speaker_names[new_tag] = ""
             st.toast(f"Added {new_tag}. Reassign any segment to it via the dropdown.")
             st.rerun()
 
-    st.caption("Rename speakers above (display names appear in the final notes). Use **Add Speaker Tag** to create a new tag — it starts unassigned; reassign any segment via its dropdown below.")
+    st.caption(
+        "Rename speakers above (display names appear in the final notes). "
+        "Use **Add Speaker Tag** to create a new tag — reassign any segment via the dropdown below. "
+        "**Skip** is used by the model to mark logistical chatter (charger/food/breaks/tech checks); "
+        "those segments are excluded from the final notes. Reassign any segment to a real speaker if needed."
+    )
 
     st.divider()
 
@@ -2337,13 +2406,14 @@ def _render_speaker_review_panel(state: AppState):
     st.markdown("**Segments**")
     st.caption("Each segment shows the tag dropdown (left) and the refined text (right). Change the dropdown to reassign a segment.")
 
-    # Use canonical tags as option values; display via format_func so renaming
-    # or adding a speaker doesn't invalidate the widget's stored selection.
+    # Show just the display name once set; fall back to the generic tag.
     def _display_for_tag(tag: str) -> str:
-        name = speaker_names.get(tag, "")
-        return f"{tag} — {name}" if name else tag
+        if tag == SKIP_TAG:
+            return "Skip (logistics)"
+        return speaker_names.get(tag) or tag
 
     for idx, seg in enumerate(segments):
+        is_skip = seg["speaker"] == SKIP_TAG
         with st.container(border=True):
             sel_col, text_col = st.columns([1, 4])
             with sel_col:
@@ -2364,16 +2434,23 @@ def _render_speaker_review_panel(state: AppState):
                     seg["speaker"] = picked_tag
             with text_col:
                 preview = seg["text"] if len(seg["text"]) <= 600 else seg["text"][:600] + "…"
-                st.markdown(preview)
+                if is_skip:
+                    st.markdown(f":gray[*(excluded from notes)*  \n{preview}]")
+                else:
+                    st.markdown(preview)
                 if len(seg["text"]) > 600:
                     with st.expander("Full text", expanded=False):
                         st.markdown(seg["text"])
 
     st.divider()
 
-    # --- Download tagged transcript ---
-    canonical_tagged = _serialize_tagged_segments(segments)  # generic Speaker N labels
+    # --- Download tagged transcript (includes Skip for the record) ---
+    canonical_tagged = _serialize_tagged_segments(segments)  # generic Speaker N + Skip labels
     named_tagged = _serialize_tagged_segments(segments, display_names=speaker_names)  # with display names
+    # The transcript that feeds the notes prompt excludes Skip segments.
+    notes_input_tagged = _serialize_tagged_segments(
+        segments, display_names=speaker_names, exclude_tags=[SKIP_TAG]
+    )
 
     safe_stem = re.sub(r"[^A-Za-z0-9_\-]+", "_", os.path.splitext(file_name)[0] or "transcript")[:60]
     dl_col1, dl_col2 = st.columns(2)
@@ -2425,7 +2502,7 @@ def _render_speaker_review_panel(state: AppState):
                     state,
                     status,
                     progress,
-                    tagged_transcript=named_tagged,
+                    tagged_transcript=notes_input_tagged,
                     raw_transcript=st.session_state.sn_raw_transcript,
                     file_name=st.session_state.sn_file_name,
                     pdf_bytes=st.session_state.sn_pdf_bytes,
