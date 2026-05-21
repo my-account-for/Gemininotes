@@ -184,14 +184,12 @@ CHUNK_WORD_OVERLAP = 400
 MAX_OUTPUT_TOKENS = 65536
 
 AVAILABLE_MODELS = {
-    "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
-    "Gemini 2.0 Flash": "gemini-2.0-flash-lite", "Gemini 2.5 Flash": "gemini-2.5-flash",
-    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite", "Gemini 2.5 Pro": "gemini-2.5-pro",
-    "Gemini 3.0 Flash": "gemini-3-flash-preview", "Gemini 3.0 Pro": "gemini-3-pro-preview",
-    "Gemini 3 Flash Preview": "gemini-3-flash-preview",
+    "Gemini 2.5 Flash": "gemini-2.5-flash",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
+    "Gemini 3.0 Flash": "gemini-3-flash-preview",
+    "Gemini 3.0 Pro": "gemini-3-pro-preview",
     "Gemini 3 Pro Preview": "gemini-3-pro-preview",
-    "Gemini 3.1 Pro Preview": "gemini-3.1-pro-preview",
-    "Gemini 3.1 Pro Preview (Custom Tools)": "gemini-3.1-pro-preview-customtools",
+    "Gemini 3.5 Flash": "gemini-3.5-flash",
 }
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Internal Discussion", "Custom"]
 MAX_TOPIC_DISCOVERY_FILES = 4  # Number of PDFs to scan for topic discovery
@@ -1027,8 +1025,8 @@ class AppState:
     earnings_call_mode: str = "Generate New Notes"
     selected_sector: str = "IT Services"
     notes_model: str = "Gemini 2.5 Pro"
-    refinement_model: str =  "Gemini 2.5 Flash Lite"
-    speaker_id_model: str = "Gemini 3.1 Pro Preview"
+    refinement_model: str =  "Gemini 2.5 Flash"
+    speaker_id_model: str = "Gemini 3 Pro Preview"
     transcription_model: str =  "Gemini 3.0 Flash"
     chat_model: str = "Gemini 2.5 Pro"
     refinement_enabled: bool = True
