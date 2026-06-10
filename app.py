@@ -36,6 +36,7 @@ from progress import (
 )
 # --- Prompt templates live in prompts.py ---
 from prompts import (
+    ASR_CORRECTION_INSTRUCTION,
     EXPERT_MEETING_DETAILED_PROMPT,
     EXPERT_MEETING_CONCISE_PROMPT,
     EARNINGS_CALL_PROMPT,
@@ -859,6 +860,15 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
 
         if file_type == "audio_file":
             progress.update("transcribe", 0, "Processing audio file...")
+            # Proper nouns are where ASR fails; prime it with what we know.
+            transcribe_instruction = (
+                "Transcribe this audio recording verbatim. Pay special attention to "
+                "proper nouns — names of people, companies, products, and websites — "
+                "and transcribe them as accurately as possible."
+            )
+            known_speakers = sanitize_input(state.speakers)
+            if known_speakers:
+                transcribe_instruction += f" Participants and entities likely mentioned: {known_speakers}."
             audio_bytes = state.audio_recording.getvalue() if state.audio_recording else state.uploaded_file.getvalue()
             try:
                 audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
@@ -885,7 +895,7 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
                                 cloud_ref = genai.get_file(cloud_ref.name)
                             if cloud_ref.state.name != "ACTIVE":
                                 raise Exception(f"Audio chunk {i+1} cloud processing failed.")
-                            response = generate_with_retry(transcription_model, ["Transcribe this audio.", cloud_ref])
+                            response = generate_with_retry(transcription_model, [transcribe_instruction, cloud_ref])
                             all_transcripts.append(response.text)
                     except Exception as e:
                         raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
@@ -938,7 +948,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
 
     speakers = sanitize_input(state.speakers)
     speaker_info = f"Known participants (use as hint only, but still tag as Speaker 1/2/3): {speakers}." if speakers else ""
-    refinement_extra = REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "")
+    refinement_extra = REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "") + "\n" + ASR_CORRECTION_INSTRUCTION
 
     progress.update("refine", 0, "Refining and tagging speakers...")
     words = raw_transcript.split()
@@ -1196,7 +1206,7 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
         lang_instruction = "IMPORTANT: Your entire output MUST be in English. If the transcript contains Hindi, Hinglish, or any other non-English language, translate all content into clear, natural English while preserving the original meaning, nuance, and speaker intent."
 
         if len(words) <= chunk_size:
-            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT:\n{raw_transcript}"
+            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n{ASR_CORRECTION_INSTRUCTION}\n\nTRANSCRIPT:\n{raw_transcript}"
             response = generate_with_retry(refinement_model, refine_prompt, generation_config=GENERATION_CONFIG)
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
@@ -1210,11 +1220,12 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
             prompts = []
             for i, chunk in enumerate(chunks):
                 if i == 0:
-                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk['text']}")
+                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n{ASR_CORRECTION_INSTRUCTION}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk['text']}")
                 else:
                     prompts.append(f"""You are continuing to refine a long transcript. Below is the tail end of the previous section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition. Do NOT include the context itself in your output — refine and output ONLY the new chunk.
 {speaker_info} {refinement_extra}
 {lang_instruction}
+{ASR_CORRECTION_INSTRUCTION}
 ---
 CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY — DO NOT REFINE OR OUTPUT):
 ...{chunk['context']}
@@ -1483,7 +1494,15 @@ def render_input_and_processing_tab(state: AppState):
                     height=1,  # st.iframe requires a positive height; 1px keeps it invisible
                 )
     with col_participants:
-        state.speakers = st.text_input("Participants (Optional)", value=state.speakers, placeholder="e.g., John Smith (Analyst), Jane Doe (CEO)")
+        state.speakers = st.text_input(
+            "Participants (Optional)",
+            value=state.speakers,
+            placeholder="e.g., John Smith (Analyst), Jane Doe (CEO)",
+            help="Strongly recommended for audio and panels: names entered here become "
+                 "the canonical spellings used throughout the notes. Audio transcription "
+                 "garbles names phonetically — this is the most reliable way to get "
+                 "'Aloke Bajpai' instead of 'Alog Baji' in the output.",
+        )
 
     # --- Generate ---
     st.divider()
