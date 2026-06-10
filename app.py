@@ -4,7 +4,8 @@
 
 # --- 1. IMPORTS ---
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 import os
 import io
 import json
@@ -220,13 +221,19 @@ iframe {
 
 # --- 2. CONSTANTS & CONFIG ---
 load_dotenv()
-try:
-    if "GEMINI_API_KEY" in os.environ and os.environ["GEMINI_API_KEY"]:
-        genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-    else:
-        st.session_state.config_error = "🔴 GEMINI_API_KEY not found."
-except Exception as e:
-    st.session_state.config_error = f"🔴 Error configuring Google AI Client: {e}"
+if not os.environ.get("GEMINI_API_KEY"):
+    st.session_state.config_error = "🔴 GEMINI_API_KEY not found."
+
+# Lazy singleton client for the google-genai SDK. A plain module global (not
+# st.cache_resource) so worker threads can use it without a ScriptRunContext;
+# construction is local and cheap, so per-rerun re-creation is fine.
+_GENAI_CLIENT = None
+
+def _get_genai_client():
+    global _GENAI_CLIENT
+    if _GENAI_CLIENT is None:
+        _GENAI_CLIENT = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+    return _GENAI_CLIENT
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
@@ -254,6 +261,9 @@ GENERATION_CONFIG = {"max_output_tokens": MAX_OUTPUT_TOKENS}
 # ~1M input tokens, so a generous cap keeps verbatim lookups working on
 # long calls (the old 30k-char cap silently dropped most of them).
 CHAT_TRANSCRIPT_CHAR_LIMIT = 400_000
+# Ground truth for the quality audit. Must be generous: the audit's whole job
+# is finding what the notes missed, so it needs the entire transcript.
+AUDIT_TRANSCRIPT_CHAR_LIMIT = 400_000
 
 AVAILABLE_MODELS = {
     "Gemini 2.5 Flash": "gemini-2.5-flash",
@@ -347,14 +357,26 @@ def safe_get_token_count(response):
         pass
     return 0
 
-def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False, generation_config=None):
-    """Wrapper around generate_content with exponential backoff for transient API failures."""
-    kwargs = {"stream": stream}
-    if generation_config is not None:
-        kwargs["generation_config"] = generation_config
+def generate_with_retry(model_id, contents, max_retries=3, stream=False, generation_config=None, tools=None, system_instruction=None):
+    """Wrapper around google-genai generate_content with exponential backoff
+    for transient API failures.
+
+    model_id: a Gemini model id string (a value from AVAILABLE_MODELS).
+    generation_config: plain dict of GenerateContentConfig kwargs (e.g.
+    {"max_output_tokens": ...}); tools/system_instruction are folded in.
+    """
+    config_kwargs = dict(generation_config) if generation_config else {}
+    if tools is not None:
+        config_kwargs["tools"] = tools
+    if system_instruction is not None:
+        config_kwargs["system_instruction"] = system_instruction
+    config = genai_types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+    client = _get_genai_client()
     for attempt in range(max_retries):
         try:
-            return model.generate_content(prompt_or_contents, **kwargs)
+            if stream:
+                return client.models.generate_content_stream(model=model_id, contents=contents, config=config)
+            return client.models.generate_content(model=model_id, contents=contents, config=config)
         except Exception as e:
             error_str = str(e).lower()
             is_transient = any(kw in error_str for kw in [
@@ -376,8 +398,13 @@ def stream_and_collect(response, placeholder=None, on_progress=None, live_previe
     """
     full_text = ""
     update_counter = 0
+    usage = None
     for chunk in response:
-        if chunk.parts:
+        # google-genai puts usage_metadata on streamed chunks (final chunk
+        # carries the totals) — the exhausted iterator has no such attribute.
+        if getattr(chunk, "usage_metadata", None) is not None:
+            usage = chunk.usage_metadata
+        if chunk.text:
             full_text += chunk.text
             update_counter += 1
             # Throttle UI updates to every 5 chunks to reduce flickering
@@ -393,7 +420,7 @@ def stream_and_collect(response, placeholder=None, on_progress=None, live_previe
         placeholder.empty()
     if live_preview is not None:
         live_preview.markdown(full_text)
-    token_count = safe_get_token_count(response)
+    token_count = getattr(usage, "total_token_count", 0) or 0
     return full_text, token_count
 
 def copy_to_clipboard_button(text: str, button_label: str = "Copy Notes"):
@@ -582,20 +609,30 @@ def _infer_speaker_names(sid_model, tagged_transcript: str, participants: str) -
 
 
 def _build_speaker_legend(model, raw_transcript: str, user_speakers: str) -> Tuple[str, int]:
-    """Return (legend, tokens): a canonical list of speaker names/roles.
+    """Return (legend, tokens): canonical speaker names/roles plus key entities.
 
     The legend is injected into EVERY refinement and notes chunk prompt so
     that parallel chunks share one speaker map — without it, later chunks
     (which never saw the introductions) drift to generic 'Speaker N' labels
     and name spellings diverge between chunks. Prefers the user-provided
-    participants list; otherwise extracts names from the transcript opening
-    (best-effort: returns "" on failure)."""
+    participants list; otherwise extracts names from the transcript opening,
+    using Google Search grounding (when the API allows it) to verify the
+    real-world spellings of ASR-garbled names instead of relying on model
+    memory. Best-effort: returns ("", 0) on failure."""
     if user_speakers:
         return user_speakers, 0
+    sample = " ".join(raw_transcript.split()[:3000])
+    prompt = SPEAKER_LEGEND_EXTRACT_PROMPT.format(transcript_sample=sample)
     try:
-        sample = " ".join(raw_transcript.split()[:3000])
-        response = generate_with_retry(model, SPEAKER_LEGEND_EXTRACT_PROMPT.format(transcript_sample=sample))
-        raw_json = response.text.strip()
+        try:
+            # Search grounding lets the model verify "Aloke Bajpai, Ixigo"
+            # against the live web rather than guessing from memory.
+            search_tool = genai_types.Tool(google_search=genai_types.GoogleSearch())
+            response = generate_with_retry(model, prompt, tools=[search_tool])
+        except Exception:
+            # Grounding not available for this key/model — plain extraction.
+            response = generate_with_retry(model, prompt)
+        raw_json = (response.text or "").strip()
         if raw_json.startswith("```"):
             lines = raw_json.split("\n")[1:]
             if lines and lines[-1].strip() == "```":
@@ -606,7 +643,11 @@ def _build_speaker_legend(model, raw_transcript: str, user_speakers: str) -> Tup
             raw_json = json_match.group(0)
         parsed = json.loads(raw_json)
         names = [str(s).strip() for s in parsed.get("speakers", []) if str(s).strip()]
-        return ", ".join(names[:8]), safe_get_token_count(response)
+        entities = [str(s).strip() for s in parsed.get("entities", []) if str(s).strip()]
+        legend = ", ".join(names[:8])
+        if entities:
+            legend += f". Key entities (canonical spellings): {', '.join(entities[:10])}"
+        return legend, safe_get_token_count(response)
     except Exception:
         return "", 0
 
@@ -702,11 +743,14 @@ def generate_notes_from_transcript(
     def _generate_chunk(idx: int, prompt: str):
         response = generate_with_retry(notes_model, prompt, stream=True, generation_config=GENERATION_CONFIG)
         text = ""
+        usage = None
         for part in response:
-            if part.parts:
+            if getattr(part, "usage_metadata", None) is not None:
+                usage = part.usage_metadata
+            if part.text:
                 text += part.text
                 words_generated[idx] = len(text.split())
-        return idx, text, safe_get_token_count(response)
+        return idx, text, getattr(usage, "total_token_count", 0) or 0
 
     executor = ThreadPoolExecutor(max_workers=min(3, n))
     try:
@@ -795,18 +839,13 @@ def validate_inputs(state: AppState) -> Optional[str]:
         return "Please provide existing notes for enrichment mode."
     return None
 
-def _get_cached_model(model_display_name: str) -> genai.GenerativeModel:
-    """Return a cached GenerativeModel instance, creating it only if the model name changed."""
-    cache_key = "_model_cache"
-    if cache_key not in st.session_state:
-        st.session_state[cache_key] = {}
+def _get_model_id(model_display_name: str) -> str:
+    """Resolve a display name to its Gemini model id. The google-genai SDK
+    takes the id per request, so there is no model object to cache."""
     # Defensive: handle invalid model names gracefully
     if model_display_name not in AVAILABLE_MODELS:
         model_display_name = list(AVAILABLE_MODELS.keys())[0]  # fallback to first model
-    model_id = AVAILABLE_MODELS[model_display_name]
-    if model_id not in st.session_state[cache_key]:
-        st.session_state[cache_key][model_id] = genai.GenerativeModel(model_id)
-    return st.session_state[cache_key][model_id]
+    return AVAILABLE_MODELS[model_display_name]
 
 def is_mobile_device() -> bool:
     """Check if likely a mobile device based on viewport. Returns False on server-side."""
@@ -861,7 +900,7 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
     process_and_save_task so the speaker-ID flow can reuse it without
     duplicating subtle behaviour (whitespace normalisation, cloud cleanup, etc.).
     """
-    transcription_model = _get_cached_model(state.transcription_model)
+    transcription_model = _get_model_id(state.transcription_model)
     progress.update("prepare", 0, "Loading input...")
 
     raw_transcript, file_name = "", "Pasted Text"
@@ -902,11 +941,11 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
                             chunk.export(temp_f.name, format="wav")
                             local_files.append(temp_f.name)
-                            cloud_ref = genai.upload_file(path=temp_f.name)
+                            cloud_ref = _get_genai_client().files.upload(file=temp_f.name)
                             cloud_files.append(cloud_ref.name)
                             while cloud_ref.state.name == "PROCESSING":
                                 time.sleep(2)
-                                cloud_ref = genai.get_file(cloud_ref.name)
+                                cloud_ref = _get_genai_client().files.get(name=cloud_ref.name)
                             if cloud_ref.state.name != "ACTIVE":
                                 raise Exception(f"Audio chunk {i+1} cloud processing failed.")
                             response = generate_with_retry(transcription_model, [transcribe_instruction, cloud_ref])
@@ -921,7 +960,7 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
                     try: os.remove(path)
                     except Exception: pass
                 for cloud_name in cloud_files:
-                    try: genai.delete_file(cloud_name)
+                    try: _get_genai_client().files.delete(name=cloud_name)
                     except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
 
         elif file_type is None or (isinstance(file_type, str) and file_type.startswith("Error:")):
@@ -950,7 +989,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
     # because distinguishing voices across a long transcript benefits from the
     # bigger context model. Fall back to refinement_model if unset.
     sid_model_name = getattr(state, "speaker_id_model", None) or state.refinement_model
-    sid_model = _get_cached_model(sid_model_name)
+    sid_model = _get_model_id(sid_model_name)
 
     raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
 
@@ -1098,7 +1137,7 @@ def process_tagged_to_notes_task(
     step). The tagged transcript IS the refined transcript for this flow.
     """
     start_time = time.time()
-    notes_model = _get_cached_model(state.notes_model)
+    notes_model = _get_model_id(state.notes_model)
 
     # Temporarily override note style so _get_base_prompt_for_type returns the
     # downstream pick (Option 1/2/3). Restore on exit.
@@ -1166,8 +1205,8 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
     start_time = time.time()
     note_id = str(uuid.uuid4())
     created_at = datetime.now().isoformat()
-    notes_model = _get_cached_model(state.notes_model)
-    refinement_model = _get_cached_model(state.refinement_model)
+    notes_model = _get_model_id(state.notes_model)
+    refinement_model = _get_model_id(state.refinement_model)
 
     # Load input (file, recording, or pasted text) — includes audio transcription.
     raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
@@ -1955,16 +1994,18 @@ def _confirm_delete_dialog(note_id: str, note_name: str):
         st.rerun()
 
 def run_validation_in_chunks(notes: str, transcript: str, model_name: str) -> list:
-    """Run per-Q&A HTML-annotated validation.
+    """Run per-Q&A HTML-annotated validation against the (refined) transcript.
 
-    Always passes the FULL NOTES for context to both chunks so neither pass
-    incorrectly flags content as missing that is actually captured in the other
-    chunk. Splits only the PORTION TO ANNOTATE at Q&A boundaries.
+    Every pass receives the FULL transcript as ground truth (the old 40k-char
+    cap silently blinded the audit to everything past the first ~8k words of
+    a long call) and the FULL notes for cross-reference, so content captured
+    in one half is never flagged as missing from the other. Only the PORTION
+    TO ANNOTATE is split, at Q&A boundaries; the two passes run in parallel.
 
-    Returns a list of 1 or 2 annotated HTML strings.
+    `model_name` is a Gemini model id. Returns a list of 1 or 2 annotated
+    HTML strings.
     """
-    model = genai.GenerativeModel(model_name)
-    tx_limit = 40000  # characters of transcript per call
+    tx_slice = transcript[:AUDIT_TRANSCRIPT_CHAR_LIMIT]
 
     # Find bold question lines — lines that start AND end with ** (markdown bold)
     note_lines = notes.split('\n')
@@ -1979,41 +2020,84 @@ def run_validation_in_chunks(notes: str, transcript: str, model_name: str) -> li
             chunk_info="Full Notes",
             full_notes=notes,
             chunk_to_annotate=notes,
-            transcript=transcript[:tx_limit]
+            transcript=tx_slice
         )
-        r = generate_with_retry(model, prompt)
+        # Annotated output is at least as long as the notes — needs the high
+        # output-token ceiling or the audit itself gets silently truncated.
+        r = generate_with_retry(model_name, prompt, generation_config=GENERATION_CONFIG)
         return [r.text]
 
     # Two-pass: split the PORTION TO ANNOTATE at the Q&A midpoint.
-    # Both passes receive the FULL NOTES for context — this prevents Part 1
-    # from flagging content as missing that is captured in Part 2 and vice versa.
     split_q = len(bold_indices) // 2
     split_line = bold_indices[split_q]
     chunk1_notes = '\n'.join(note_lines[:split_line]).strip()
     chunk2_notes = '\n'.join(note_lines[split_line:]).strip()
 
-    # Transcript: transcript is sequential, so the first half maps to Part 1
-    # Q&As and the second half maps to Part 2. Send the full slice to both so
-    # neither is starved of context for edge cases.
-    tx_slice = transcript[:tx_limit]
+    prompts = [
+        VALIDATION_DETAILED_PROMPT.format(
+            chunk_info="Part 1 of 2 — first half of Q&As",
+            full_notes=notes,
+            chunk_to_annotate=chunk1_notes,
+            transcript=tx_slice,
+        ),
+        VALIDATION_DETAILED_PROMPT.format(
+            chunk_info="Part 2 of 2 — second half of Q&As",
+            full_notes=notes,
+            chunk_to_annotate=chunk2_notes,
+            transcript=tx_slice,
+        ),
+    ]
 
-    prompt1 = VALIDATION_DETAILED_PROMPT.format(
-        chunk_info="Part 1 of 2 — first half of Q&As",
-        full_notes=notes,
-        chunk_to_annotate=chunk1_notes,
-        transcript=tx_slice
-    )
-    r1 = generate_with_retry(model, prompt1)
+    results = [None, None]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(generate_with_retry, model_name, p, generation_config=GENERATION_CONFIG): i
+            for i, p in enumerate(prompts)
+        }
+        for future in as_completed(futures):
+            results[futures[future]] = future.result().text
 
-    prompt2 = VALIDATION_DETAILED_PROMPT.format(
-        chunk_info="Part 2 of 2 — second half of Q&As",
-        full_notes=notes,
-        chunk_to_annotate=chunk2_notes,
-        transcript=tx_slice
-    )
-    r2 = generate_with_retry(model, prompt2)
+    return results
 
-    return [r1.text, r2.text]
+
+# Annotation markers emitted by VALIDATION_DETAILED_PROMPT — used to count
+# findings for the audit summary without another model call.
+_AUDIT_MARKERS = {
+    "missing": "<strong>Missing:",
+    "misrepresented": "<del ",
+    "duplicate": "<strong>Duplicate:",
+}
+
+
+def count_audit_findings(annotated_chunks: List[str]) -> Dict[str, int]:
+    combined = "\n".join(c or "" for c in annotated_chunks)
+    return {kind: combined.count(marker) for kind, marker in _AUDIT_MARKERS.items()}
+
+
+def _run_quality_audit(state: AppState, note: Dict[str, Any], progress) -> str:
+    """Auto-audit freshly generated notes against the refined (or raw)
+    transcript and stash the annotated result for the Output page. Returns a
+    short human-readable summary, or '' when the audit could not run.
+    Best-effort: an audit failure never fails the processing run."""
+    try:
+        transcript = note.get('refined_transcript') or note.get('raw_transcript')
+        if not transcript or not (note.get('content') or '').strip():
+            return ""
+        progress.update("audit", 0.2, "Checking notes against transcript...")
+        model_id = AVAILABLE_MODELS.get(state.chat_model, "gemini-2.5-pro")
+        chunks = run_validation_in_chunks(note['content'], transcript, model_id)
+        st.session_state[f"validation_result_{note['id']}"] = chunks
+        counts = count_audit_findings(chunks)
+        progress.complete_step("audit")
+        if not any(counts.values()):
+            return " Audit: no issues found."
+        return (
+            f" Audit: {counts['missing']} missing, {counts['misrepresented']} misrepresented, "
+            f"{counts['duplicate']} duplicate — annotated copy in the Output tab."
+        )
+    except Exception as e:
+        progress.complete_step("audit")
+        return f" (Quality audit failed: {e})"
 
 
 def _render_history_sidebar(state: AppState, notes: List[dict]):
@@ -2298,16 +2382,21 @@ SOURCE TRANSCRIPT:
 ---
 """
                     chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-2.5-flash")
-                    chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
-                    messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in history]
-
-                    chat = chat_model.start_chat(history=messages_for_api[:-1])
-                    response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
+                    # Full history (including the new user message) as contents;
+                    # the system prompt rides in the request config.
+                    messages_for_api = [
+                        {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
+                        for m in history
+                    ]
+                    response = generate_with_retry(
+                        chat_model_name, messages_for_api,
+                        stream=True, system_instruction=system_prompt,
+                    )
 
                     message_placeholder = st.empty()
                     try:
                         for chunk in response:
-                            if not chunk.parts:
+                            if not chunk.text:
                                 continue
                             full_response += chunk.text
                             message_placeholder.markdown(full_response + "\u258c")
@@ -2468,7 +2557,7 @@ def render_ia_processing(state: AppState):
     # --- Generate ---
     if st.button("Generate Investment Analysis", type="primary", use_container_width=True, key="ia_generate_btn"):
         try:
-            model = _get_cached_model(ia_model_name)
+            model = _get_model_id(ia_model_name)
             transcript_for_generation = st.session_state.ia_transcript
             st.session_state.ia_refined_transcript = ""
 
@@ -2720,7 +2809,7 @@ def render_otg_notes_tab(state: AppState):
     if st.button("Analyze Notes", use_container_width=True, key="otg_analyze_btn"):
         with st.spinner("Extracting entities, sector, and topics..."):
             try:
-                extract_model = _get_cached_model(state.notes_model)
+                extract_model = _get_model_id(state.notes_model)
                 prompt = OTG_EXTRACT_PROMPT.format(notes=st.session_state.otg_input)
                 response = generate_with_retry(extract_model, prompt)
                 raw_json = response.text.strip()
@@ -2857,7 +2946,7 @@ def render_otg_notes_tab(state: AppState):
 
     if st.button("Generate Research Note", type="primary", use_container_width=True, key="otg_generate_btn"):
         try:
-            otg_model = _get_cached_model(state.notes_model)
+            otg_model = _get_model_id(state.notes_model)
             notes_for_generation = st.session_state.otg_input
             st.session_state.otg_refined_notes = ""
 
@@ -2977,7 +3066,7 @@ def _discover_topics(file_texts: List[Tuple[str, str]], model_name: str) -> dict
     combined = "\n\n".join(transcript_parts)
     prompt = EC_TOPIC_DISCOVERY_PROMPT.format(transcripts=combined)
 
-    model = _get_cached_model(model_name)
+    model = _get_model_id(model_name)
     response = generate_with_retry(model, prompt, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
     raw_json = response.text.strip()
 
@@ -3034,7 +3123,7 @@ def _generate_notes_for_file(file_label: str, transcript: str, topic_structure_t
         file_label=file_label,
         transcript=transcript
     )
-    model = _get_cached_model(model_name)
+    model = _get_model_id(model_name)
     response = generate_with_retry(model, prompt, stream=True,
                                    generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
     full_text, token_count = stream_and_collect(response, on_progress=on_progress)
@@ -3075,7 +3164,7 @@ def _discover_rc_dimensions(file_texts: List[Tuple[str, str]], model_name: str) 
     combined = "\n\n".join(report_parts)
     prompt = RC_DIMENSION_DISCOVERY_PROMPT.format(reports=combined)
 
-    model = _get_cached_model(model_name)
+    model = _get_model_id(model_name)
     response = generate_with_retry(model, prompt, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
     raw_json = response.text.strip()
 
@@ -3125,7 +3214,7 @@ def _extract_report_qualitative(file_label: str, report_text: str, dimension_str
         file_label=file_label,
         report_text=report_text
     )
-    model = _get_cached_model(model_name)
+    model = _get_model_id(model_name)
     response = generate_with_retry(model, prompt, stream=True,
                                    generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
     full_text, token_count = stream_and_collect(response, on_progress=on_progress)
@@ -3143,7 +3232,7 @@ def _generate_rc_comparison(company_name: str, report_labels: str, dimension_str
         dimension_structure=dimension_structure_text,
         per_report_extractions=per_report_extractions
     )
-    model = _get_cached_model(model_name)
+    model = _get_model_id(model_name)
     response = generate_with_retry(model, prompt, stream=True,
                                    generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
     full_text, token_count = stream_and_collect(response)

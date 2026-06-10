@@ -358,18 +358,19 @@ Same as before: each turn starts with `**Speaker N:**` or `**Skip:**` on its own
 {chunk}
 """
 
-SPEAKER_LEGEND_EXTRACT_PROMPT = """Identify the people speaking in this meeting transcript excerpt.
+SPEAKER_LEGEND_EXTRACT_PROMPT = """Identify the people speaking in this meeting transcript excerpt, and the key named entities (companies, products, websites) they discuss.
 
 Return ONLY valid JSON with no other text:
-{{"speakers": ["Full Name (role/company)", "..."]}}
+{{"speakers": ["Full Name (role/company)", "..."], "entities": ["Entity name (what it is)", "..."]}}
 
 Rules:
 - List each distinct speaker once, in order of first appearance.
 - Include the role/company in parentheses when stated or clearly implied.
-- **ASR CORRECTION:** This excerpt comes from automatic speech recognition, so names are often phonetically garbled. When the speaker is clearly identifiable from context (their company, role, or product), output the canonical real-world spelling of their name — NOT the garbled transcript spelling. Example: a garbled rendering of a known company founder's name should be replaced with the founder's actual name.
-- If you cannot confidently identify the real person behind a garbled name, keep the transcript spelling and append " [sp?]" to it. Never invent a plausible-looking name.
+- **ASR CORRECTION:** This excerpt comes from automatic speech recognition, so names are often phonetically garbled. When the speaker or entity is clearly identifiable from context (their company, role, or product), output the canonical real-world spelling — NOT the garbled transcript spelling. Example: a garbled rendering of a known company founder's name should be replaced with the founder's actual name; a garbled product name should become the product's real name.
+- **If Google Search is available to you, USE IT** to verify the canonical spellings of speaker names, companies, and products before answering.
+- If you cannot confidently identify the real person or entity behind a garbled name, keep the transcript spelling and append " [sp?]" to it. Never invent a plausible-looking name.
 - If a speaker is never named, describe them functionally (e.g., "Moderator", "Analyst").
-- List at most 8 speakers.
+- List at most 8 speakers and at most 10 key entities (only recurring or substantive ones — not every passing mention).
 
 TRANSCRIPT EXCERPT:
 {transcript_sample}

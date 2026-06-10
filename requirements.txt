@@ -1,4 +1,5 @@
-google-generativeai
+# New unified Gemini SDK (google-generativeai is end-of-life)
+google-genai>=1.16.0
 # >=1.57 required: st.bottom, alert titles, :shimmer[], container autoscroll
 streamlit>=1.57.0
 python-dotenv
