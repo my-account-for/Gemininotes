@@ -218,7 +218,8 @@ MAX_AUDIO_MB = 200
 # budget, not its input window: detailed notes run well under transcript
 # length, so 10k-word chunks fit comfortably inside MAX_OUTPUT_TOKENS while
 # producing ~3x fewer seams than the old 4k-word overlapping chunks.
-CHUNK_WORD_SIZE = 10000
+CHUNK_WORD_SIZE = 10000  # default; user-adjustable per session in Settings & Models
+CHUNK_SIZE_OPTIONS = [4000, 6000, 8000, 10000, 15000, 20000]
 # Tail of the previous chunk passed to the model as read-only continuity
 # context. It is never processed into notes, so it cannot create duplicates.
 CONTEXT_TAIL_WORDS = 800
@@ -289,6 +290,7 @@ class AppState:
     transcription_model: str =  "Gemini 3.0 Flash"
     chat_model: str = "Gemini 2.5 Pro"
     refinement_enabled: bool = True
+    chunk_word_size: int = CHUNK_WORD_SIZE
     add_context_enabled: bool = False
     context_input: str = ""
     speakers: str = ""
@@ -543,9 +545,10 @@ def generate_notes_from_transcript(
     Because every prompt is known upfront, chunks are generated in parallel.
     """
     words = final_transcript.split()
+    chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
 
     # --- Single-shot path (short transcript, or chunking disabled) ---
-    if skip_chunking or len(words) <= CHUNK_WORD_SIZE:
+    if skip_chunking or len(words) <= chunk_size:
         progress.update("generate", 0, f"{len(words):,} words, single pass")
         prompt = get_dynamic_prompt(state, final_transcript)
         # Live preview of the notes as they stream — the most honest progress
@@ -566,7 +569,7 @@ def generate_notes_from_transcript(
         return notes, tokens
 
     # --- Chunked path ---
-    chunks = create_chunks_with_context(final_transcript, CHUNK_WORD_SIZE, CONTEXT_TAIL_WORDS)
+    chunks = create_chunks_with_context(final_transcript, chunk_size, CONTEXT_TAIL_WORDS)
     n = len(chunks)
     progress.set_units("generate", parallel_batches(n) * 5.0)
     progress.update("generate", 0, f"{len(words):,} words, {n} sections in parallel")
@@ -849,10 +852,11 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
 
     progress.update("refine", 0, "Refining and tagging speakers...")
     words = raw_transcript.split()
+    chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
     total_tokens = 0
     tagged_chunks: List[str] = []
 
-    if len(words) <= CHUNK_WORD_SIZE:
+    if len(words) <= chunk_size:
         prompt = SPEAKER_ID_PROMPT_INITIAL.format(
             speaker_info=speaker_info,
             refinement_extra=refinement_extra,
@@ -867,7 +871,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
         # tagged exactly once, so the joined tagged output has no duplicated
         # turns. Speaker continuity comes from prev_tagged_tail below, which
         # carries the previous chunk's *tagged output* across the boundary.
-        chunks = [c["text"] for c in create_chunks_with_context(raw_transcript, CHUNK_WORD_SIZE, 0)]
+        chunks = [c["text"] for c in create_chunks_with_context(raw_transcript, chunk_size, 0)]
         speakers_seen: List[str] = []
         prev_tagged_tail = ""  # last few tagged segments from previous chunk
         for i, chunk in enumerate(chunks):
@@ -964,7 +968,7 @@ def process_tagged_to_notes_task(
             raise ValueError("The model returned empty notes. Please try again or use a different model.")
 
         progress.complete_step("generate")
-        was_chunked = len(final_transcript.split()) > CHUNK_WORD_SIZE
+        was_chunked = len(final_transcript.split()) > (getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE)
         if was_chunked:
             # Deterministic cleanup — no LLM call, zero content-loss risk.
             final_notes_content = cleanup_stitched_notes(final_notes_content)
@@ -1025,7 +1029,8 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
 
         lang_instruction = "IMPORTANT: Your entire output MUST be in English. If the transcript contains Hindi, Hinglish, or any other non-English language, translate all content into clear, natural English while preserving the original meaning, nuance, and speaker intent."
 
-        if len(words) <= CHUNK_WORD_SIZE:
+        chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
+        if len(words) <= chunk_size:
             refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT:\n{raw_transcript}"
             response = generate_with_retry(refinement_model, refine_prompt, generation_config=GENERATION_CONFIG)
             refined_transcript = response.text
@@ -1035,7 +1040,7 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
             # exactly once, so joining the refined chunks cannot duplicate
             # content. The previous chunk's tail is passed as read-only
             # context for continuity (known upfront, enables parallelism).
-            chunks = create_chunks_with_context(raw_transcript, CHUNK_WORD_SIZE, CONTEXT_TAIL_WORDS)
+            chunks = create_chunks_with_context(raw_transcript, chunk_size, CONTEXT_TAIL_WORDS)
 
             prompts = []
             for i, chunk in enumerate(chunks):
@@ -1099,7 +1104,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
 
     # --- Step 4: Deterministic cleanup (no LLM call, zero content-loss risk) ---
     progress.complete_step("generate")
-    was_chunked = not skip_chunking and len(final_transcript.split()) > CHUNK_WORD_SIZE
+    was_chunked = not skip_chunking and len(final_transcript.split()) > (getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE)
     if was_chunked:
         final_notes_content = cleanup_stitched_notes(final_notes_content)
 
@@ -1169,7 +1174,7 @@ def render_input_and_processing_tab(state: AppState):
 
     if preview_text:
         wc = len(preview_text.split())
-        num_chunks = estimate_chunk_count(wc, CHUNK_WORD_SIZE)
+        num_chunks = estimate_chunk_count(wc, state.chunk_word_size)
         info = f"**{wc:,}** words"
         if num_chunks > 1:
             info += f" | ~**{num_chunks}** sections (processed in parallel)"
@@ -1249,6 +1254,17 @@ def render_input_and_processing_tab(state: AppState):
     with col_settings:
         with st.popover("Settings & Models", use_container_width=True):
             state.refinement_enabled = st.toggle("Transcript Refinement", value=state.refinement_enabled)
+            _chunk_options = CHUNK_SIZE_OPTIONS if state.chunk_word_size in CHUNK_SIZE_OPTIONS else sorted(set(CHUNK_SIZE_OPTIONS + [state.chunk_word_size]))
+            state.chunk_word_size = st.select_slider(
+                "Section size (words)",
+                options=_chunk_options,
+                value=state.chunk_word_size,
+                format_func=lambda v: f"{v:,}",
+                help="Long transcripts are split into sections of roughly this many words "
+                     "(aligned to speaker turns) and processed in parallel. Larger sections "
+                     "mean fewer seams and faster runs; smaller sections give the model less "
+                     "to digest per call — try lowering this if notes feel thin on detail.",
+            )
             if state.selected_meeting_type != "Custom":
                 state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
                 if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
@@ -2178,7 +2194,7 @@ def render_ia_processing(state: AppState):
 
             # --- Optional refinement: chunk and extract Q&A ---
             if ia_enable_refine:
-                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.ia_transcript, CHUNK_WORD_SIZE, 0)]
+                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.ia_transcript, state.chunk_word_size, 0)]
                 total_chunks = len(chunks)
                 refined_parts = [None] * total_chunks
 
@@ -2567,7 +2583,7 @@ def render_otg_notes_tab(state: AppState):
 
             # --- Optional refinement: chunk and extract Q&A ---
             if enable_refine:
-                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.otg_input, CHUNK_WORD_SIZE, 0)]
+                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.otg_input, state.chunk_word_size, 0)]
                 total_chunks = len(chunks)
                 refined_parts = [None] * total_chunks
 
