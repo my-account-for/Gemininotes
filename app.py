@@ -48,6 +48,7 @@ from prompts import (
     REFINEMENT_INSTRUCTIONS,
     SPEAKER_ID_PROMPT_INITIAL,
     SPEAKER_ID_PROMPT_CONTINUATION,
+    SPEAKER_NAME_MAP_PROMPT,
     OTG_EXTRACT_PROMPT,
     OTG_CONVERT_PROMPT,
     OTG_REFINE_CHUNK_PROMPT,
@@ -519,6 +520,51 @@ def _serialize_tagged_segments(
     return "\n\n".join(lines)
 
 
+def _merge_consecutive_segments(segments: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Merge consecutive segments with the same speaker into one block.
+
+    The model is told to merge these itself, but chunk boundaries and long
+    answers still produce split turns. Merging deterministically here means
+    fewer segments for the human to review and reassign."""
+    merged: List[Dict[str, str]] = []
+    for seg in segments:
+        if merged and merged[-1]["speaker"] == seg["speaker"]:
+            merged[-1]["text"] += "\n\n" + seg["text"]
+        else:
+            merged.append(dict(seg))
+    return merged
+
+
+def _infer_speaker_names(sid_model, tagged_transcript: str, participants: str) -> Tuple[Dict[str, str], int]:
+    """Map generic Speaker N labels to the user-provided participant names so
+    the rename fields come pre-filled. Best-effort: returns ({}, tokens) on
+    any failure — the user can always rename manually."""
+    try:
+        prompt = SPEAKER_NAME_MAP_PROMPT.format(
+            participants=participants,
+            transcript_sample=tagged_transcript[:12000],
+        )
+        response = generate_with_retry(sid_model, prompt)
+        raw_json = response.text.strip()
+        if raw_json.startswith("```"):
+            lines = raw_json.split("\n")[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw_json = "\n".join(lines).strip()
+        json_match = re.search(r'\{[\s\S]*\}', raw_json)
+        if json_match:
+            raw_json = json_match.group(0)
+        parsed = json.loads(raw_json)
+        names = {
+            k: v.strip()
+            for k, v in parsed.items()
+            if isinstance(k, str) and k.startswith("Speaker") and isinstance(v, str) and v.strip()
+        }
+        return names, safe_get_token_count(response)
+    except Exception:
+        return {}, 0
+
+
 def _detect_speakers_in_segments(segments: List[Dict[str, str]]) -> List[str]:
     """Return ordered, deduplicated list of speaker labels found in segments."""
     seen: List[str] = []
@@ -899,22 +945,37 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
             tagged_chunks.append(chunk_tagged)
             total_tokens += safe_get_token_count(response)
 
-            # Track speakers observed so far and remember the tail for next chunk
+            # Track speakers observed so far and remember the tail for next chunk.
+            # Four segments of tagged context (vs the old two) give the model a
+            # clearer picture of the established voice-to-label mapping, which
+            # is the main defence against labels flipping at chunk boundaries.
             chunk_segments = _parse_tagged_transcript(chunk_tagged)
             for seg in chunk_segments:
                 if seg["speaker"] not in speakers_seen:
                     speakers_seen.append(seg["speaker"])
-            prev_tagged_tail = _serialize_tagged_segments(chunk_segments[-2:]) if chunk_segments else ""
+            prev_tagged_tail = _serialize_tagged_segments(chunk_segments[-4:]) if chunk_segments else ""
 
     tagged_transcript = "\n\n".join(c.strip() for c in tagged_chunks if c and c.strip())
     segments = _parse_tagged_transcript(tagged_transcript)
     if not segments:
         raise ValueError("Speaker identification did not return any tagged segments. Try re-running, or switch to Option 1/2/3.")
 
+    # Merge consecutive same-speaker blocks (chunk boundaries and long answers
+    # produce splits) so the user has fewer segments to review.
+    segments = _merge_consecutive_segments(segments)
+
     # Re-serialize from parsed segments so the stored tagged transcript has a
     # canonical format (consistent spacing, blank lines, no model artefacts).
     canonical_tagged = _serialize_tagged_segments(segments)
     speakers_list = _detect_speakers_in_segments(segments)
+
+    # Pre-fill speaker display names from the user-provided participants list
+    # (best-effort) so renaming is usually already done.
+    inferred_names: Dict[str, str] = {}
+    if speakers:
+        progress.update("refine", 1.0, "Matching speakers to participants...")
+        inferred_names, name_tokens = _infer_speaker_names(sid_model, canonical_tagged, speakers)
+        total_tokens += name_tokens
 
     progress.complete_step("refine")
 
@@ -944,6 +1005,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
         "token_usage": total_tokens,
         "elapsed": time.time() - start_time,
         "note_id": draft_note_id,
+        "inferred_names": inferred_names,
     }
 
 
@@ -1458,7 +1520,11 @@ def render_input_and_processing_tab(state: AppState):
                 result = run_speaker_identification_task(state, status, progress)
                 st.session_state.sn_segments = result["segments"]
                 st.session_state.sn_speakers = result["speakers"]
-                st.session_state.sn_speaker_names = {s: "" for s in result["speakers"]}
+                # Pre-filled from the participants list where inference was
+                # confident; the user can still rename in the review panel.
+                st.session_state.sn_speaker_names = {
+                    s: result["inferred_names"].get(s, "") for s in result["speakers"]
+                }
                 st.session_state.sn_tagged_transcript = result["tagged_transcript"]
                 st.session_state.sn_raw_transcript = result["raw_transcript"]
                 st.session_state.sn_file_name = result["file_name"]
@@ -1572,7 +1638,7 @@ def _render_speaker_review_panel(state: AppState):
                 args=(sp,),
             )
 
-    add_col, _ = st.columns([1, 3])
+    add_col, swap_col, _ = st.columns([1, 1, 2])
     with add_col:
         if st.button("➕ Add Speaker Tag", key="sn_add_speaker_btn", use_container_width=True):
             # Find the next free Speaker N (ignore Skip)
@@ -1588,6 +1654,29 @@ def _render_speaker_review_panel(state: AppState):
             speaker_names[new_tag] = ""
             st.toast(f"Added {new_tag}. Reassign any segment to it via the dropdown.")
             st.rerun()
+    if len(real_speakers) == 2:
+        with swap_col:
+            if st.button(
+                "🔄 Swap Speaker 1 ↔ 2",
+                key="sn_swap_speakers_btn",
+                use_container_width=True,
+                help="One click fixes the most common tagging error: the model assigning "
+                     "the interviewer's turns to the expert and vice versa. Swaps every "
+                     "segment's tag and the display names.",
+            ):
+                s1, s2 = real_speakers[0], real_speakers[1]
+                for seg in segments:
+                    if seg["speaker"] == s1:
+                        seg["speaker"] = s2
+                    elif seg["speaker"] == s2:
+                        seg["speaker"] = s1
+                speaker_names[s1], speaker_names[s2] = speaker_names.get(s2, ""), speaker_names.get(s1, "")
+                # Clear widget state so dropdowns and name fields re-render
+                # from the swapped segment data instead of stale selections.
+                for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
+                    st.session_state.pop(k, None)
+                st.toast("Swapped all Speaker 1 ↔ Speaker 2 tags.")
+                st.rerun()
 
     st.caption(
         "Rename speakers above (display names appear in the final notes). "
