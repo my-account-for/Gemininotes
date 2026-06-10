@@ -164,6 +164,7 @@ def build_processing_plan(
     is_audio: bool,
     refinement_enabled: bool,
     with_summary: bool,
+    with_audit: bool = False,
 ) -> List[Tuple[str, str, float]]:
     """Plan for the standard generate-notes pipeline."""
     plan: List[Tuple[str, str, float]] = [("prepare", "Preparing source content", 0.5)]
@@ -175,6 +176,8 @@ def build_processing_plan(
     if with_summary:
         plan.append(("summary", "Generating executive summary", 1.0))
     plan.append(("save", "Finalizing & saving", 0.3))
+    if with_audit:
+        plan.append(("audit", "Auditing notes against transcript", 3.0))
     return plan
 
 
@@ -187,12 +190,14 @@ def build_speaker_id_plan(*, is_audio: bool) -> List[Tuple[str, str, float]]:
     return plan
 
 
-def build_notes_only_plan(*, with_summary: bool) -> List[Tuple[str, str, float]]:
+def build_notes_only_plan(*, with_summary: bool, with_audit: bool = False) -> List[Tuple[str, str, float]]:
     """Plan for generating notes from an already-tagged transcript."""
     plan: List[Tuple[str, str, float]] = [("generate", "Generating notes", 8.0)]
     if with_summary:
         plan.append(("summary", "Generating executive summary", 1.0))
     plan.append(("save", "Finalizing & saving", 0.3))
+    if with_audit:
+        plan.append(("audit", "Auditing notes against transcript", 3.0))
     return plan
 
 # /---------------------------\

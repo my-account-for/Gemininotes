@@ -200,6 +200,8 @@ VALIDATION_DETAILED_PROMPT = """You are a rigorous Transcript Completeness Audit
 
 Notes are always paraphrased and restructured versions of the transcript — this is intentional and CORRECT. You must NEVER flag paraphrasing, rephrasing, reorganisation, or compression as errors. The note-taking AI's job is to restructure, not transcribe verbatim.
 
+**Order:** The notes follow the transcript's chronological order, so you can walk the transcript and the notes in parallel when auditing.
+
 **Cross-chunk context:** The FULL PROCESSED NOTES above contain all Q&As from this call. When checking for missing content, check the FULL NOTES — if a piece of transcript content is captured *anywhere* in the full notes (even outside the PORTION TO ANNOTATE), do NOT flag it as missing.
 
 ## WHAT TO FIND — BE RIGOROUS
@@ -223,13 +225,14 @@ Only flag as MISSING if the fact, name, number, or nuance genuinely does not app
 Content in the PORTION TO ANNOTATE that factually contradicts or distorts the transcript:
 - Wrong number (transcript: 30%, notes: 20%)
 - Wrong direction (transcript: declining, notes: growing)
-- Wrong entity name or wrong speaker attribution
+- Wrong entity name
+- Wrong speaker attribution — in multi-speaker calls/panels, a point credited to a named speaker who did not say it (check WHO said each attributed point, not just that it was said)
 - Expert expressed uncertainty but notes state it as established fact, or vice versa
 - A "could" or "might" in the transcript rendered as a definitive claim in the notes
 
 **3. REPEATED Q&A** (check the FULL NOTES)
 
-Scan the FULL PROCESSED NOTES for Q&A pairs that cover substantially the same question or repeat the same answer content. This happens when chunked note generation produces near-duplicate sections due to transcript overlap. Flag as repeated if:
+Scan the FULL PROCESSED NOTES for Q&A pairs that cover substantially the same question or repeat the same answer content (a known failure mode of sectioned note generation). Flag as repeated if:
 - Two bold questions ask essentially the same thing (even if worded differently)
 - An answer block appears twice with the same or very similar bullet points
 - A topic or data point is covered in near-identical language in two separate Q&A pairs
@@ -241,6 +244,8 @@ Scan the FULL PROCESSED NOTES for Q&A pairs that cover substantially the same qu
 - Compression where key facts are still present → CORRECT
 - Filler, false starts, rambling clean-up → CORRECT
 - Minor synonym substitutions that preserve meaning → CORRECT
+- `[sp?]` markers next to names → CORRECT (they intentionally flag unverified spellings from transcription; leave them exactly as-is, do not treat them as errors)
+- Name spellings that differ from the transcript because the notes use the canonical real-world spelling of a person/company/product the transcript garbled → CORRECT (the transcript is machine-transcribed audio; the notes' corrected spelling is intentional)
 - A topic mentioned briefly in one Q&A and fully covered in another → NOT a repeat (only flag true duplicates)
 
 ## ANNOTATIONS — THREE TYPES ONLY

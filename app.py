@@ -318,6 +318,7 @@ class AppState:
     chat_model: str = "Gemini 2.5 Pro"
     refinement_enabled: bool = True
     chunk_word_size: int = CHUNK_WORD_SIZE
+    quality_audit_enabled: bool = False
     add_context_enabled: bool = False
     context_input: str = ""
     speakers: str = ""
@@ -1509,6 +1510,15 @@ def render_input_and_processing_tab(state: AppState):
                      "merging similar questions and dropping specifics. Raise it for faster "
                      "runs with fewer API calls; lower it if notes still feel thin.",
             )
+            state.quality_audit_enabled = st.toggle(
+                "Quality audit after generation",
+                value=state.quality_audit_enabled,
+                help="After notes are generated, automatically audits them against the "
+                     "refined transcript: missing facts/numbers/examples, misrepresentations "
+                     "(wrong numbers, wrong attribution, hedges turned into certainty), and "
+                     "duplicate Q&As. The colour-annotated result is attached to the note in "
+                     "the Output tab. Adds an extra model pass per run.",
+            )
             if state.selected_meeting_type != "Custom":
                 state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
                 if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
@@ -1617,15 +1627,17 @@ def render_input_and_processing_tab(state: AppState):
                     state.selected_note_style == "Option 3: Less Verbose + Summary"
                     and state.selected_meeting_type == "Expert Meeting"
                 ),
+                with_audit=state.quality_audit_enabled,
             ))
             try:
                 final_note = process_and_save_task(state, status, progress)
                 state.active_note_id = final_note['id']
+                audit_summary = _run_quality_audit(state, final_note, progress) if state.quality_audit_enabled else ""
                 progress.finish()
                 processing_time = final_note.get('processing_time', 0)
                 word_count = len(final_note.get('content', '').split())
                 status.update(
-                    label=f"Done! {word_count:,} words generated in {processing_time:.1f}s. Switch to the **Output & History** tab to view your note.",
+                    label=f"Done! {word_count:,} words generated in {processing_time:.1f}s. Switch to the **Output & History** tab to view your note.{audit_summary}",
                     state="complete"
                 )
                 st.toast("Notes generated successfully!", icon="\u2705")
@@ -1915,6 +1927,7 @@ def _render_speaker_review_panel(state: AppState):
                 with_summary=(
                     st.session_state.sn_downstream_style_locked == "Option 3: Less Verbose + Summary"
                 ),
+                with_audit=state.quality_audit_enabled,
             ))
             try:
                 final_note = process_tagged_to_notes_task(
@@ -1936,11 +1949,12 @@ def _render_speaker_review_panel(state: AppState):
                     ),
                 )
                 state.active_note_id = final_note['id']
+                audit_summary = _run_quality_audit(state, final_note, progress) if state.quality_audit_enabled else ""
                 progress.finish()
                 processing_time = final_note.get('processing_time', 0)
                 word_count = len(final_note.get('content', '').split())
                 status.update(
-                    label=f"Done! {word_count:,} words generated in {processing_time:.1f}s. Switch to the **Output & History** tab to view your note.",
+                    label=f"Done! {word_count:,} words generated in {processing_time:.1f}s. Switch to the **Output & History** tab to view your note.{audit_summary}",
                     state="complete",
                 )
                 st.toast("Notes generated from tagged transcript!", icon="✅")
@@ -2308,6 +2322,15 @@ Your generated notes, transcripts, and chat history will appear here.
 
         if val_key in st.session_state:
             chunks = st.session_state[val_key]
+            counts = count_audit_findings(chunks)
+            if any(counts.values()):
+                st.caption(
+                    f"**Findings:** {counts['missing']} missing · "
+                    f"{counts['misrepresented']} misrepresented · "
+                    f"{counts['duplicate']} duplicate Q&As"
+                )
+            else:
+                st.caption("**Findings:** none — notes passed the audit.")
             # Legend
             st.markdown(
                 "<div style='font-size:0.82em;margin:4px 0 8px 0;line-height:2'>"
