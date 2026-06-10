@@ -48,6 +48,7 @@ from prompts import (
     REFINEMENT_INSTRUCTIONS,
     SPEAKER_ID_PROMPT_INITIAL,
     SPEAKER_ID_PROMPT_CONTINUATION,
+    SPEAKER_LEGEND_EXTRACT_PROMPT,
     SPEAKER_NAME_MAP_PROMPT,
     OTG_EXTRACT_PROMPT,
     OTG_CONVERT_PROMPT,
@@ -215,11 +216,11 @@ except Exception as e:
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
 # Chunks are non-overlapping and aligned to speaker-turn boundaries (see
-# chunking.py). The binding constraint on chunk size is the model's output
-# budget, not its input window: detailed notes run well under transcript
-# length, so 10k-word chunks fit comfortably inside MAX_OUTPUT_TOKENS while
-# producing ~3x fewer seams than the old 4k-word overlapping chunks.
-CHUNK_WORD_SIZE = 10000  # default; user-adjustable per session in Settings & Models
+# chunking.py). The trade-off: larger sections mean fewer seams and faster
+# runs, but the model compresses more per call — merging similar questions
+# and dropping specifics. 6k words is the observed sweet spot for detail
+# capture; the user can raise it via the Settings slider for speed.
+CHUNK_WORD_SIZE = 6000  # default; user-adjustable per session in Settings & Models
 CHUNK_SIZE_OPTIONS = [4000, 6000, 8000, 10000, 15000, 20000]
 # Tail of the previous chunk passed to the model as read-only continuity
 # context. It is never processed into notes, so it cannot create duplicates.
@@ -565,6 +566,48 @@ def _infer_speaker_names(sid_model, tagged_transcript: str, participants: str) -
         return {}, 0
 
 
+def _build_speaker_legend(model, raw_transcript: str, user_speakers: str) -> Tuple[str, int]:
+    """Return (legend, tokens): a canonical list of speaker names/roles.
+
+    The legend is injected into EVERY refinement and notes chunk prompt so
+    that parallel chunks share one speaker map — without it, later chunks
+    (which never saw the introductions) drift to generic 'Speaker N' labels
+    and name spellings diverge between chunks. Prefers the user-provided
+    participants list; otherwise extracts names from the transcript opening
+    (best-effort: returns "" on failure)."""
+    if user_speakers:
+        return user_speakers, 0
+    try:
+        sample = " ".join(raw_transcript.split()[:3000])
+        response = generate_with_retry(model, SPEAKER_LEGEND_EXTRACT_PROMPT.format(transcript_sample=sample))
+        raw_json = response.text.strip()
+        if raw_json.startswith("```"):
+            lines = raw_json.split("\n")[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw_json = "\n".join(lines).strip()
+        json_match = re.search(r'\{[\s\S]*\}', raw_json)
+        if json_match:
+            raw_json = json_match.group(0)
+        parsed = json.loads(raw_json)
+        names = [str(s).strip() for s in parsed.get("speakers", []) if str(s).strip()]
+        return ", ".join(names[:8]), safe_get_token_count(response)
+    except Exception:
+        return "", 0
+
+
+def _speaker_legend_block(legend: str) -> str:
+    """Prompt block prepended to notes instructions when a legend exists."""
+    if not legend:
+        return ""
+    return (
+        "### **SPEAKERS IN THIS MEETING**\n"
+        f"{legend}\n"
+        "Use these exact names (spelling included) when attributing questions and answers. "
+        "Do NOT use generic labels like 'Speaker 1' for anyone listed above.\n\n"
+    )
+
+
 def _detect_speakers_in_segments(segments: List[Dict[str, str]]) -> List[str]:
     """Return ordered, deduplicated list of speaker labels found in segments."""
     seen: List[str] = []
@@ -581,6 +624,7 @@ def generate_notes_from_transcript(
     progress,
     *,
     skip_chunking: bool = False,
+    speaker_legend: str = "",
 ) -> Tuple[str, int]:
     """Generate notes for a (possibly long) transcript. Returns (notes, tokens).
 
@@ -596,7 +640,7 @@ def generate_notes_from_transcript(
     # --- Single-shot path (short transcript, or chunking disabled) ---
     if skip_chunking or len(words) <= chunk_size:
         progress.update("generate", 0, f"{len(words):,} words, single pass")
-        prompt = get_dynamic_prompt(state, final_transcript)
+        prompt = get_dynamic_prompt(state, final_transcript, speaker_legend)
         # Live preview of the notes as they stream — the most honest progress
         # indicator there is. Autoscroll keeps the latest text in view.
         with st.container(height=240, border=True, autoscroll=True):
@@ -620,7 +664,7 @@ def generate_notes_from_transcript(
     progress.set_units("generate", parallel_batches(n) * 5.0)
     progress.update("generate", 0, f"{len(words):,} words, {n} sections in parallel")
 
-    prompt_base = _get_base_prompt_for_type(state)
+    prompt_base = _speaker_legend_block(speaker_legend) + _get_base_prompt_for_type(state)
     prompts = []
     for i, chunk in enumerate(chunks):
         if i == 0:
@@ -706,8 +750,8 @@ def _get_base_prompt_for_type(state):
         return "Generate comprehensive meeting notes capturing all key points, decisions, data, and action items. Use **bold headings** to organize by topic and bullet points for details."
     return ""
 
-def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
-    base = _get_base_prompt_for_type(state)
+def get_dynamic_prompt(state: AppState, transcript_chunk: str, speaker_legend: str = "") -> str:
+    base = _speaker_legend_block(speaker_legend) + _get_base_prompt_for_type(state)
     sanitized_context = sanitize_input(state.context_input)
     context_section = f"**ADDITIONAL CONTEXT:**\n{sanitized_context}" if state.add_context_enabled and sanitized_context else ""
 
@@ -1021,6 +1065,7 @@ def process_tagged_to_notes_task(
     downstream_style: str,
     prior_tokens: int = 0,
     draft_note_id: Optional[str] = None,
+    speaker_legend: str = "",
 ) -> Dict[str, Any]:
     """Generate notes from a user-edited, speaker-tagged transcript.
 
@@ -1040,7 +1085,7 @@ def process_tagged_to_notes_task(
     try:
         final_transcript = tagged_transcript
         final_notes_content, tokens = generate_notes_from_transcript(
-            state, final_transcript, notes_model, progress
+            state, final_transcript, notes_model, progress, speaker_legend=speaker_legend
         )
         total_tokens += tokens
 
@@ -1127,8 +1172,20 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
 
     speakers = sanitize_input(state.speakers)
-    speaker_info = f"Participants: {speakers}." if speakers else ""
     refinement_extra = REFINEMENT_INSTRUCTIONS.get(state.selected_meeting_type, "")
+    chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
+
+    # Shared speaker legend: parallel chunks never see the introductions, so
+    # without a common speaker map later sections drift to generic 'Speaker N'
+    # labels and name spellings diverge between sections. Costs one small
+    # model call, and only when the transcript will actually be chunked.
+    speaker_legend = speakers
+    if not speaker_legend and len(raw_transcript.split()) > chunk_size:
+        progress.update("prepare", 0.8, "Building speaker legend...")
+        speaker_legend, legend_tokens = _build_speaker_legend(refinement_model, raw_transcript, "")
+        total_tokens += legend_tokens
+
+    speaker_info = f"Speakers (use these exact names as labels, consistently): {speaker_legend}." if speaker_legend else ""
 
     # --- Step 2: Refinement ---
     if state.refinement_enabled:
@@ -1138,7 +1195,6 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
 
         lang_instruction = "IMPORTANT: Your entire output MUST be in English. If the transcript contains Hindi, Hinglish, or any other non-English language, translate all content into clear, natural English while preserving the original meaning, nuance, and speaker intent."
 
-        chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
         if len(words) <= chunk_size:
             refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT:\n{raw_transcript}"
             response = generate_with_retry(refinement_model, refine_prompt, generation_config=GENERATION_CONFIG)
@@ -1208,7 +1264,8 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     # repeated sections when the same headings appear across multiple chunks.
     skip_chunking = state.selected_meeting_type == "Earnings Call"
     final_notes_content, gen_tokens = generate_notes_from_transcript(
-        state, final_transcript, notes_model, progress, skip_chunking=skip_chunking
+        state, final_transcript, notes_model, progress,
+        skip_chunking=skip_chunking, speaker_legend=speaker_legend,
     )
     total_tokens += gen_tokens
 
@@ -1383,9 +1440,10 @@ def render_input_and_processing_tab(state: AppState):
                 value=state.chunk_word_size,
                 format_func=lambda v: f"{v:,}",
                 help="Long transcripts are split into sections of roughly this many words "
-                     "(aligned to speaker turns) and processed in parallel. Larger sections "
-                     "mean fewer seams and faster runs; smaller sections give the model less "
-                     "to digest per call — try lowering this if notes feel thin on detail.",
+                     "(aligned to speaker turns) and processed in parallel. The 6,000 default "
+                     "favours detail capture: the model compresses more as sections grow, "
+                     "merging similar questions and dropping specifics. Raise it for faster "
+                     "runs with fewer API calls; lower it if notes still feel thin.",
             )
             if state.selected_meeting_type != "Custom":
                 state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
@@ -1798,6 +1856,12 @@ def _render_speaker_review_panel(state: AppState):
                     downstream_style=st.session_state.sn_downstream_style_locked,
                     prior_tokens=st.session_state.get("sn_id_tokens", 0),
                     draft_note_id=st.session_state.get("sn_draft_note_id"),
+                    # Display names assigned in the review panel become the
+                    # canonical speaker legend for the notes prompts.
+                    speaker_legend=", ".join(
+                        name for tag, name in st.session_state.get("sn_speaker_names", {}).items()
+                        if name and tag != SKIP_TAG
+                    ),
                 )
                 state.active_note_id = final_note['id']
                 progress.finish()
