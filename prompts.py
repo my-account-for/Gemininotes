@@ -8,6 +8,18 @@ Pure constants — no Streamlit or API dependencies. Kept separate from
 app.py so prompt iterations don't touch application logic.
 """
 
+# Appended to both Expert Meeting prompts. Written for panels/multi-speaker
+# calls but the ordering rules apply to 1:1 calls too. Counters the model's
+# tendency — strongest on large sections — to reorganize by theme, merge
+# similar questions into one heading, and drop per-speaker attribution.
+PANEL_HANDLING_SECTION = """
+
+**(3.) ORDER & MULTI-SPEAKER HANDLING:**
+-   **PRESERVE INTERVIEW ORDER:** Output Q&A pairs strictly in the order they occur in the transcript. Do NOT reorganize, regroup, or cluster questions by theme — the notes must follow the conversation as it unfolded.
+-   **ONE QUESTION = ONE HEADING:** Never merge separate questions into a single heading, even when they are similar or related. If the moderator asks each panellist the same or a similar question in turn (e.g., each founder's origin story), create a SEPARATE bold question for each respondent, with the respondent's name in the heading (e.g., **How did the company get started? — Rajesh Magow**).
+-   **ATTRIBUTE EVERY ANSWER:** When more than two people speak and names are known, attribute the content. If multiple panellists contribute to the same question, start each panellist's contribution with their name in bold (e.g., `- **Deep Kalra:** ...`) and keep each panellist's points grouped together under that question.
+-   **NEVER BLUR ATTRIBUTION:** Do not collapse different speakers' views into unattributed bullets, and do not fall back to generic labels like "Speaker 1" when the person's name is known anywhere in the transcript or in the speaker list provided above."""
+
 EXPERT_MEETING_DETAILED_PROMPT = """### **PRIMARY DIRECTIVE: MAXIMUM DETAIL & STRICT COMPLETENESS**
 Your goal is to produce the most thorough, granular notes possible. Remove conversational filler ("um," "you know," repetition) but **nothing substantive should be omitted.** Every factual claim, example, explanation, aside, and data point in the transcript must appear in your notes. When in doubt, INCLUDE it. Err heavily on the side of over-inclusion. Longer, more detailed notes are always preferred over concise ones.
 
@@ -42,7 +54,7 @@ Structure the main body STRICTLY in Question/Answer format.
     -   **Cause & Effect:** Retain any reasoning chains provided (e.g., "...because of regulatory changes," "...which led to a 15% decline in...").
     -   **Comparisons & Contrasts:** If the expert compares companies, products, approaches, or time periods, capture both sides of the comparison with the specific details for each.
     -   **Tangential but relevant points:** If the expert volunteers additional context, background, or related information beyond the direct question, include it — do NOT discard it as off-topic.
--   **PRIORITY #3: PRESERVE MULTI-STEP EXPLANATIONS.** If an answer involves a sequence of steps, a timeline, or a logical chain, preserve the full sequence rather than summarizing the conclusion only."""
+-   **PRIORITY #3: PRESERVE MULTI-STEP EXPLANATIONS.** If an answer involves a sequence of steps, a timeline, or a logical chain, preserve the full sequence rather than summarizing the conclusion only.""" + PANEL_HANDLING_SECTION
 
 EXPERT_MEETING_CONCISE_PROMPT = """### **PRIMARY DIRECTIVE: EFFICIENT & NUANCED**
 Your goal is to be **efficient**, not just brief. Efficiency means removing conversational filler ("um," "you know," repetition) but **preserving all substantive information**. Your output should be concise yet information-dense.
@@ -71,7 +83,7 @@ Structure the main body in Question/Answer format.
     -   **Sentiment & Tone:** Note if the speaker is optimistic, hesitant, confident, or speculative (e.g., "The expert was cautiously optimistic about...", "He speculated that...").
     -   **Qualifiers:** Preserve modifying words that change meaning (e.g., "usually," "in most cases," "rarely," "a potential risk is...").
     -   **Key Examples & Analogies:** If the speaker uses a specific example to illustrate a point, capture it, even if it's a few sentences long.
-    -   **Cause & Effect:** Retain any reasoning provided (e.g., "...because of the new regulations," "...which led to a decrease in...")."""
+    -   **Cause & Effect:** Retain any reasoning provided (e.g., "...because of the new regulations," "...which led to a decrease in...").""" + PANEL_HANDLING_SECTION
 
 EARNINGS_CALL_PROMPT = """### **NOTES STRUCTURE: EARNINGS CALL**
 
@@ -130,6 +142,8 @@ For each topic:
 
 PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze a meeting transcript chunk and generate detailed, factual notes.
 Your primary directive is **100% completeness and accuracy**. Process the transcript sequentially and generate notes following the structure below.
+
+**COVERAGE RULE:** Your output must contain one Q&A block for EVERY question asked in the transcript below. Count them: if the transcript contains 12 questions, your notes must contain 12 bold question headings. Do NOT merge, combine, or skip questions to save space — long transcripts deserve proportionally long notes.
 ---
 {base_instructions}
 ---
@@ -150,6 +164,7 @@ The text below is the tail end of the transcript section that was already proces
 3.  **MAINTAIN FORMAT:** Continue to use the exact same formatting as established in the base instructions.
 4.  **NO META-COMMENTARY:** NEVER produce statements about the transcript itself, such as "the transcript does not contain an answer," "no relevant information in this section," "the section starts mid-conversation," or similar. Always extract and document whatever substantive content exists.
 5.  **MAINTAIN OUTPUT VOLUME:** This section contains as much content as any other. Your output MUST be equally detailed and equally long. Do NOT produce a shorter or more condensed output just because this is a continuation. Do NOT taper off, summarize, or become briefer.
+6.  **COVERAGE RULE:** Your output must contain one Q&A block for EVERY question asked in the new section. Count them: if it contains 12 questions, your notes must contain 12 bold question headings. Do NOT merge, combine, or skip questions to save space.
 
 ---
 {base_instructions}
@@ -271,6 +286,7 @@ SPEAKER_ID_PROMPT_INITIAL = """You are refining a transcript AND identifying dis
 ## TASK
 1. Clean up the transcript: fix spelling, grammar, punctuation, and conversational filler. Translate any non-English content into clear, natural English while preserving meaning and tone.
 2. Identify distinct speakers. **ASSUME 2 SPEAKERS by default.** Only introduce a 3rd speaker if you are highly confident a clearly distinct third voice is present (e.g., a different role explicitly introduced, a third name addressed in the conversation, or unambiguously different perspective sustained across multiple turns).
+   - **ROLE ANCHORING (critical):** In interview-style calls (expert calls, channel checks, analyst interviews), assign **Speaker 1 to the interviewer/analyst** — the person who asks questions, sets the agenda, and speaks in short turns — and **Speaker 2 to the expert/respondent** — the person giving long, substantive answers. Decide this mapping from the first few turns and apply it consistently for the ENTIRE transcript. Question turns and answer turns must never share a label.
 3. Tag any **off-topic logistical chatter** with `**Skip:**` instead of `**Speaker N:**`. Logistics includes:
    - Tech checks: "can you hear me?", "let me share my screen", "your mic is muted", "is the recording on?"
    - Personal/comfort: "can I get a charger?", "do you want water?", "should we order food?", "let me grab my notes"
@@ -297,7 +313,8 @@ SPEAKER_ID_PROMPT_INITIAL = """You are refining a transcript AND identifying dis
 - Use ONLY generic labels: `Speaker 1`, `Speaker 2`, optionally `Speaker 3`, or `Skip`. Do NOT use real names even if mentioned.
 - Leave exactly ONE blank line between turns.
 - Do NOT include any meta-commentary, headings, framing text, or summaries — output ONLY the tagged transcript.
-- If two consecutive lines are from the same speaker (or both Skip), merge them under one block.
+- If two consecutive lines are from the same speaker (or both Skip), merge them under one block. A brief interjection ("right", "okay", "mm-hmm") that merely acknowledges and does not interrupt the flow should be dropped rather than breaking the other speaker's turn into pieces.
+- **SELF-CHECK before output:** scan your tagged transcript once. If any segment labelled as the expert is clearly a question directed AT the expert (or vice versa), fix its label. Verify no two consecutive blocks share the same label.
 
 {speaker_info}
 {refinement_extra}
@@ -317,7 +334,10 @@ Continue using EXACTLY these same labels. Do NOT introduce a new speaker unless 
 ## TASK
 Refine this new chunk (fix spelling, grammar, punctuation, translate non-English to English) and tag each turn with `**Speaker N:**` matching the labels above, or `**Skip:**` for off-topic logistical chatter (tech checks, breaks, food/charger requests, greetings, side chatter unrelated to the meeting topic).
 
-Use the tagged context above to decide who Speaker 1 vs Speaker 2 is — preserve the same voice-to-label mapping across the boundary.
+## LABEL STABILITY (critical)
+- The context above shows the established voice-to-label mapping. Match each new turn to it by ROLE: the interviewer/analyst (short turns, asks questions) keeps the same Speaker label it has in the context; the expert/respondent (long, substantive answers) keeps theirs.
+- NEVER swap or re-derive labels from scratch in this chunk.
+- If this chunk starts mid-answer, the first segment almost always continues the SAME speaker as the last segment of the context — only assign a different label if the voice clearly changes.
 
 ## OUTPUT FORMAT
 Same as before: each turn starts with `**Speaker N:**` or `**Skip:**` on its own line, one blank line between turns. Output ONLY the tagged transcript — no headings, no commentary.
@@ -327,6 +347,39 @@ Same as before: each turn starts with `**Speaker N:**` or `**Skip:**` on its own
 
 ## NEW TRANSCRIPT CHUNK
 {chunk}
+"""
+
+SPEAKER_LEGEND_EXTRACT_PROMPT = """Identify the people speaking in this meeting transcript excerpt.
+
+Return ONLY valid JSON with no other text:
+{{"speakers": ["Full Name (role/company)", "..."]}}
+
+Rules:
+- List each distinct speaker once, in order of first appearance.
+- Include the role/company in parentheses when stated or clearly implied.
+- Use the most complete, correctly spelled version of each name that appears in the excerpt.
+- If a speaker is never named, describe them functionally (e.g., "Moderator", "Analyst").
+- List at most 8 speakers.
+
+TRANSCRIPT EXCERPT:
+{transcript_sample}
+"""
+
+SPEAKER_NAME_MAP_PROMPT = """Below is the beginning of a speaker-tagged meeting transcript and a list of known participants. Map each generic speaker label to the most likely participant.
+
+Return ONLY valid JSON with no other text, in exactly this shape (one entry per speaker label that appears in the transcript):
+{{"Speaker 1": "participant name (role)", "Speaker 2": ""}}
+
+Rules:
+- Use the participant names/roles EXACTLY as written in the participants list below.
+- Map a label only when the evidence is reasonably clear: who asks questions vs who answers, names used when speakers address each other, roles or companies mentioned in introductions.
+- If you cannot confidently map a label, use an empty string "" for it. Do NOT guess.
+- Do NOT invent names that are not in the participants list.
+
+PARTICIPANTS: {participants}
+
+TAGGED TRANSCRIPT (beginning):
+{transcript_sample}
 """
 
 # --- OTG NOTES PROMPTS ---

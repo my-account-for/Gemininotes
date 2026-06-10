@@ -48,6 +48,8 @@ from prompts import (
     REFINEMENT_INSTRUCTIONS,
     SPEAKER_ID_PROMPT_INITIAL,
     SPEAKER_ID_PROMPT_CONTINUATION,
+    SPEAKER_LEGEND_EXTRACT_PROMPT,
+    SPEAKER_NAME_MAP_PROMPT,
     OTG_EXTRACT_PROMPT,
     OTG_CONVERT_PROMPT,
     OTG_REFINE_CHUNK_PROMPT,
@@ -214,11 +216,12 @@ except Exception as e:
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
 # Chunks are non-overlapping and aligned to speaker-turn boundaries (see
-# chunking.py). The binding constraint on chunk size is the model's output
-# budget, not its input window: detailed notes run well under transcript
-# length, so 10k-word chunks fit comfortably inside MAX_OUTPUT_TOKENS while
-# producing ~3x fewer seams than the old 4k-word overlapping chunks.
-CHUNK_WORD_SIZE = 10000
+# chunking.py). The trade-off: larger sections mean fewer seams and faster
+# runs, but the model compresses more per call — merging similar questions
+# and dropping specifics. 6k words is the observed sweet spot for detail
+# capture; the user can raise it via the Settings slider for speed.
+CHUNK_WORD_SIZE = 6000  # default; user-adjustable per session in Settings & Models
+CHUNK_SIZE_OPTIONS = [4000, 6000, 8000, 10000, 15000, 20000]
 # Tail of the previous chunk passed to the model as read-only continuity
 # context. It is never processed into notes, so it cannot create duplicates.
 CONTEXT_TAIL_WORDS = 800
@@ -289,6 +292,7 @@ class AppState:
     transcription_model: str =  "Gemini 3.0 Flash"
     chat_model: str = "Gemini 2.5 Pro"
     refinement_enabled: bool = True
+    chunk_word_size: int = CHUNK_WORD_SIZE
     add_context_enabled: bool = False
     context_input: str = ""
     speakers: str = ""
@@ -517,6 +521,93 @@ def _serialize_tagged_segments(
     return "\n\n".join(lines)
 
 
+def _merge_consecutive_segments(segments: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Merge consecutive segments with the same speaker into one block.
+
+    The model is told to merge these itself, but chunk boundaries and long
+    answers still produce split turns. Merging deterministically here means
+    fewer segments for the human to review and reassign."""
+    merged: List[Dict[str, str]] = []
+    for seg in segments:
+        if merged and merged[-1]["speaker"] == seg["speaker"]:
+            merged[-1]["text"] += "\n\n" + seg["text"]
+        else:
+            merged.append(dict(seg))
+    return merged
+
+
+def _infer_speaker_names(sid_model, tagged_transcript: str, participants: str) -> Tuple[Dict[str, str], int]:
+    """Map generic Speaker N labels to the user-provided participant names so
+    the rename fields come pre-filled. Best-effort: returns ({}, tokens) on
+    any failure — the user can always rename manually."""
+    try:
+        prompt = SPEAKER_NAME_MAP_PROMPT.format(
+            participants=participants,
+            transcript_sample=tagged_transcript[:12000],
+        )
+        response = generate_with_retry(sid_model, prompt)
+        raw_json = response.text.strip()
+        if raw_json.startswith("```"):
+            lines = raw_json.split("\n")[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw_json = "\n".join(lines).strip()
+        json_match = re.search(r'\{[\s\S]*\}', raw_json)
+        if json_match:
+            raw_json = json_match.group(0)
+        parsed = json.loads(raw_json)
+        names = {
+            k: v.strip()
+            for k, v in parsed.items()
+            if isinstance(k, str) and k.startswith("Speaker") and isinstance(v, str) and v.strip()
+        }
+        return names, safe_get_token_count(response)
+    except Exception:
+        return {}, 0
+
+
+def _build_speaker_legend(model, raw_transcript: str, user_speakers: str) -> Tuple[str, int]:
+    """Return (legend, tokens): a canonical list of speaker names/roles.
+
+    The legend is injected into EVERY refinement and notes chunk prompt so
+    that parallel chunks share one speaker map — without it, later chunks
+    (which never saw the introductions) drift to generic 'Speaker N' labels
+    and name spellings diverge between chunks. Prefers the user-provided
+    participants list; otherwise extracts names from the transcript opening
+    (best-effort: returns "" on failure)."""
+    if user_speakers:
+        return user_speakers, 0
+    try:
+        sample = " ".join(raw_transcript.split()[:3000])
+        response = generate_with_retry(model, SPEAKER_LEGEND_EXTRACT_PROMPT.format(transcript_sample=sample))
+        raw_json = response.text.strip()
+        if raw_json.startswith("```"):
+            lines = raw_json.split("\n")[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw_json = "\n".join(lines).strip()
+        json_match = re.search(r'\{[\s\S]*\}', raw_json)
+        if json_match:
+            raw_json = json_match.group(0)
+        parsed = json.loads(raw_json)
+        names = [str(s).strip() for s in parsed.get("speakers", []) if str(s).strip()]
+        return ", ".join(names[:8]), safe_get_token_count(response)
+    except Exception:
+        return "", 0
+
+
+def _speaker_legend_block(legend: str) -> str:
+    """Prompt block prepended to notes instructions when a legend exists."""
+    if not legend:
+        return ""
+    return (
+        "### **SPEAKERS IN THIS MEETING**\n"
+        f"{legend}\n"
+        "Use these exact names (spelling included) when attributing questions and answers. "
+        "Do NOT use generic labels like 'Speaker 1' for anyone listed above.\n\n"
+    )
+
+
 def _detect_speakers_in_segments(segments: List[Dict[str, str]]) -> List[str]:
     """Return ordered, deduplicated list of speaker labels found in segments."""
     seen: List[str] = []
@@ -533,6 +624,7 @@ def generate_notes_from_transcript(
     progress,
     *,
     skip_chunking: bool = False,
+    speaker_legend: str = "",
 ) -> Tuple[str, int]:
     """Generate notes for a (possibly long) transcript. Returns (notes, tokens).
 
@@ -543,11 +635,12 @@ def generate_notes_from_transcript(
     Because every prompt is known upfront, chunks are generated in parallel.
     """
     words = final_transcript.split()
+    chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
 
     # --- Single-shot path (short transcript, or chunking disabled) ---
-    if skip_chunking or len(words) <= CHUNK_WORD_SIZE:
+    if skip_chunking or len(words) <= chunk_size:
         progress.update("generate", 0, f"{len(words):,} words, single pass")
-        prompt = get_dynamic_prompt(state, final_transcript)
+        prompt = get_dynamic_prompt(state, final_transcript, speaker_legend)
         # Live preview of the notes as they stream — the most honest progress
         # indicator there is. Autoscroll keeps the latest text in view.
         with st.container(height=240, border=True, autoscroll=True):
@@ -566,12 +659,12 @@ def generate_notes_from_transcript(
         return notes, tokens
 
     # --- Chunked path ---
-    chunks = create_chunks_with_context(final_transcript, CHUNK_WORD_SIZE, CONTEXT_TAIL_WORDS)
+    chunks = create_chunks_with_context(final_transcript, chunk_size, CONTEXT_TAIL_WORDS)
     n = len(chunks)
     progress.set_units("generate", parallel_batches(n) * 5.0)
     progress.update("generate", 0, f"{len(words):,} words, {n} sections in parallel")
 
-    prompt_base = _get_base_prompt_for_type(state)
+    prompt_base = _speaker_legend_block(speaker_legend) + _get_base_prompt_for_type(state)
     prompts = []
     for i, chunk in enumerate(chunks):
         if i == 0:
@@ -657,8 +750,8 @@ def _get_base_prompt_for_type(state):
         return "Generate comprehensive meeting notes capturing all key points, decisions, data, and action items. Use **bold headings** to organize by topic and bullet points for details."
     return ""
 
-def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
-    base = _get_base_prompt_for_type(state)
+def get_dynamic_prompt(state: AppState, transcript_chunk: str, speaker_legend: str = "") -> str:
+    base = _speaker_legend_block(speaker_legend) + _get_base_prompt_for_type(state)
     sanitized_context = sanitize_input(state.context_input)
     context_section = f"**ADDITIONAL CONTEXT:**\n{sanitized_context}" if state.add_context_enabled and sanitized_context else ""
 
@@ -849,10 +942,11 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
 
     progress.update("refine", 0, "Refining and tagging speakers...")
     words = raw_transcript.split()
+    chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
     total_tokens = 0
     tagged_chunks: List[str] = []
 
-    if len(words) <= CHUNK_WORD_SIZE:
+    if len(words) <= chunk_size:
         prompt = SPEAKER_ID_PROMPT_INITIAL.format(
             speaker_info=speaker_info,
             refinement_extra=refinement_extra,
@@ -867,7 +961,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
         # tagged exactly once, so the joined tagged output has no duplicated
         # turns. Speaker continuity comes from prev_tagged_tail below, which
         # carries the previous chunk's *tagged output* across the boundary.
-        chunks = [c["text"] for c in create_chunks_with_context(raw_transcript, CHUNK_WORD_SIZE, 0)]
+        chunks = [c["text"] for c in create_chunks_with_context(raw_transcript, chunk_size, 0)]
         speakers_seen: List[str] = []
         prev_tagged_tail = ""  # last few tagged segments from previous chunk
         for i, chunk in enumerate(chunks):
@@ -895,24 +989,55 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
             tagged_chunks.append(chunk_tagged)
             total_tokens += safe_get_token_count(response)
 
-            # Track speakers observed so far and remember the tail for next chunk
+            # Track speakers observed so far and remember the tail for next chunk.
+            # Four segments of tagged context (vs the old two) give the model a
+            # clearer picture of the established voice-to-label mapping, which
+            # is the main defence against labels flipping at chunk boundaries.
             chunk_segments = _parse_tagged_transcript(chunk_tagged)
             for seg in chunk_segments:
                 if seg["speaker"] not in speakers_seen:
                     speakers_seen.append(seg["speaker"])
-            prev_tagged_tail = _serialize_tagged_segments(chunk_segments[-2:]) if chunk_segments else ""
+            prev_tagged_tail = _serialize_tagged_segments(chunk_segments[-4:]) if chunk_segments else ""
 
     tagged_transcript = "\n\n".join(c.strip() for c in tagged_chunks if c and c.strip())
     segments = _parse_tagged_transcript(tagged_transcript)
     if not segments:
         raise ValueError("Speaker identification did not return any tagged segments. Try re-running, or switch to Option 1/2/3.")
 
+    # Merge consecutive same-speaker blocks (chunk boundaries and long answers
+    # produce splits) so the user has fewer segments to review.
+    segments = _merge_consecutive_segments(segments)
+
     # Re-serialize from parsed segments so the stored tagged transcript has a
     # canonical format (consistent spacing, blank lines, no model artefacts).
     canonical_tagged = _serialize_tagged_segments(segments)
     speakers_list = _detect_speakers_in_segments(segments)
 
+    # Pre-fill speaker display names from the user-provided participants list
+    # (best-effort) so renaming is usually already done.
+    inferred_names: Dict[str, str] = {}
+    if speakers:
+        progress.update("refine", 1.0, "Matching speakers to participants...")
+        inferred_names, name_tokens = _infer_speaker_names(sid_model, canonical_tagged, speakers)
+        total_tokens += name_tokens
+
     progress.complete_step("refine")
+
+    # Durable checkpoint: persist the tagged transcript as a draft note so the
+    # refinement/tagging work survives a reload while the user reviews tags.
+    # process_tagged_to_notes_task fills in the content on the same row later;
+    # "Discard & Start Over" deletes it if no notes were generated.
+    draft_note_id = str(uuid.uuid4())
+    try:
+        database.save_note({
+            'id': draft_note_id, 'created_at': datetime.now().isoformat(),
+            'meeting_type': "Expert Meeting", 'file_name': file_name,
+            'content': "", 'raw_transcript': raw_transcript,
+            'refined_transcript': canonical_tagged, 'token_usage': total_tokens,
+            'processing_time': 0, 'pdf_blob': pdf_bytes_data,
+        })
+    except Exception:
+        draft_note_id = None
 
     return {
         "raw_transcript": raw_transcript,
@@ -923,6 +1048,8 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
         "speakers": speakers_list,
         "token_usage": total_tokens,
         "elapsed": time.time() - start_time,
+        "note_id": draft_note_id,
+        "inferred_names": inferred_names,
     }
 
 
@@ -937,6 +1064,8 @@ def process_tagged_to_notes_task(
     pdf_bytes: Optional[bytes],
     downstream_style: str,
     prior_tokens: int = 0,
+    draft_note_id: Optional[str] = None,
+    speaker_legend: str = "",
 ) -> Dict[str, Any]:
     """Generate notes from a user-edited, speaker-tagged transcript.
 
@@ -956,7 +1085,7 @@ def process_tagged_to_notes_task(
     try:
         final_transcript = tagged_transcript
         final_notes_content, tokens = generate_notes_from_transcript(
-            state, final_transcript, notes_model, progress
+            state, final_transcript, notes_model, progress, speaker_legend=speaker_legend
         )
         total_tokens += tokens
 
@@ -964,7 +1093,7 @@ def process_tagged_to_notes_task(
             raise ValueError("The model returned empty notes. Please try again or use a different model.")
 
         progress.complete_step("generate")
-        was_chunked = len(final_transcript.split()) > CHUNK_WORD_SIZE
+        was_chunked = len(final_transcript.split()) > (getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE)
         if was_chunked:
             # Deterministic cleanup — no LLM call, zero content-loss risk.
             final_notes_content = cleanup_stitched_notes(final_notes_content)
@@ -980,7 +1109,7 @@ def process_tagged_to_notes_task(
 
         progress.update("save", 0.5, "Writing to database...")
         note_data = {
-            'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(),
+            'id': draft_note_id or str(uuid.uuid4()), 'created_at': datetime.now().isoformat(),
             'meeting_type': "Expert Meeting",
             'file_name': file_name, 'content': final_notes_content,
             'raw_transcript': raw_transcript,
@@ -990,7 +1119,17 @@ def process_tagged_to_notes_task(
             'pdf_blob': pdf_bytes,
         }
         try:
-            database.save_note(note_data)
+            if draft_note_id:
+                # Fill in the draft row saved by the speaker-ID step, with the
+                # user-edited tagged transcript as the refined transcript.
+                database.update_note(draft_note_id, {
+                    'content': final_notes_content,
+                    'refined_transcript': tagged_transcript,
+                    'token_usage': total_tokens,
+                    'processing_time': note_data['processing_time'],
+                })
+            else:
+                database.save_note(note_data)
         except Exception as db_error:
             st.session_state.app_state.fallback_content = final_notes_content
             raise Exception(f"Processing succeeded, but failed to save the note to the database. You can download the unsaved note below. Error: {db_error}")
@@ -1001,6 +1140,8 @@ def process_tagged_to_notes_task(
 
 def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker):
     start_time = time.time()
+    note_id = str(uuid.uuid4())
+    created_at = datetime.now().isoformat()
     notes_model = _get_cached_model(state.notes_model)
     refinement_model = _get_cached_model(state.refinement_model)
 
@@ -1011,11 +1152,40 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
     st.session_state["_checkpoint_raw_transcript"] = raw_transcript
     st.session_state["_checkpoint_file_name"] = file_name
 
+    # Durable checkpoint: persist a draft note NOW so the transcript (which may
+    # have cost minutes of audio transcription) survives a crash, reload, or a
+    # failure in any later stage. The same row is updated as stages complete.
+    draft_saved = False
+    try:
+        database.save_note({
+            'id': note_id, 'created_at': created_at,
+            'meeting_type': state.selected_meeting_type, 'file_name': file_name,
+            'content': "", 'raw_transcript': raw_transcript,
+            'refined_transcript': None, 'token_usage': 0,
+            'processing_time': 0, 'pdf_blob': pdf_bytes_data,
+        })
+        draft_saved = True
+    except Exception:
+        # Non-fatal: processing continues; the final save below will retry.
+        pass
+
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
 
     speakers = sanitize_input(state.speakers)
-    speaker_info = f"Participants: {speakers}." if speakers else ""
     refinement_extra = REFINEMENT_INSTRUCTIONS.get(state.selected_meeting_type, "")
+    chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
+
+    # Shared speaker legend: parallel chunks never see the introductions, so
+    # without a common speaker map later sections drift to generic 'Speaker N'
+    # labels and name spellings diverge between sections. Costs one small
+    # model call, and only when the transcript will actually be chunked.
+    speaker_legend = speakers
+    if not speaker_legend and len(raw_transcript.split()) > chunk_size:
+        progress.update("prepare", 0.8, "Building speaker legend...")
+        speaker_legend, legend_tokens = _build_speaker_legend(refinement_model, raw_transcript, "")
+        total_tokens += legend_tokens
+
+    speaker_info = f"Speakers (use these exact names as labels, consistently): {speaker_legend}." if speaker_legend else ""
 
     # --- Step 2: Refinement ---
     if state.refinement_enabled:
@@ -1025,7 +1195,7 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
 
         lang_instruction = "IMPORTANT: Your entire output MUST be in English. If the transcript contains Hindi, Hinglish, or any other non-English language, translate all content into clear, natural English while preserving the original meaning, nuance, and speaker intent."
 
-        if len(words) <= CHUNK_WORD_SIZE:
+        if len(words) <= chunk_size:
             refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT:\n{raw_transcript}"
             response = generate_with_retry(refinement_model, refine_prompt, generation_config=GENERATION_CONFIG)
             refined_transcript = response.text
@@ -1035,7 +1205,7 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
             # exactly once, so joining the refined chunks cannot duplicate
             # content. The previous chunk's tail is passed as read-only
             # context for continuity (known upfront, enables parallelism).
-            chunks = create_chunks_with_context(raw_transcript, CHUNK_WORD_SIZE, CONTEXT_TAIL_WORDS)
+            chunks = create_chunks_with_context(raw_transcript, chunk_size, CONTEXT_TAIL_WORDS)
 
             prompts = []
             for i, chunk in enumerate(chunks):
@@ -1083,13 +1253,19 @@ NEW TRANSCRIPT CHUNK TO REFINE:
 
     # Checkpoint: save refined transcript
     st.session_state["_checkpoint_refined_transcript"] = refined_transcript
+    if draft_saved and refined_transcript:
+        try:
+            database.update_note(note_id, {"refined_transcript": refined_transcript, "token_usage": total_tokens})
+        except Exception:
+            pass
 
     # --- Step 3: Generate Notes ---
     # Earnings calls should not be chunked: their topic-based structure causes
     # repeated sections when the same headings appear across multiple chunks.
     skip_chunking = state.selected_meeting_type == "Earnings Call"
     final_notes_content, gen_tokens = generate_notes_from_transcript(
-        state, final_transcript, notes_model, progress, skip_chunking=skip_chunking
+        state, final_transcript, notes_model, progress,
+        skip_chunking=skip_chunking, speaker_legend=speaker_legend,
     )
     total_tokens += gen_tokens
 
@@ -1099,7 +1275,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
 
     # --- Step 4: Deterministic cleanup (no LLM call, zero content-loss risk) ---
     progress.complete_step("generate")
-    was_chunked = not skip_chunking and len(final_transcript.split()) > CHUNK_WORD_SIZE
+    was_chunked = not skip_chunking and len(final_transcript.split()) > (getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE)
     if was_chunked:
         final_notes_content = cleanup_stitched_notes(final_notes_content)
 
@@ -1116,14 +1292,22 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     progress.update("save", 0.5, "Writing to database...")
 
     note_data = {
-        'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
+        'id': note_id, 'created_at': created_at, 'meeting_type': state.selected_meeting_type,
         'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript,
         'refined_transcript': refined_transcript, 'token_usage': total_tokens,
         'processing_time': time.time() - start_time,
         'pdf_blob': pdf_bytes_data
     }
     try:
-        database.save_note(note_data)
+        if draft_saved:
+            database.update_note(note_id, {
+                'content': final_notes_content,
+                'refined_transcript': refined_transcript,
+                'token_usage': total_tokens,
+                'processing_time': note_data['processing_time'],
+            })
+        else:
+            database.save_note(note_data)
     except Exception as db_error:
         st.session_state.app_state.fallback_content = final_notes_content
         raise Exception(f"Processing succeeded, but failed to save the note to the database. You can download the unsaved note below. Error: {db_error}")
@@ -1169,7 +1353,7 @@ def render_input_and_processing_tab(state: AppState):
 
     if preview_text:
         wc = len(preview_text.split())
-        num_chunks = estimate_chunk_count(wc, CHUNK_WORD_SIZE)
+        num_chunks = estimate_chunk_count(wc, state.chunk_word_size)
         info = f"**{wc:,}** words"
         if num_chunks > 1:
             info += f" | ~**{num_chunks}** sections (processed in parallel)"
@@ -1249,6 +1433,18 @@ def render_input_and_processing_tab(state: AppState):
     with col_settings:
         with st.popover("Settings & Models", use_container_width=True):
             state.refinement_enabled = st.toggle("Transcript Refinement", value=state.refinement_enabled)
+            _chunk_options = CHUNK_SIZE_OPTIONS if state.chunk_word_size in CHUNK_SIZE_OPTIONS else sorted(set(CHUNK_SIZE_OPTIONS + [state.chunk_word_size]))
+            state.chunk_word_size = st.select_slider(
+                "Section size (words)",
+                options=_chunk_options,
+                value=state.chunk_word_size,
+                format_func=lambda v: f"{v:,}",
+                help="Long transcripts are split into sections of roughly this many words "
+                     "(aligned to speaker turns) and processed in parallel. The 6,000 default "
+                     "favours detail capture: the model compresses more as sections grow, "
+                     "merging similar questions and dropping specifics. Raise it for faster "
+                     "runs with fewer API calls; lower it if notes still feel thin.",
+            )
             if state.selected_meeting_type != "Custom":
                 state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
                 if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
@@ -1319,7 +1515,7 @@ def render_input_and_processing_tab(state: AppState):
             st.session_state.sn_processing_id = True
             # Reset prior speaker-flow state so a fresh run starts clean,
             # including per-segment dropdown and per-speaker rename widget keys.
-            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked"):
+            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked", "sn_draft_note_id"):
                 st.session_state.pop(k, None)
             for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
                 st.session_state.pop(k, None)
@@ -1382,13 +1578,18 @@ def render_input_and_processing_tab(state: AppState):
                 result = run_speaker_identification_task(state, status, progress)
                 st.session_state.sn_segments = result["segments"]
                 st.session_state.sn_speakers = result["speakers"]
-                st.session_state.sn_speaker_names = {s: "" for s in result["speakers"]}
+                # Pre-filled from the participants list where inference was
+                # confident; the user can still rename in the review panel.
+                st.session_state.sn_speaker_names = {
+                    s: result["inferred_names"].get(s, "") for s in result["speakers"]
+                }
                 st.session_state.sn_tagged_transcript = result["tagged_transcript"]
                 st.session_state.sn_raw_transcript = result["raw_transcript"]
                 st.session_state.sn_file_name = result["file_name"]
                 st.session_state.sn_pdf_bytes = result["pdf_bytes"]
                 st.session_state.sn_id_tokens = result["token_usage"]
                 st.session_state.sn_id_elapsed = result["elapsed"]
+                st.session_state.sn_draft_note_id = result["note_id"]
                 progress.finish()
                 n_speakers = len(result["speakers"])
                 n_segments = len(result["segments"])
@@ -1416,10 +1617,23 @@ def render_input_and_processing_tab(state: AppState):
 
     if state.error_message:
         st.error(state.error_message, title="Processing failed")
-        err_col1, err_col2 = st.columns(2)
+        # Recovery: transcripts checkpointed before the failure are saved to
+        # History as an incomplete note and downloadable here.
+        ckpt_raw = st.session_state.get("_checkpoint_raw_transcript")
+        ckpt_refined = st.session_state.get("_checkpoint_refined_transcript")
+        if ckpt_raw or ckpt_refined:
+            st.caption(
+                "Work completed before the failure is not lost: the transcript was "
+                "checkpointed to **Output & History** and can also be downloaded below."
+            )
+        err_col1, err_col2, err_col3, err_col4 = st.columns(4)
         if state.fallback_content:
-            err_col1.download_button("Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt", use_container_width=True)
-        if err_col2.button("Dismiss Error", use_container_width=True):
+            err_col1.download_button("Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt", use_container_width=True)
+        if ckpt_raw:
+            err_col2.download_button("Raw Transcript (.txt)", ckpt_raw, "raw_transcript_checkpoint.txt", use_container_width=True)
+        if ckpt_refined:
+            err_col3.download_button("Refined Transcript (.txt)", ckpt_refined, "refined_transcript_checkpoint.txt", use_container_width=True)
+        if err_col4.button("Dismiss Error", use_container_width=True):
             state.error_message = None
             state.fallback_content = None
             st.rerun()
@@ -1482,7 +1696,7 @@ def _render_speaker_review_panel(state: AppState):
                 args=(sp,),
             )
 
-    add_col, _ = st.columns([1, 3])
+    add_col, swap_col, _ = st.columns([1, 1, 2])
     with add_col:
         if st.button("➕ Add Speaker Tag", key="sn_add_speaker_btn", use_container_width=True):
             # Find the next free Speaker N (ignore Skip)
@@ -1498,6 +1712,29 @@ def _render_speaker_review_panel(state: AppState):
             speaker_names[new_tag] = ""
             st.toast(f"Added {new_tag}. Reassign any segment to it via the dropdown.")
             st.rerun()
+    if len(real_speakers) == 2:
+        with swap_col:
+            if st.button(
+                "🔄 Swap Speaker 1 ↔ 2",
+                key="sn_swap_speakers_btn",
+                use_container_width=True,
+                help="One click fixes the most common tagging error: the model assigning "
+                     "the interviewer's turns to the expert and vice versa. Swaps every "
+                     "segment's tag and the display names.",
+            ):
+                s1, s2 = real_speakers[0], real_speakers[1]
+                for seg in segments:
+                    if seg["speaker"] == s1:
+                        seg["speaker"] = s2
+                    elif seg["speaker"] == s2:
+                        seg["speaker"] = s1
+                speaker_names[s1], speaker_names[s2] = speaker_names.get(s2, ""), speaker_names.get(s1, "")
+                # Clear widget state so dropdowns and name fields re-render
+                # from the swapped segment data instead of stale selections.
+                for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
+                    st.session_state.pop(k, None)
+                st.toast("Swapped all Speaker 1 ↔ Speaker 2 tags.")
+                st.rerun()
 
     st.caption(
         "Rename speakers above (display names appear in the final notes). "
@@ -1618,6 +1855,13 @@ def _render_speaker_review_panel(state: AppState):
                     pdf_bytes=st.session_state.sn_pdf_bytes,
                     downstream_style=st.session_state.sn_downstream_style_locked,
                     prior_tokens=st.session_state.get("sn_id_tokens", 0),
+                    draft_note_id=st.session_state.get("sn_draft_note_id"),
+                    # Display names assigned in the review panel become the
+                    # canonical speaker legend for the notes prompts.
+                    speaker_legend=", ".join(
+                        name for tag, name in st.session_state.get("sn_speaker_names", {}).items()
+                        if name and tag != SKIP_TAG
+                    ),
                 )
                 state.active_note_id = final_note['id']
                 progress.finish()
@@ -1645,7 +1889,16 @@ def _render_speaker_review_panel(state: AppState):
     reset_col, _ = st.columns([1, 3])
     with reset_col:
         if st.button("Discard & Start Over", key="sn_reset_btn", use_container_width=True):
-            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked"):
+            # Remove the draft checkpoint note if no notes were generated on it.
+            draft_id = st.session_state.get("sn_draft_note_id")
+            if draft_id:
+                try:
+                    draft = database.get_note_by_id(draft_id)
+                    if draft and not (draft.get("content") or "").strip():
+                        database.delete_note(draft_id)
+                except Exception:
+                    pass
+            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked", "sn_draft_note_id"):
                 st.session_state.pop(k, None)
             for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
                 st.session_state.pop(k, None)
@@ -1790,6 +2043,8 @@ def _render_history_sidebar(state: AppState, notes: List[dict]):
                     f"{note['meeting_type']} · "
                     f"{datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M')}"
                 )
+                if not (note.get('content') or '').strip():
+                    st.caption("⚠️ Incomplete — transcript saved, no notes yet")
                 if action == "View":
                     if not is_active:
                         state.active_note_id = note['id']
@@ -1837,6 +2092,14 @@ Your generated notes, transcripts, and chat history will appear here.
         m1.metric("Time", f"{active_note.get('processing_time', 0):.1f}s")
         m2.metric("Tokens", f"{active_note.get('token_usage', 0):,}")
         m3.metric("Date", datetime.fromisoformat(active_note['created_at']).strftime('%b %d'))
+
+    if not (active_note.get('content') or '').strip():
+        st.warning(
+            "Notes generation didn't finish for this entry, but the transcript was "
+            "checkpointed and is shown on the right. Copy it into the Input & Generate "
+            "tab (refinement can be toggled off if it already ran) to retry.",
+            title="Incomplete note — transcript recovered",
+        )
 
     # --- Side-by-side Notes & Transcript ---
     final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
@@ -2178,7 +2441,7 @@ def render_ia_processing(state: AppState):
 
             # --- Optional refinement: chunk and extract Q&A ---
             if ia_enable_refine:
-                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.ia_transcript, CHUNK_WORD_SIZE, 0)]
+                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.ia_transcript, state.chunk_word_size, 0)]
                 total_chunks = len(chunks)
                 refined_parts = [None] * total_chunks
 
@@ -2567,7 +2830,7 @@ def render_otg_notes_tab(state: AppState):
 
             # --- Optional refinement: chunk and extract Q&A ---
             if enable_refine:
-                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.otg_input, CHUNK_WORD_SIZE, 0)]
+                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.otg_input, state.chunk_word_size, 0)]
                 total_chunks = len(chunks)
                 refined_parts = [None] * total_chunks
 
