@@ -28,6 +28,13 @@ import streamlit.components.v1 as components
 # --- Local Imports ---
 import database
 from chunking import create_chunks_with_context, estimate_chunk_count, cleanup_stitched_notes
+from progress import (
+    ProgressTracker,
+    build_processing_plan,
+    build_speaker_id_plan,
+    build_notes_only_plan,
+    parallel_batches,
+)
 
 # --- App-wide CSS ---
 APP_CSS = """
@@ -1261,6 +1268,7 @@ def generate_notes_from_transcript(
     # --- Chunked path ---
     chunks = create_chunks_with_context(final_transcript, CHUNK_WORD_SIZE, CONTEXT_TAIL_WORDS)
     n = len(chunks)
+    progress.set_units("generate", parallel_batches(n) * 5.0)
     progress.update("generate", 0, f"{len(words):,} words, {n} sections in parallel")
 
     prompt_base = _get_base_prompt_for_type(state)
@@ -1398,63 +1406,20 @@ def is_mobile_device() -> bool:
     # We'll use a session state flag that can be set via JS, defaulting to False.
     return st.session_state.get("_is_mobile", False)
 
-class ProgressTracker:
-    """Manages progress bar and status updates during processing."""
+AUDIO_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.ogg', '.flac']
 
-    # Define the processing steps and their approximate weights (totaling 100)
-    STEPS = {
-        "prepare": {"weight": 5, "label": "Preparing Source Content"},
-        "transcribe": {"weight": 15, "label": "Transcribing Audio"},
-        "refine": {"weight": 25, "label": "Refining Transcript"},
-        "generate": {"weight": 47, "label": "Generating Notes"},
-        "cleanup": {"weight": 3, "label": "Cleaning Up Notes"},
-        "save": {"weight": 5, "label": "Saving to Database"},
-    }
-
-    def __init__(self, status_container):
-        self.status = status_container
-        self.progress_bar = st.progress(0)
-        self.status_text = st.empty()
-        self.current_progress = 0
-        self.completed_steps = set()
-
-    def update(self, step: str, sub_progress: float = 0, detail: str = ""):
-        """
-        Update progress bar and status.
-        step: one of the STEPS keys
-        sub_progress: 0-1 progress within the current step
-        detail: additional detail text
-        """
-        # Calculate base progress from completed steps
-        base = sum(self.STEPS[s]["weight"] for s in self.completed_steps)
-
-        # Add current step's partial progress
-        if step in self.STEPS:
-            step_weight = self.STEPS[step]["weight"]
-            current = base + (step_weight * sub_progress)
-        else:
-            current = base
-
-        self.current_progress = min(current / 100, 1.0)
-        self.progress_bar.progress(self.current_progress)
-
-        # Update status text
-        label = self.STEPS.get(step, {}).get("label", step)
-        pct = int(self.current_progress * 100)
-        status_msg = f"**{pct}%** - {label}"
-        if detail:
-            status_msg += f" ({detail})"
-        self.status_text.markdown(status_msg)
-
-    def complete_step(self, step: str):
-        """Mark a step as completed."""
-        self.completed_steps.add(step)
-        self.update(step, 1.0)
-
-    def finish(self):
-        """Mark all progress complete."""
-        self.progress_bar.progress(1.0)
-        self.status_text.markdown("**100%** - Complete!")
+def _input_is_audio(state: AppState) -> bool:
+    """Whether the configured input will require audio transcription.
+    Used to decide if the progress plan includes a transcription step —
+    must mirror the audio detection in get_file_content/_load_source_text."""
+    if state.input_method != "Upload / Record":
+        return False
+    if state.audio_recording is not None:
+        return True
+    if state.uploaded_file is not None:
+        ext = os.path.splitext(state.uploaded_file.name)[1].lower()
+        return ext in AUDIO_EXTENSIONS
+    return False
 
 def send_browser_notification(title: str, body: str):
     """Send a browser notification using the Notifications API."""
@@ -1509,6 +1474,8 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
 
             chunk_length_ms = 5 * 60 * 1000
             audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
+            # Re-scale the transcription step now that the real workload is known.
+            progress.set_units("transcribe", max(2.0, len(audio_chunks) * 2.0))
 
             all_transcripts, cloud_files, local_files = [], [], []
             try:
@@ -1680,11 +1647,6 @@ def process_tagged_to_notes_task(
     start_time = time.time()
     notes_model = _get_cached_model(state.notes_model)
 
-    # The speaker flow already completed prepare/transcribe/refine — mark done.
-    progress.complete_step("prepare")
-    progress.complete_step("transcribe")
-    progress.complete_step("refine")
-
     # Temporarily override note style so _get_base_prompt_for_type returns the
     # downstream pick (Option 1/2/3). Restore on exit.
     original_style = state.selected_note_style
@@ -1704,20 +1666,17 @@ def process_tagged_to_notes_task(
         progress.complete_step("generate")
         was_chunked = len(final_transcript.split()) > CHUNK_WORD_SIZE
         if was_chunked:
-            progress.update("cleanup", 0, "Cleaning stitching artifacts...")
+            # Deterministic cleanup — no LLM call, zero content-loss risk.
             final_notes_content = cleanup_stitched_notes(final_notes_content)
-            progress.update("cleanup", 1.0, "Done")
-        else:
-            progress.update("cleanup", 1.0, "Skipped (single-chunk)")
-        progress.complete_step("cleanup")
 
         # Executive summary if downstream style is Option 3
         if downstream_style == "Option 3: Less Verbose + Summary":
-            progress.update("save", 0, "Generating executive summary...")
+            progress.update("summary", 0.3, "Working...")
             summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
             response = generate_with_retry(notes_model, summary_prompt)
             final_notes_content += f"\n\n---\n\n{response.text}"
             total_tokens += safe_get_token_count(response)
+            progress.complete_step("summary")
 
         progress.update("save", 0.5, "Writing to database...")
         note_data = {
@@ -1793,6 +1752,7 @@ CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY — DO NOT REFINE OR OUTPUT):
 NEW TRANSCRIPT CHUNK TO REFINE:
 {chunk['text']}""")
 
+            progress.set_units("refine", parallel_batches(len(chunks)) * 1.5)
             progress.update("refine", 0.1, f"{len(chunks)} sections in parallel")
 
             # Process chunks in parallel (max 3 concurrent to respect API rate limits)
@@ -1816,10 +1776,10 @@ NEW TRANSCRIPT CHUNK TO REFINE:
             refined_transcript = "\n\n".join(c for c in all_refined_chunks if c) if any(all_refined_chunks) else ""
 
         final_transcript = refined_transcript
-    else:
-        # Refinement disabled - mark prepare and refine as complete
-        progress.complete_step("prepare")
         progress.complete_step("refine")
+    else:
+        # Refinement disabled — the plan contains no refine step.
+        progress.complete_step("prepare")
 
     # Checkpoint: save refined transcript
     st.session_state["_checkpoint_refined_transcript"] = refined_transcript
@@ -1837,24 +1797,20 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     if not final_notes_content or not final_notes_content.strip():
         raise ValueError("The model returned empty notes. Please try again or use a different model.")
 
-    # --- Step 4: Deterministic cleanup (replaces LLM proofread to avoid content loss) ---
+    # --- Step 4: Deterministic cleanup (no LLM call, zero content-loss risk) ---
     progress.complete_step("generate")
     was_chunked = not skip_chunking and len(final_transcript.split()) > CHUNK_WORD_SIZE
     if was_chunked:
-        progress.update("cleanup", 0, "Cleaning stitching artifacts...")
         final_notes_content = cleanup_stitched_notes(final_notes_content)
-        progress.update("cleanup", 1.0, "Done")
-    else:
-        progress.update("cleanup", 1.0, "Skipped (single-chunk)")
-    progress.complete_step("cleanup")
 
     # --- Step 5: Executive Summary (Expert Meeting Option 3 only) ---
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
-        progress.update("save", 0, "Generating executive summary...")
+        progress.update("summary", 0.3, "Working...")
         summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
         response = generate_with_retry(notes_model, summary_prompt)
         final_notes_content += f"\n\n---\n\n{response.text}"
         total_tokens += safe_get_token_count(response)
+        progress.complete_step("summary")
 
     # --- Step 6: Save ---
     progress.update("save", 0.5, "Writing to database...")
@@ -2084,7 +2040,14 @@ def render_input_and_processing_tab(state: AppState):
     # --- Standard Processing (non-speaker flows) ---
     if state.processing:
         with st.status("Processing your request...", expanded=True) as status:
-            progress = ProgressTracker(status)
+            progress = ProgressTracker(build_processing_plan(
+                is_audio=_input_is_audio(state),
+                refinement_enabled=state.refinement_enabled,
+                with_summary=(
+                    state.selected_note_style == "Option 3: Less Verbose + Summary"
+                    and state.selected_meeting_type == "Expert Meeting"
+                ),
+            ))
             try:
                 final_note = process_and_save_task(state, status, progress)
                 state.active_note_id = final_note['id']
@@ -2112,7 +2075,7 @@ def render_input_and_processing_tab(state: AppState):
     # --- Speaker ID Processing (speaker-tag step) ---
     if st.session_state.get("sn_processing_id"):
         with st.status("Identifying speakers...", expanded=True) as status:
-            progress = ProgressTracker(status)
+            progress = ProgressTracker(build_speaker_id_plan(is_audio=_input_is_audio(state)))
             try:
                 result = run_speaker_identification_task(state, status, progress)
                 st.session_state.sn_segments = result["segments"]
@@ -2339,7 +2302,11 @@ def _render_speaker_review_panel(state: AppState):
     # --- Run notes generation ---
     if st.session_state.get("sn_processing_notes"):
         with st.status("Generating notes from tagged transcript...", expanded=True) as status:
-            progress = ProgressTracker(status)
+            progress = ProgressTracker(build_notes_only_plan(
+                with_summary=(
+                    st.session_state.sn_downstream_style_locked == "Option 3: Less Verbose + Summary"
+                ),
+            ))
             try:
                 final_note = process_tagged_to_notes_task(
                     state,
@@ -3448,7 +3415,7 @@ def _build_topic_structure_text(selected_topics: dict) -> str:
 
 
 def _generate_notes_for_file(file_label: str, transcript: str, topic_structure_text: str,
-                              model_name: str) -> Tuple[str, int]:
+                              model_name: str, on_progress=None) -> Tuple[str, int]:
     """Generate earnings call notes for a single file under the given topic structure.
     Returns (notes_text, token_count).
     """
@@ -3460,7 +3427,7 @@ def _generate_notes_for_file(file_label: str, transcript: str, topic_structure_t
     model = _get_cached_model(model_name)
     response = generate_with_retry(model, prompt, stream=True,
                                    generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-    full_text, token_count = stream_and_collect(response)
+    full_text, token_count = stream_and_collect(response, on_progress=on_progress)
     return full_text, token_count
 
 
@@ -3539,7 +3506,7 @@ def _build_dimension_structure_text(selected_dimensions: dict) -> str:
 
 
 def _extract_report_qualitative(file_label: str, report_text: str, dimension_structure_text: str,
-                                 model_name: str) -> Tuple[str, int]:
+                                 model_name: str, on_progress=None) -> Tuple[str, int]:
     """Extract qualitative data from a single report for the given dimensions.
     Returns (extraction_text, token_count).
     """
@@ -3551,7 +3518,7 @@ def _extract_report_qualitative(file_label: str, report_text: str, dimension_str
     model = _get_cached_model(model_name)
     response = generate_with_retry(model, prompt, stream=True,
                                    generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-    full_text, token_count = stream_and_collect(response)
+    full_text, token_count = stream_and_collect(response, on_progress=on_progress)
     return full_text, token_count
 
 
@@ -3807,14 +3774,24 @@ def render_report_comparison_tab(state: AppState):
             num_files = len(file_texts)
             for i, (fname, text) in enumerate(file_texts):
                 # Extraction is ~70% of the work, comparison is ~30%
-                pct = (i / num_files) * 0.7
-                progress_bar.progress(pct)
+                base = (i / num_files) * 0.7
+                progress_bar.progress(base)
                 status_text.markdown(
-                    f"**{int(pct*100)}%** — Extracting qualitative data from **{fname}** ({i+1}/{num_files})"
+                    f"**{int(base*100)}%** — Extracting qualitative data from **{fname}** ({i+1}/{num_files})"
                 )
 
+                expected = max(200, int(len(text.split()) * NOTES_OUTPUT_RATIO))
+
+                def _on_stream(words, base=base, fname=fname, i=i, expected=expected):
+                    frac = base + (min(words / expected, 0.95) / num_files) * 0.7
+                    progress_bar.progress(min(frac, 1.0))
+                    status_text.markdown(
+                        f"**{int(frac*100)}%** — Extracting qualitative data from **{fname}** "
+                        f"({i+1}/{num_files}) · {words:,} words generated"
+                    )
+
                 extraction_text, tokens = _extract_report_qualitative(
-                    fname, text, dimension_structure_text, notes_model
+                    fname, text, dimension_structure_text, notes_model, on_progress=_on_stream
                 )
                 total_tokens += tokens
                 all_extractions.append((fname, extraction_text))
@@ -4165,12 +4142,24 @@ def render_ec_analysis_tab(state: AppState):
         status_text = st.empty()
 
         try:
+            num_files = len(file_texts)
             for i, (fname, text) in enumerate(file_texts):
-                pct = i / len(file_texts)
-                progress_bar.progress(pct)
-                status_text.markdown(f"**{int(pct*100)}%** — Processing **{fname}** ({i+1}/{len(file_texts)})")
+                base = i / num_files
+                progress_bar.progress(base)
+                status_text.markdown(f"**{int(base*100)}%** — Processing **{fname}** ({i+1}/{num_files})")
 
-                notes_text, tokens = _generate_notes_for_file(fname, text, topic_structure_text, notes_model)
+                expected = max(200, int(len(text.split()) * NOTES_OUTPUT_RATIO))
+
+                def _on_stream(words, base=base, fname=fname, i=i, expected=expected):
+                    frac = base + min(words / expected, 0.95) / num_files
+                    progress_bar.progress(min(frac, 1.0))
+                    status_text.markdown(
+                        f"**{int(frac*100)}%** — Processing **{fname}** ({i+1}/{num_files}) · {words:,} words generated"
+                    )
+
+                notes_text, tokens = _generate_notes_for_file(
+                    fname, text, topic_structure_text, notes_model, on_progress=_on_stream
+                )
                 total_tokens += tokens
                 all_file_notes.append((fname, notes_text))
 
