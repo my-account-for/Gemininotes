@@ -21,12 +21,13 @@ from enum import Enum
 import re
 import tempfile
 import html as html_module
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import copy
 import streamlit.components.v1 as components
 
 # --- Local Imports ---
 import database
+from chunking import create_chunks_with_context, estimate_chunk_count, cleanup_stitched_notes
 
 # --- App-wide CSS ---
 APP_CSS = """
@@ -176,12 +177,25 @@ except Exception as e:
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
-CHUNK_WORD_SIZE = 4000
-CHUNK_WORD_OVERLAP = 400
+# Chunks are non-overlapping and aligned to speaker-turn boundaries (see
+# chunking.py). The binding constraint on chunk size is the model's output
+# budget, not its input window: detailed notes run well under transcript
+# length, so 10k-word chunks fit comfortably inside MAX_OUTPUT_TOKENS while
+# producing ~3x fewer seams than the old 4k-word overlapping chunks.
+CHUNK_WORD_SIZE = 10000
+# Tail of the previous chunk passed to the model as read-only continuity
+# context. It is never processed into notes, so it cannot create duplicates.
+CONTEXT_TAIL_WORDS = 800
+# Rough ratio of generated-notes words to transcript words, used only to
+# estimate within-chunk progress while streaming.
+NOTES_OUTPUT_RATIO = 0.6
 # High output token ceiling for notes generation.
 # Without this, Gemini defaults to ~8192 output tokens and silently
-# truncates long, detailed notes — especially on later chunks.
+# truncates long, detailed notes — especially on later chunks. Also applied
+# to refinement and speaker tagging, whose outputs are roughly transcript-
+# length and would exceed an 8192-token default at the 10k-word chunk size.
 MAX_OUTPUT_TOKENS = 65536
+GENERATION_CONFIG = {"max_output_tokens": MAX_OUTPUT_TOKENS}
 
 AVAILABLE_MODELS = {
     "Gemini 2.5 Flash": "gemini-2.5-flash",
@@ -352,25 +366,25 @@ Your primary directive is **100% completeness and accuracy**. Process the transc
 {chunk_text}
 """
 
-PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task from a long transcript.
+PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task from a long transcript that is being processed in sequential sections.
 
-### **CONTEXT FROM PREVIOUS PROCESSING**
-Below is a summary of the notes generated from the previous transcript chunk. Use this to understand the flow of the conversation.
-{context_package}
+### **CONTEXT — ALREADY PROCESSED (do NOT take notes on this)**
+The text below is the tail end of the transcript section that was already processed. Notes for it already exist. It is provided ONLY so you can follow the flow of the conversation across the section boundary. Do NOT produce notes for anything that appears only in this context block.
+
+...{context_tail}
 
 ### **CONTINUATION INSTRUCTIONS**
-1.  **PROCESS THE ENTIRE CHUNK:** Your task is to process the **entire** new transcript chunk provided below. Every substantive point, example, data point, and nuanced opinion in this chunk MUST appear in your output.
-2.  **HANDLE OVERLAP:** The beginning of this new chunk overlaps with the end of the previous one. Process it naturally. Your output will be automatically de-duplicated later.
+1.  **PROCESS THE ENTIRE NEW SECTION:** Take notes on the **entire** new transcript section provided below. Every substantive point, example, data point, and nuanced opinion in the new section MUST appear in your output.
+2.  **MID-ANSWER STARTS:** If the new section begins in the middle of a response, capture that content as bullet points under a clear question heading inferred from the context block. Do not skip or discard partial content.
 3.  **MAINTAIN FORMAT:** Continue to use the exact same formatting as established in the base instructions.
-4.  **NO META-COMMENTARY:** NEVER produce statements about the transcript itself, such as "the transcript does not contain an answer," "no relevant information in this section," "the chunk starts mid-conversation," or similar. If a chunk begins mid-answer, capture that content as a continuation of the relevant section. Always extract and document whatever substantive content exists.
-5.  **MID-CHUNK STARTS:** If the chunk starts in the middle of a response, begin your notes by capturing that content under the most relevant heading from context. Do not skip or discard partial content.
-6.  **MAINTAIN OUTPUT VOLUME:** This chunk contains the same amount of content as the first chunk. Your output for this chunk MUST be equally detailed and equally long. Do NOT produce a shorter or more condensed output just because this is a continuation. If the first chunk produced 30 bullet points, this chunk should produce a similar number. Do NOT taper off, summarize, or become briefer.
+4.  **NO META-COMMENTARY:** NEVER produce statements about the transcript itself, such as "the transcript does not contain an answer," "no relevant information in this section," "the section starts mid-conversation," or similar. Always extract and document whatever substantive content exists.
+5.  **MAINTAIN OUTPUT VOLUME:** This section contains as much content as any other. Your output MUST be equally detailed and equally long. Do NOT produce a shorter or more condensed output just because this is a continuation. Do NOT taper off, summarize, or become briefer.
 
 ---
 {base_instructions}
 ---
 
-**MEETING TRANSCRIPT (NEW CHUNK):**
+**MEETING TRANSCRIPT (NEW SECTION — PROCESS ALL OF IT):**
 {chunk_text}
 """
 
@@ -452,59 +466,6 @@ Do NOT use any markup other than these three exact formats.
 ## OUTPUT
 
 Output ONLY the annotated PORTION TO ANNOTATE, preserving its exact structure (bold questions, bullet points, spacing). Do NOT output the full notes section, and do NOT add any summary, preamble, footer, or meta-commentary of any kind."""
-
-def cleanup_stitched_notes(notes_text: str) -> str:
-    """Deterministic cleanup of stitched notes — no LLM call, zero risk of content loss.
-
-    Handles:
-    1. Remove meta-commentary / processing artifacts from chunked generation
-    2. Collapse duplicate consecutive headings from overlap regions
-    3. Fix formatting: excessive blank lines, trailing whitespace
-    """
-    if not notes_text or not notes_text.strip():
-        return notes_text
-
-    # --- 1. Remove known meta-commentary artifacts ---
-    artifact_patterns = [
-        r'^[\-\*]*\s*(?:Note:|Disclaimer:)?\s*(?:The|This)\s+(?:transcript|section|chunk|portion|segment)\s+(?:does not|doesn\'t|appears to)\s+.*$',
-        r'^[\-\*]*\s*(?:No relevant|No additional|No further|No substantive)\s+(?:information|content|data|details).*$',
-        r'^[\-\*]*\s*(?:This section (?:appears|seems|is) (?:incomplete|empty|blank)).*$',
-        r'^[\-\*]*\s*\[(?:No content|Empty|Continues|Continuation)\].*$',
-    ]
-    lines = notes_text.split('\n')
-    cleaned_lines = []
-    for line in lines:
-        stripped = line.strip()
-        is_artifact = any(re.match(p, stripped, re.IGNORECASE) for p in artifact_patterns)
-        if not is_artifact:
-            cleaned_lines.append(line)
-
-    # --- 2. Collapse duplicate consecutive bold headings (from overlap stitching) ---
-    # Pattern: **Heading** appears twice in a row (possibly separated by blank lines)
-    result_lines = []
-    last_heading = None
-    for line in cleaned_lines:
-        stripped = line.strip()
-        heading_match = re.match(r'^(\*\*.+?\*\*)\s*$', stripped)
-        if heading_match:
-            current_heading = heading_match.group(1).strip()
-            if current_heading == last_heading:
-                # Skip duplicate heading — keep first occurrence
-                continue
-            last_heading = current_heading
-        elif stripped:  # Non-empty, non-heading line resets heading tracker
-            last_heading = None
-        result_lines.append(line)
-
-    text = '\n'.join(result_lines)
-
-    # --- 3. Collapse 3+ consecutive blank lines to 2 ---
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    # --- 4. Strip trailing whitespace from each line ---
-    text = '\n'.join(line.rstrip() for line in text.split('\n'))
-
-    return text.strip()
 
 EXECUTIVE_SUMMARY_PROMPT = """Generate a structured executive summary from the following meeting notes.
 
@@ -1087,8 +1048,13 @@ def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False, 
                 continue
             raise
 
-def stream_and_collect(response, placeholder=None):
-    """Consume a streaming response, optionally displaying progress. Returns (full_text, token_count)."""
+def stream_and_collect(response, placeholder=None, on_progress=None):
+    """Consume a streaming response, optionally displaying progress.
+
+    `on_progress(word_count)` is called as text streams in, so callers can
+    drive a real progress bar instead of a detached word counter.
+    Returns (full_text, token_count).
+    """
     full_text = ""
     update_counter = 0
     for chunk in response:
@@ -1096,9 +1062,12 @@ def stream_and_collect(response, placeholder=None):
             full_text += chunk.text
             update_counter += 1
             # Throttle UI updates to every 5 chunks to reduce flickering
-            if placeholder and update_counter % 5 == 0:
+            if update_counter % 5 == 0:
                 word_count = len(full_text.split())
-                placeholder.caption(f"Streaming... {word_count:,} words generated")
+                if on_progress:
+                    on_progress(word_count)
+                if placeholder:
+                    placeholder.caption(f"Streaming... {word_count:,} words generated")
     if placeholder:
         placeholder.empty()
     token_count = safe_get_token_count(response)
@@ -1187,30 +1156,6 @@ def get_file_content(uploaded_file, audio_recording=None) -> Tuple[Optional[str]
 def db_get_sectors() -> dict:
     return database.get_sectors()
 
-def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List[str]:
-    """Creates overlapping chunks of text, ensuring the final fragment is always included."""
-    if not text:
-        return []
-
-    words = text.split()
-    if len(words) <= chunk_size:
-        return [text]
-
-    if chunk_size <= overlap:
-        raise ValueError("Chunk size must be greater than overlap.")
-
-    chunks = []
-    step = chunk_size - overlap
-
-    for i in range(0, len(words), step):
-        chunk = words[i : i + chunk_size]
-        chunks.append(" ".join(chunk))
-        if (i + chunk_size) >= len(words):
-            break
-
-    return chunks
-
-
 SKIP_TAG = "Skip"
 
 
@@ -1277,36 +1222,105 @@ def _detect_speakers_in_segments(segments: List[Dict[str, str]]) -> List[str]:
     return seen
 
 
-def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
-    """Create richer context from previous notes"""
-    if not notes_text or not notes_text.strip():
-        return ""
+def generate_notes_from_transcript(
+    state: AppState,
+    final_transcript: str,
+    notes_model,
+    progress,
+    *,
+    skip_chunking: bool = False,
+) -> Tuple[str, int]:
+    """Generate notes for a (possibly long) transcript. Returns (notes, tokens).
 
-    headings = re.findall(r"(\*\*.*?\*\*)", notes_text)
+    Long transcripts are split into NON-overlapping, speaker-turn-aligned
+    chunks (see chunking.py). Each continuation prompt embeds the tail of the
+    previous chunk's *transcript* as read-only context, so chunk outputs never
+    overlap and are simply concatenated — no stitching or de-duplication step.
+    Because every prompt is known upfront, chunks are generated in parallel.
+    """
+    words = final_transcript.split()
 
-    if not headings:
-        return ""
+    # --- Single-shot path (short transcript, or chunking disabled) ---
+    if skip_chunking or len(words) <= CHUNK_WORD_SIZE:
+        progress.update("generate", 0, f"{len(words):,} words, single pass")
+        prompt = get_dynamic_prompt(state, final_transcript)
+        stream_placeholder = st.empty()
+        response = generate_with_retry(notes_model, prompt, stream=True, generation_config=GENERATION_CONFIG)
+        expected_words = max(200, int(len(words) * NOTES_OUTPUT_RATIO))
 
-    context_headings = headings[-3:] if len(headings) >= 3 else headings
+        def _on_stream(words_so_far):
+            progress.update(
+                "generate",
+                min(words_so_far / expected_words, 0.95),
+                f"{words_so_far:,} words generated",
+            )
 
-    context_parts = [
-        f"**Chunk #{chunk_number} Context Summary:**",
-        f"- Total sections processed so far: {len(headings)}",
-        f"- Recent topics: {', '.join(q.strip('*') for q in context_headings[-2:])}",
-        f"- Last section processed: {headings[-1]}"
-    ]
+        notes, tokens = stream_and_collect(response, stream_placeholder, on_progress=_on_stream)
+        return notes, tokens
 
-    last_heading = headings[-1]
-    answer_match = re.search(
-        re.escape(last_heading) + r"(.*?)(?=\*\*|$)",
-        notes_text,
-        re.DOTALL
-    )
-    if answer_match:
-        last_content = answer_match.group(1).strip()
-        context_parts.append(f"- Last section content:\n{last_content[:300]}...")
+    # --- Chunked path ---
+    chunks = create_chunks_with_context(final_transcript, CHUNK_WORD_SIZE, CONTEXT_TAIL_WORDS)
+    n = len(chunks)
+    progress.update("generate", 0, f"{len(words):,} words, {n} sections in parallel")
 
-    return "\n".join(context_parts)
+    prompt_base = _get_base_prompt_for_type(state)
+    prompts = []
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            prompts.append(PROMPT_INITIAL.format(base_instructions=prompt_base, chunk_text=chunk["text"]))
+        else:
+            prompts.append(PROMPT_CONTINUATION.format(
+                base_instructions=prompt_base,
+                context_tail=chunk["context"],
+                chunk_text=chunk["text"],
+            ))
+
+    expected_words = [max(200, int(len(c["text"].split()) * NOTES_OUTPUT_RATIO)) for c in chunks]
+    # Shared per-chunk word counters; single-item assignments are GIL-atomic.
+    # Worker threads must not touch st.* — all UI updates happen on the main
+    # thread in the polling loop below.
+    words_generated = [0] * n
+    results: List[Optional[str]] = [None] * n
+    chunk_tokens = [0] * n
+
+    def _generate_chunk(idx: int, prompt: str):
+        response = generate_with_retry(notes_model, prompt, stream=True, generation_config=GENERATION_CONFIG)
+        text = ""
+        for part in response:
+            if part.parts:
+                text += part.text
+                words_generated[idx] = len(text.split())
+        return idx, text, safe_get_token_count(response)
+
+    executor = ThreadPoolExecutor(max_workers=min(3, n))
+    try:
+        futures = {executor.submit(_generate_chunk, i, p): i for i, p in enumerate(prompts)}
+        pending = set(futures)
+        while pending:
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in done:
+                idx, text, tokens = future.result()  # re-raises worker errors
+                results[idx] = text
+                chunk_tokens[idx] = tokens
+                words_generated[idx] = len(text.split())
+            done_count = sum(1 for r in results if r is not None)
+            frac = sum(
+                1.0 if results[i] is not None else min(words_generated[i] / expected_words[i], 0.95)
+                for i in range(n)
+            ) / n
+            progress.update(
+                "generate", frac,
+                f"{done_count}/{n} sections · {sum(words_generated):,} words generated",
+            )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    if not any(r and r.strip() for r in results):
+        raise ValueError("Failed to generate notes from any section. Please try again or use a different model.")
+
+    final_notes = "\n\n".join(r.strip() for r in results if r and r.strip())
+    return final_notes, sum(chunk_tokens)
+
 
 def _get_base_prompt_for_type(state):
     """Returns the base prompt instructions for the selected meeting type."""
@@ -1577,16 +1591,20 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
             refinement_extra=refinement_extra,
             transcript=raw_transcript,
         )
-        response = generate_with_retry(sid_model, prompt)
+        response = generate_with_retry(sid_model, prompt, generation_config=GENERATION_CONFIG)
         tagged_chunks.append(response.text)
         total_tokens += safe_get_token_count(response)
         progress.update("refine", 1.0, "Done")
     else:
-        chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+        # Non-overlapping, turn-aligned chunks: each transcript region is
+        # tagged exactly once, so the joined tagged output has no duplicated
+        # turns. Speaker continuity comes from prev_tagged_tail below, which
+        # carries the previous chunk's *tagged output* across the boundary.
+        chunks = [c["text"] for c in create_chunks_with_context(raw_transcript, CHUNK_WORD_SIZE, 0)]
         speakers_seen: List[str] = []
         prev_tagged_tail = ""  # last few tagged segments from previous chunk
         for i, chunk in enumerate(chunks):
-            progress.update("refine", i / len(chunks), f"Chunk {i+1}/{len(chunks)}")
+            progress.update("refine", i / len(chunks), f"Section {i+1}/{len(chunks)}")
             if i == 0:
                 prompt = SPEAKER_ID_PROMPT_INITIAL.format(
                     speaker_info=speaker_info,
@@ -1605,7 +1623,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
                     refinement_extra=refinement_extra,
                     chunk=chunk,
                 )
-            response = generate_with_retry(sid_model, prompt)
+            response = generate_with_retry(sid_model, prompt, generation_config=GENERATION_CONFIG)
             chunk_tagged = response.text
             tagged_chunks.append(chunk_tagged)
             total_tokens += safe_get_token_count(response)
@@ -1675,57 +1693,10 @@ def process_tagged_to_notes_task(
     final_notes_content = ""
     try:
         final_transcript = tagged_transcript
-        words = final_transcript.split()
-        num_chunks = max(1, (len(words) + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
-        progress.update("generate", 0, f"{len(words):,} words, {num_chunks} chunk{'s' if num_chunks > 1 else ''}")
-
-        if len(words) > CHUNK_WORD_SIZE:
-            chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
-            all_notes_chunks: List[str] = []
-            context_package = ""
-            prompt_base = _get_base_prompt_for_type(state)
-            for i, chunk in enumerate(chunks):
-                progress.update("generate", i / len(chunks), f"Chunk {i+1}/{len(chunks)}")
-                prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION
-                prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
-                stream_placeholder = st.empty()
-                response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-                current_notes_text, tokens = stream_and_collect(response, stream_placeholder)
-                total_tokens += tokens
-                all_notes_chunks.append(current_notes_text)
-                cumulative_notes_for_context = "\n\n".join(all_notes_chunks)
-                context_package = _create_enhanced_context_from_notes(cumulative_notes_for_context, chunk_number=i + 1)
-
-            if not all_notes_chunks or not any(c.strip() for c in all_notes_chunks):
-                raise ValueError("Failed to generate notes from any chunk. Please try again or use a different model.")
-
-            final_notes_content = all_notes_chunks[0]
-            for i in range(1, len(all_notes_chunks)):
-                prev_notes = all_notes_chunks[i - 1]
-                current_notes = all_notes_chunks[i]
-                HEADING_RE = r"(?m)^(\*\*[^*\n]+\*\*)\s*$"
-                last_q_match = list(re.finditer(HEADING_RE, prev_notes))
-                if not last_q_match:
-                    final_notes_content += "\n\n" + current_notes
-                    continue
-                last_heading = last_q_match[-1].group(1)
-                stitch_match = re.search(r"(?m)^" + re.escape(last_heading) + r"\s*$", current_notes)
-                stitch_point = stitch_match.start() if stitch_match else -1
-                if stitch_point != -1:
-                    next_q_match = re.search(HEADING_RE, current_notes[stitch_point + len(last_heading):])
-                    if next_q_match:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading) + next_q_match.start():]
-                    else:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading):]
-                else:
-                    st.warning(f"Could not find stitch point for chunk {i+1}. Appending full chunk; check for duplicates.")
-                    final_notes_content += "\n\n" + current_notes
-        else:
-            prompt = get_dynamic_prompt(state, final_transcript)
-            stream_placeholder = st.empty()
-            response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-            final_notes_content, tokens = stream_and_collect(response, stream_placeholder)
-            total_tokens += tokens
+        final_notes_content, tokens = generate_notes_from_transcript(
+            state, final_transcript, notes_model, progress
+        )
+        total_tokens += tokens
 
         if not final_notes_content or not final_notes_content.strip():
             raise ValueError("The model returned empty notes. Please try again or use a different model.")
@@ -1773,71 +1744,9 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
     start_time = time.time()
     notes_model = _get_cached_model(state.notes_model)
     refinement_model = _get_cached_model(state.refinement_model)
-    transcription_model = _get_cached_model(state.transcription_model)
 
-    progress.update("prepare", 0, "Loading input...")
-    raw_transcript, file_name = "", "Pasted Text"
-    pdf_bytes_data = None
-
-    # Handle input (File, Recording, or Text)
-    if state.input_method == "Upload / Record":
-        file_type, name, pdf_bytes = get_file_content(state.uploaded_file, state.audio_recording)
-        file_name = name
-        pdf_bytes_data = pdf_bytes
-
-        if file_type == "audio_file":
-            progress.update("transcribe", 0, "Processing audio file...")
-
-            if state.audio_recording:
-                audio_bytes = state.audio_recording.getvalue()
-            else:
-                audio_bytes = state.uploaded_file.getvalue()
-
-            try:
-                audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-            except Exception as audio_err:
-                raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
-
-            chunk_length_ms = 5 * 60 * 1000
-            audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
-
-            all_transcripts, cloud_files, local_files = [], [], []
-            try:
-                for i, chunk in enumerate(audio_chunks):
-                    try:
-                        progress.update("transcribe", i / len(audio_chunks), f"Chunk {i+1}/{len(audio_chunks)}")
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
-                            chunk.export(temp_f.name, format="wav")
-                            local_files.append(temp_f.name)
-                            cloud_ref = genai.upload_file(path=temp_f.name)
-                            cloud_files.append(cloud_ref.name)
-                            while cloud_ref.state.name == "PROCESSING": time.sleep(2); cloud_ref = genai.get_file(cloud_ref.name)
-                            if cloud_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {i+1} cloud processing failed.")
-                            response = generate_with_retry(transcription_model, ["Transcribe this audio.", cloud_ref])
-                            all_transcripts.append(response.text)
-                    except Exception as e:
-                        raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
-
-                raw_transcript = "\n\n".join(all_transcripts).strip()
-                progress.complete_step("transcribe")
-            finally:
-                for path in local_files: os.remove(path)
-                for cloud_name in cloud_files:
-                    try: genai.delete_file(cloud_name)
-                    except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
-
-        elif file_type is None or file_type.startswith("Error:"):
-            raise ValueError(file_type or "Failed to read file content.")
-        else:
-            raw_transcript = file_type
-    elif state.input_method == "Paste Text":
-        raw_transcript = state.text_input
-
-    if not raw_transcript or not raw_transcript.strip():
-        raise ValueError("Source content is empty or contains only whitespace.")
-
-    # Normalize whitespace and remove excessive blank lines
-    raw_transcript = re.sub(r'\n{3,}', '\n\n', raw_transcript.strip())
+    # Load input (file, recording, or pasted text) — includes audio transcription.
+    raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
 
     # Checkpoint: save raw transcript so it survives connection drops
     st.session_state["_checkpoint_raw_transcript"] = raw_transcript
@@ -1859,38 +1768,39 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
 
         if len(words) <= CHUNK_WORD_SIZE:
             refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT:\n{raw_transcript}"
-            response = generate_with_retry(refinement_model, refine_prompt)
+            response = generate_with_retry(refinement_model, refine_prompt, generation_config=GENERATION_CONFIG)
             refined_transcript = response.text
             total_tokens += safe_get_token_count(response)
         else:
-            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+            # Non-overlapping, turn-aligned chunks: each region is refined
+            # exactly once, so joining the refined chunks cannot duplicate
+            # content. The previous chunk's tail is passed as read-only
+            # context for continuity (known upfront, enables parallelism).
+            chunks = create_chunks_with_context(raw_transcript, CHUNK_WORD_SIZE, CONTEXT_TAIL_WORDS)
 
-            # Pre-build all prompts using raw chunk tails as context (known upfront, enables parallelism)
             prompts = []
             for i, chunk in enumerate(chunks):
                 if i == 0:
-                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}")
+                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk['text']}")
                 else:
-                    prev_chunk_words = chunks[i - 1].split()
-                    context = " ".join(prev_chunk_words[-CHUNK_WORD_OVERLAP:])
-                    prompts.append(f"""You are continuing to refine a long transcript. Below is the tail end of the previous section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition.
+                    prompts.append(f"""You are continuing to refine a long transcript. Below is the tail end of the previous section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition. Do NOT include the context itself in your output — refine and output ONLY the new chunk.
 {speaker_info} {refinement_extra}
 {lang_instruction}
 ---
-CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY):
-...{context}
+CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY — DO NOT REFINE OR OUTPUT):
+...{chunk['context']}
 ---
 NEW TRANSCRIPT CHUNK TO REFINE:
-{chunk}""")
+{chunk['text']}""")
 
-            progress.update("refine", 0.1, f"{len(chunks)} chunks in parallel")
+            progress.update("refine", 0.1, f"{len(chunks)} sections in parallel")
 
             # Process chunks in parallel (max 3 concurrent to respect API rate limits)
             all_refined_chunks = [None] * len(chunks)
             chunk_tokens = [0] * len(chunks)
 
             def refine_chunk(idx, prompt):
-                resp = generate_with_retry(refinement_model, prompt)
+                resp = generate_with_retry(refinement_model, prompt, generation_config=GENERATION_CONFIG)
                 return idx, resp.text, safe_get_token_count(resp)
 
             with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as executor:
@@ -1900,7 +1810,7 @@ NEW TRANSCRIPT CHUNK TO REFINE:
                     all_refined_chunks[idx] = text
                     chunk_tokens[idx] = tokens
                     done_count = sum(1 for c in all_refined_chunks if c is not None)
-                    progress.update("refine", 0.1 + (0.9 * done_count / len(chunks)), f"{done_count}/{len(chunks)} chunks")
+                    progress.update("refine", 0.1 + (0.9 * done_count / len(chunks)), f"{done_count}/{len(chunks)} sections")
 
             total_tokens += sum(chunk_tokens)
             refined_transcript = "\n\n".join(c for c in all_refined_chunks if c) if any(all_refined_chunks) else ""
@@ -1915,78 +1825,13 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     st.session_state["_checkpoint_refined_transcript"] = refined_transcript
 
     # --- Step 3: Generate Notes ---
-    words = final_transcript.split()
     # Earnings calls should not be chunked: their topic-based structure causes
     # repeated sections when the same headings appear across multiple chunks.
     skip_chunking = state.selected_meeting_type == "Earnings Call"
-    num_chunks = 1 if skip_chunking else max(1, (len(words) + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
-    progress.update("generate", 0, f"{len(words):,} words, {num_chunks} chunk{'s' if num_chunks > 1 else ''}")
-    final_notes_content = ""
-
-    if not skip_chunking and len(words) > CHUNK_WORD_SIZE:
-        chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
-
-        all_notes_chunks = []
-        context_package = ""
-        prompt_base = _get_base_prompt_for_type(state)
-
-        for i, chunk in enumerate(chunks):
-            progress.update("generate", i / len(chunks), f"Chunk {i+1}/{len(chunks)}")
-            prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION
-            prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
-
-            stream_placeholder = st.empty()
-            response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-            current_notes_text, tokens = stream_and_collect(response, stream_placeholder)
-            total_tokens += tokens
-
-            all_notes_chunks.append(current_notes_text)
-
-            cumulative_notes_for_context = "\n\n".join(all_notes_chunks)
-            context_package = _create_enhanced_context_from_notes(cumulative_notes_for_context, chunk_number=i + 1)
-
-        if not all_notes_chunks or not any(c.strip() for c in all_notes_chunks):
-            raise ValueError("Failed to generate notes from any chunk. Please try again or use a different model.")
-        else:
-            final_notes_content = all_notes_chunks[0]
-            for i in range(1, len(all_notes_chunks)):
-                prev_notes = all_notes_chunks[i-1]
-                current_notes = all_notes_chunks[i]
-
-                # Match only standalone bold headings (full line), not inline bold within bullets.
-                # The old r"(\*\*.*?\*\*)" pattern matched any bold text including inline
-                # items like **$5B** or **important**, causing stitch points to land in the
-                # middle of bullet content and silently drop portions of the notes.
-                HEADING_RE = r"(?m)^(\*\*[^*\n]+\*\*)\s*$"
-
-                last_q_match = list(re.finditer(HEADING_RE, prev_notes))
-                if not last_q_match:
-                    final_notes_content += "\n\n" + current_notes
-                    continue
-
-                last_heading = last_q_match[-1].group(1)
-
-                # Use a line-anchored search so we don't accidentally land on an
-                # inline occurrence of the same text inside a bullet point.
-                stitch_match = re.search(r"(?m)^" + re.escape(last_heading) + r"\s*$", current_notes)
-                stitch_point = stitch_match.start() if stitch_match else -1
-
-                if stitch_point != -1:
-                    next_q_match = re.search(HEADING_RE, current_notes[stitch_point + len(last_heading):])
-                    if next_q_match:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading) + next_q_match.start():]
-                    else:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading):]
-                else:
-                    st.warning(f"Could not find stitch point for chunk {i+1}. Appending full chunk; check for duplicates.")
-                    final_notes_content += "\n\n" + current_notes
-
-    else:
-        prompt = get_dynamic_prompt(state, final_transcript)
-        stream_placeholder = st.empty()
-        response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-        final_notes_content, tokens = stream_and_collect(response, stream_placeholder)
-        total_tokens += tokens
+    final_notes_content, gen_tokens = generate_notes_from_transcript(
+        state, final_transcript, notes_model, progress, skip_chunking=skip_chunking
+    )
+    total_tokens += gen_tokens
 
     # Defensive: ensure we have content
     if not final_notes_content or not final_notes_content.strip():
@@ -2067,10 +1912,10 @@ def render_input_and_processing_tab(state: AppState):
 
     if preview_text:
         wc = len(preview_text.split())
-        num_chunks = max(1, (wc + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
+        num_chunks = estimate_chunk_count(wc, CHUNK_WORD_SIZE)
         info = f"**{wc:,}** words"
         if num_chunks > 1:
-            info += f" | **{num_chunks}** chunks"
+            info += f" | ~**{num_chunks}** sections (processed in parallel)"
         st.caption(info)
     elif state.input_method == "Upload / Record" and state.uploaded_file:
         ext = os.path.splitext(state.uploaded_file.name)[1].lower()
@@ -3052,8 +2897,7 @@ def render_ia_processing(state: AppState):
 
             # --- Optional refinement: chunk and extract Q&A ---
             if ia_enable_refine:
-                raw_words = st.session_state.ia_transcript.split()
-                chunks = create_chunks_with_overlap(st.session_state.ia_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP) if len(raw_words) > CHUNK_WORD_SIZE else [st.session_state.ia_transcript]
+                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.ia_transcript, CHUNK_WORD_SIZE, 0)]
                 total_chunks = len(chunks)
                 refined_parts = [None] * total_chunks
 
@@ -3064,7 +2908,7 @@ def render_ia_processing(state: AppState):
                             total_chunks=total_chunks,
                             chunk=chunk,
                         )
-                        resp = generate_with_retry(model, prompt)
+                        resp = generate_with_retry(model, prompt, generation_config=GENERATION_CONFIG)
                         return idx, resp.text
 
                     with ThreadPoolExecutor(max_workers=min(3, total_chunks)) as executor:
@@ -3105,7 +2949,7 @@ def render_ia_processing(state: AppState):
                 if _addendum:
                     prompt += "\n\n---\nADDITIONAL FORMATTING INSTRUCTIONS:\n" + "\n".join(_addendum)
 
-                response = generate_with_retry(model, prompt)
+                response = generate_with_retry(model, prompt, generation_config=GENERATION_CONFIG)
                 st.session_state.ia_output = response.text
                 st.rerun()
         except Exception as e:
@@ -3442,8 +3286,7 @@ def render_otg_notes_tab(state: AppState):
 
             # --- Optional refinement: chunk and extract Q&A ---
             if enable_refine:
-                raw_words = st.session_state.otg_input.split()
-                chunks = create_chunks_with_overlap(st.session_state.otg_input, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP) if len(raw_words) > CHUNK_WORD_SIZE else [st.session_state.otg_input]
+                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.otg_input, CHUNK_WORD_SIZE, 0)]
                 total_chunks = len(chunks)
                 refined_parts = [None] * total_chunks
 
@@ -3454,7 +3297,7 @@ def render_otg_notes_tab(state: AppState):
                             total_chunks=total_chunks,
                             chunk=chunk,
                         )
-                        resp = generate_with_retry(otg_model, prompt)
+                        resp = generate_with_retry(otg_model, prompt, generation_config=GENERATION_CONFIG)
                         return idx, resp.text
 
                     with ThreadPoolExecutor(max_workers=min(3, total_chunks)) as executor:
