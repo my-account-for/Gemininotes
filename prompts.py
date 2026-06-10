@@ -20,6 +20,13 @@ PANEL_HANDLING_SECTION = """
 -   **ATTRIBUTE EVERY ANSWER:** When more than two people speak and names are known, attribute the content. If multiple panellists contribute to the same question, start each panellist's contribution with their name in bold (e.g., `- **Deep Kalra:** ...`) and keep each panellist's points grouped together under that question.
 -   **NEVER BLUR ATTRIBUTION:** Do not collapse different speakers' views into unattributed bullets, and do not fall back to generic labels like "Speaker 1" when the person's name is known anywhere in the transcript or in the speaker list provided above."""
 
+# Injected into refinement and speaker-ID prompts. Audio transcripts garble
+# proper nouns phonetically ("Alog Baji" for Aloke Bajpai, "My BusinessME"
+# for myBiz) — downstream stages then propagate the garble consistently.
+# Correction has to happen here, at the refinement stage, with an explicit
+# flag for anything the model can't confidently identify.
+ASR_CORRECTION_INSTRUCTION = """PROPER-NOUN CORRECTION: This transcript comes from automatic speech recognition, so names of people, companies, products, and websites are often phonetically garbled. Where a garbled proper noun clearly refers to a real, identifiable entity given the context — a company's founder, a known brand or product, a well-known website — correct it to its canonical real-world spelling (e.g., a garbled rendering of a travel company founder's name should become the founder's actual name; a garbled product name like "My BusinessME" in a MakeMyTrip discussion should become "myBiz"). Apply the same corrected spelling consistently throughout. If you CANNOT identify the real entity with reasonable confidence, keep the transcript's spelling and append [sp?] immediately after it to flag it for human review — never invent a plausible-looking name."""
+
 EXPERT_MEETING_DETAILED_PROMPT = """### **PRIMARY DIRECTIVE: MAXIMUM DETAIL & STRICT COMPLETENESS**
 Your goal is to produce the most thorough, granular notes possible. Remove conversational filler ("um," "you know," repetition) but **nothing substantive should be omitted.** Every factual claim, example, explanation, aside, and data point in the transcript must appear in your notes. When in doubt, INCLUDE it. Err heavily on the side of over-inclusion. Longer, more detailed notes are always preferred over concise ones.
 
@@ -47,6 +54,7 @@ Structure the main body STRICTLY in Question/Answer format.
 -   Use **multiple bullet points** per answer — do NOT collapse a detailed response into a single bullet.
 -   **ZERO SKIPPING RULE:** If the expert said it with substance, it must appear in your notes. Do NOT skip examples, anecdotes, specific sentences, or supporting details even if they seem minor or repetitive. Every distinct point gets its own bullet. If an answer contains 8 substantive points, you must produce at least 8 bullets — never condense them into 3-4.
 -   **PRIORITY #1: CAPTURE ALL HARD DATA.** This includes all names, examples, monetary values (`$`), percentages (`%`), metrics, specific entities mentioned, time periods, market sizes, growth rates, company names, product names, and geographies.
+-   **NAMED LISTS & COINED LABELS:** If the speaker lists named examples (brands, hotels, companies, apps), capture EVERY name in the list — never compress a list of names into "several players" or similar. If a speaker coins or uses a memorable label, metaphor, or framework (e.g., "Two Indias"), preserve that label verbatim in quotes — these frames are often the most quoted part of a call. Preserve any [sp?] flags that appear in the transcript: they mark unverified name spellings and must survive into the notes.
 -   **PRIORITY #2: CAPTURE ALL NUANCE & REASONING.** Do not over-summarize or reduce complex answers to surface-level statements. You must retain the following:
     -   **Sentiment & Tone:** Note if the expert is confident, uncertain, speculative, cautious, or enthusiastic (e.g., "The expert was highly confident that...," "He cautioned that...").
     -   **Qualifiers & Conditions:** Preserve modifying words that change meaning (e.g., "usually," "in most cases," "except in," "only when," "roughly," "approximately," "a potential risk is...").
@@ -79,6 +87,7 @@ Structure the main body in Question/Answer format.
 -   Use bullet points (`-`) directly below the question (no blank line between the bold question and its first bullet).
 -   Each bullet point must convey specific factual information in a clear, complete sentence.
 -   **PRIORITY #1: CAPTURE ALL HARD DATA.** This includes all names, examples, monetary values (`$`), percentages (`%`), metrics, and specific entities mentioned.
+-   **NAMED LISTS & COINED LABELS:** If the speaker lists named examples (brands, hotels, companies, apps), capture EVERY name — never compress a list of names into "several players" or similar. If a speaker coins a memorable label or framework (e.g., "Two Indias"), preserve it verbatim in quotes. Preserve any [sp?] flags from the transcript — they mark unverified name spellings.
 -   **PRIORITY #2: CAPTURE ALL NUANCE.** Do not over-summarize. You must retain the following:
     -   **Sentiment & Tone:** Note if the speaker is optimistic, hesitant, confident, or speculative (e.g., "The expert was cautiously optimistic about...", "He speculated that...").
     -   **Qualifiers:** Preserve modifying words that change meaning (e.g., "usually," "in most cases," "rarely," "a potential risk is...").
@@ -357,7 +366,8 @@ Return ONLY valid JSON with no other text:
 Rules:
 - List each distinct speaker once, in order of first appearance.
 - Include the role/company in parentheses when stated or clearly implied.
-- Use the most complete, correctly spelled version of each name that appears in the excerpt.
+- **ASR CORRECTION:** This excerpt comes from automatic speech recognition, so names are often phonetically garbled. When the speaker is clearly identifiable from context (their company, role, or product), output the canonical real-world spelling of their name — NOT the garbled transcript spelling. Example: a garbled rendering of a known company founder's name should be replaced with the founder's actual name.
+- If you cannot confidently identify the real person behind a garbled name, keep the transcript spelling and append " [sp?]" to it. Never invent a plausible-looking name.
 - If a speaker is never named, describe them functionally (e.g., "Moderator", "Analyst").
 - List at most 8 speakers.
 
