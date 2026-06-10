@@ -25,6 +25,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COM
 import copy
 
 # --- Local Imports ---
+# Streamlit Cloud hot-reloads this main script when a new commit lands, but
+# does not reliably evict previously imported local modules from sys.modules.
+# The fresh app.py then does `from prompts import <newly added name>` against
+# the STALE prompts module and crashes with ImportError until someone manually
+# reboots the app. Force-reload the local modules so app.py and its imports
+# always come from the same deployed commit. They are constants and pure
+# functions, so reloading on each rerun is safe and costs ~1ms.
+import sys
+import importlib
+for _mod_name in ("prompts", "chunking", "progress", "database"):
+    _mod = sys.modules.get(_mod_name)
+    if _mod is not None:
+        importlib.reload(_mod)
+
 import database
 from chunking import create_chunks_with_context, estimate_chunk_count, cleanup_stitched_notes
 from progress import (
