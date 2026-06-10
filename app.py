@@ -23,7 +23,6 @@ import tempfile
 import html as html_module
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import copy
-import streamlit.components.v1 as components
 
 # --- Local Imports ---
 import database
@@ -203,6 +202,10 @@ NOTES_OUTPUT_RATIO = 0.6
 # length and would exceed an 8192-token default at the 10k-word chunk size.
 MAX_OUTPUT_TOKENS = 65536
 GENERATION_CONFIG = {"max_output_tokens": MAX_OUTPUT_TOKENS}
+# Transcript context for "Chat with this Note". Gemini 2.5/3 models take
+# ~1M input tokens, so a generous cap keeps verbatim lookups working on
+# long calls (the old 30k-char cap silently dropped most of them).
+CHAT_TRANSCRIPT_CHAR_LIMIT = 400_000
 
 AVAILABLE_MODELS = {
     "Gemini 2.5 Flash": "gemini-2.5-flash",
@@ -1055,11 +1058,13 @@ def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False, 
                 continue
             raise
 
-def stream_and_collect(response, placeholder=None, on_progress=None):
+def stream_and_collect(response, placeholder=None, on_progress=None, live_preview=None):
     """Consume a streaming response, optionally displaying progress.
 
     `on_progress(word_count)` is called as text streams in, so callers can
     drive a real progress bar instead of a detached word counter.
+    `live_preview` is an st.empty() (ideally inside an autoscroll container)
+    that gets the accumulated markdown as it streams.
     Returns (full_text, token_count).
     """
     full_text = ""
@@ -1075,8 +1080,12 @@ def stream_and_collect(response, placeholder=None, on_progress=None):
                     on_progress(word_count)
                 if placeholder:
                     placeholder.caption(f"Streaming... {word_count:,} words generated")
+                if live_preview is not None:
+                    live_preview.markdown(full_text)
     if placeholder:
         placeholder.empty()
+    if live_preview is not None:
+        live_preview.markdown(full_text)
     token_count = safe_get_token_count(response)
     return full_text, token_count
 
@@ -1090,7 +1099,7 @@ def copy_to_clipboard_button(text: str, button_label: str = "Copy Notes"):
     # Use JSON encoding to safely embed arbitrary text in a JS string literal
     json_encoded = json.dumps(text)
     safe_label = html_module.escape(button_label)
-    components.html(
+    st.iframe(
         f"""
         <button onclick="copyText()" aria-label="{safe_label}" role="button" tabindex="0"
             onkeydown="if(event.key==='Enter'||event.key===' '){{event.preventDefault();copyText();}}"
@@ -1251,7 +1260,10 @@ def generate_notes_from_transcript(
     if skip_chunking or len(words) <= CHUNK_WORD_SIZE:
         progress.update("generate", 0, f"{len(words):,} words, single pass")
         prompt = get_dynamic_prompt(state, final_transcript)
-        stream_placeholder = st.empty()
+        # Live preview of the notes as they stream — the most honest progress
+        # indicator there is. Autoscroll keeps the latest text in view.
+        with st.container(height=240, border=True, autoscroll=True):
+            live_preview = st.empty()
         response = generate_with_retry(notes_model, prompt, stream=True, generation_config=GENERATION_CONFIG)
         expected_words = max(200, int(len(words) * NOTES_OUTPUT_RATIO))
 
@@ -1262,7 +1274,7 @@ def generate_notes_from_transcript(
                 f"{words_so_far:,} words generated",
             )
 
-        notes, tokens = stream_and_collect(response, stream_placeholder, on_progress=_on_stream)
+        notes, tokens = stream_and_collect(response, on_progress=_on_stream, live_preview=live_preview)
         return notes, tokens
 
     # --- Chunked path ---
@@ -1426,7 +1438,7 @@ def send_browser_notification(title: str, body: str):
     safe_title = json.dumps(title)
     safe_body = json.dumps(body)
 
-    components.html(
+    st.iframe(
         f"""
         <script>
         (function() {{
@@ -1442,7 +1454,7 @@ def send_browser_notification(title: str, body: str):
         }})();
         </script>
         """,
-        height=0,
+        height=1,  # st.iframe requires a positive height; 1px keeps it invisible
     )
 
 def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> Tuple[str, str, Optional[bytes]]:
@@ -1851,7 +1863,8 @@ def render_input_and_processing_tab(state: AppState):
     else:
         col_upload, col_record = st.columns(2)
         with col_upload:
-            state.uploaded_file = st.file_uploader("Upload a File", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'], help="PDF, TXT, MP3, M4A, WAV, OGG, FLAC")
+            # "audio" is a MIME shortcut (audio/*) covering mp3/m4a/wav/ogg/flac.
+            state.uploaded_file = st.file_uploader("Upload a File", type=['pdf', 'txt', 'md', 'audio'], help="PDF, TXT, MD, or any audio file")
         with col_record:
             state.audio_recording = st.audio_input("Record Microphone")
 
@@ -1968,7 +1981,7 @@ def render_input_and_processing_tab(state: AppState):
             st.divider()
             st.caption("Browser notifications for processing completion.")
             if st.button("Enable Notifications", key="enable_notif_btn", use_container_width=True):
-                components.html(
+                st.iframe(
                     """
                     <script>
                     if ("Notification" in window) {
@@ -1983,7 +1996,7 @@ def render_input_and_processing_tab(state: AppState):
                     }
                     </script>
                     """,
-                    height=0,
+                    height=1,  # st.iframe requires a positive height; 1px keeps it invisible
                 )
     with col_participants:
         state.speakers = st.text_input("Participants (Optional)", value=state.speakers, placeholder="e.g., John Smith (Analyst), Jane Doe (CEO)")
@@ -2000,10 +2013,11 @@ def render_input_and_processing_tab(state: AppState):
 
     if is_speaker_flow:
         st.info(
-            "**Speaker ID Flow:** the transcript is refined and tagged with speaker labels first. "
+            "The transcript is refined and tagged with speaker labels first. "
             "You can rename speakers, reassign per-segment tags, add a new tag, and download the tagged transcript "
             "before generating the final notes.",
             icon="\U0001f399\ufe0f",
+            title="Speaker ID Flow",
         )
 
     if validation_error:
@@ -2113,9 +2127,7 @@ def render_input_and_processing_tab(state: AppState):
         _render_speaker_review_panel(state)
 
     if state.error_message:
-        st.error("Processing failed. See details below.")
-        with st.expander("Error Details", expanded=True):
-            st.code(state.error_message)
+        st.error(state.error_message, title="Processing failed")
         err_col1, err_col2 = st.columns(2)
         if state.fallback_content:
             err_col1.download_button("Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt", use_container_width=True)
@@ -2430,6 +2442,74 @@ def run_validation_in_chunks(notes: str, transcript: str, model_name: str) -> li
     return [r1.text, r2.text]
 
 
+def _render_history_sidebar(state: AppState, notes: List[dict]):
+    """Compact note history + analytics in the sidebar, so the main page
+    stays focused on the active note."""
+    with st.sidebar:
+        st.subheader("History")
+
+        raw_summary_data = database.get_analytics_summary()
+        summary_dict = {}
+        if isinstance(raw_summary_data, dict):
+            summary_dict = raw_summary_data
+        elif isinstance(raw_summary_data, tuple) and raw_summary_data:
+            if isinstance(raw_summary_data[0], dict):
+                summary_dict = raw_summary_data[0]
+            else:
+                summary_dict['total_notes'] = raw_summary_data[0] if len(raw_summary_data) > 0 else 0
+                summary_dict['avg_time'] = raw_summary_data[1] if len(raw_summary_data) > 1 else 0.0
+                summary_dict['total_tokens'] = raw_summary_data[2] if len(raw_summary_data) > 2 else 0
+        st.caption(
+            f"{summary_dict.get('total_notes', 0)} notes · "
+            f"avg {summary_dict.get('avg_time', 0.0):.0f}s/note · "
+            f"{summary_dict.get('total_tokens', 0):,} tokens"
+        )
+
+        search_query = st.text_input(
+            "Search notes by file name", placeholder="Search notes...",
+            label_visibility="collapsed", key="history_search",
+        )
+        type_filter = st.selectbox(
+            "Filter by meeting type", ["All Types"] + MEETING_TYPES,
+            label_visibility="collapsed", key="history_type_filter",
+        )
+
+        filtered_notes = notes
+        if search_query:
+            filtered_notes = [n for n in filtered_notes if search_query.lower() in n.get('file_name', '').lower()]
+        if type_filter != "All Types":
+            filtered_notes = [n for n in filtered_notes if n.get('meeting_type') == type_filter]
+
+        if not filtered_notes:
+            st.info("No notes match your search.", title="No results")
+            return
+
+        for note in filtered_notes:
+            is_active = note['id'] == state.active_note_id
+            with st.container(border=True):
+                card_name = note['file_name']
+                if len(card_name) > 42:
+                    card_name = card_name[:39] + "..."
+                name_col, menu_col = st.columns([5, 1])
+                with name_col:
+                    st.markdown(f"**{card_name}**" + (" &nbsp; `viewing`" if is_active else ""))
+                with menu_col:
+                    action = st.menu_button(
+                        "⋮", ["View", "Delete"],
+                        key=f"note_menu_{note['id']}", type="tertiary",
+                    )
+                st.caption(
+                    f"{note['meeting_type']} · "
+                    f"{datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M')}"
+                )
+                if action == "View":
+                    if not is_active:
+                        state.active_note_id = note['id']
+                        st.rerun()
+                elif action == "Delete":
+                    _confirm_delete_dialog(note['id'], note['file_name'])
+
+
 def render_output_and_history_tab(state: AppState):
     notes = database.get_all_notes()
 
@@ -2448,6 +2528,8 @@ Your generated notes, transcripts, and chat history will appear here.
     # --- Active Note ---
     if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
         state.active_note_id = notes[0]['id']
+
+    _render_history_sidebar(state, notes)
 
     active_note = database.get_note_by_id(state.active_note_id)
     if not active_note:
@@ -2489,7 +2571,7 @@ Your generated notes, transcripts, and chat history will appear here.
     with col_transcript:
         st.markdown(f"**{transcript_source} Transcript**")
         if final_transcript:
-            st.text_area("", value=final_transcript, height=600, disabled=True, label_visibility="collapsed", key=f"side_tx_{active_note['id']}")
+            st.text_area("Transcript", value=final_transcript, height=600, disabled=True, label_visibility="collapsed", key=f"side_tx_{active_note['id']}")
         else:
             st.info("No transcript available.")
 
@@ -2498,43 +2580,42 @@ Your generated notes, transcripts, and chat history will appear here.
     fname = active_note.get('file_name', 'note')
     raw_tx = active_note.get('raw_transcript')
 
-    dl1, dl2, dl3, dl4 = st.columns(4)
-    with dl1:
-        copy_to_clipboard_button(edited_content)
-    dl2.download_button(
-        label="Notes (.txt)",
-        data=edited_content,
-        file_name=f"SynthNote_{fname}.txt",
-        mime="text/plain",
-        use_container_width=True
-    )
-    dl3.download_button(
-        label="Notes (.md)",
-        data=edited_content,
-        file_name=f"SynthNote_{fname}.md",
-        mime="text/markdown",
-        use_container_width=True
-    )
-    if final_transcript:
-        dl4.download_button(
-            label=f"{transcript_source} Transcript",
-            data=final_transcript,
-            file_name=f"{transcript_source}_Transcript_{fname}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
-    elif raw_tx:
-        dl4.download_button(
-            label="Raw Transcript",
-            data=raw_tx,
-            file_name=f"Raw_Transcript_{fname}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
-    else:
-        dl4.empty()
-
-    st.feedback("thumbs", key=f"fb_{active_note['id']}")
+    act_col, fb_col = st.columns([1, 3])
+    with act_col:
+        with st.popover("Export / Copy", icon=":material/download:", use_container_width=True):
+            copy_to_clipboard_button(edited_content)
+            st.download_button(
+                label="Notes (.txt)",
+                data=edited_content,
+                file_name=f"SynthNote_{fname}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+            st.download_button(
+                label="Notes (.md)",
+                data=edited_content,
+                file_name=f"SynthNote_{fname}.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
+            if final_transcript:
+                st.download_button(
+                    label=f"{transcript_source} Transcript (.txt)",
+                    data=final_transcript,
+                    file_name=f"{transcript_source}_Transcript_{fname}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+            elif raw_tx:
+                st.download_button(
+                    label="Raw Transcript (.txt)",
+                    data=raw_tx,
+                    file_name=f"Raw_Transcript_{fname}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+    with fb_col:
+        st.feedback("thumbs", key=f"fb_{active_note['id']}")
 
     # --- VALIDATE OUTPUT COMPLETENESS ---
     if final_transcript:
@@ -2591,24 +2672,36 @@ Your generated notes, transcripts, and chat history will appear here.
     st.caption("Ask questions about the content. The model has access to both the notes and the source transcript for verbatim lookups.")
 
     st.session_state.chat_histories.setdefault(active_note['id'], [])
+    history = st.session_state.chat_histories[active_note['id']]
 
-    for message in st.session_state.chat_histories[active_note['id']]:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    chat_box = None
+    if history:
+        chat_box = st.container(height=420, autoscroll=True)
+        with chat_box:
+            for message in history:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
 
-    if prompt := st.chat_input("Ask a question about the note content..."):
-        st.session_state.chat_histories[active_note['id']].append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # Pinned to the bottom of the viewport so the input is always reachable.
+    with st.bottom:
+        prompt = st.chat_input("Ask a question about this note...")
 
-        with st.chat_message("assistant", avatar=":material/progress_activity:"):
-            full_response = ""
-            try:
-                transcript_context = final_transcript[:30000] if final_transcript else "Not available."
-                truncation_note = ""
-                if final_transcript and len(final_transcript) > 30000:
-                    truncation_note = f"\n\nNote: The transcript was truncated from {len(final_transcript):,} to 30,000 characters. Some content at the end may be missing from the TRANSCRIPT section. The NOTES section contains the full meeting content."
-                system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
+    if prompt:
+        if chat_box is None:
+            chat_box = st.container(height=420, autoscroll=True)
+        history.append({"role": "user", "content": prompt})
+        with chat_box:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant", avatar=":material/progress_activity:"):
+                full_response = ""
+                try:
+                    transcript_context = final_transcript[:CHAT_TRANSCRIPT_CHAR_LIMIT] if final_transcript else "Not available."
+                    truncation_note = ""
+                    if final_transcript and len(final_transcript) > CHAT_TRANSCRIPT_CHAR_LIMIT:
+                        truncation_note = f"\n\nNote: The transcript was truncated from {len(final_transcript):,} to {CHAT_TRANSCRIPT_CHAR_LIMIT:,} characters. Some content at the end may be missing from the TRANSCRIPT section. The NOTES section contains the full meeting content."
+                    system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
 If the user asks for verbatim quotes or exact wording, refer to the TRANSCRIPT section. For analysis and summary questions, use the NOTES section.{truncation_note}
 
 MEETING NOTES:
@@ -2620,103 +2713,36 @@ SOURCE TRANSCRIPT:
 {transcript_context}
 ---
 """
-                chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
-                chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
-                messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in st.session_state.chat_histories[active_note['id']]]
+                    chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-2.5-flash")
+                    chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
+                    messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in history]
 
-                chat = chat_model.start_chat(history=messages_for_api[:-1])
-                response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
+                    chat = chat_model.start_chat(history=messages_for_api[:-1])
+                    response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
 
-                message_placeholder = st.empty()
-                try:
-                    for chunk in response:
-                        if not chunk.parts:
-                            continue
-                        full_response += chunk.text
-                        message_placeholder.markdown(full_response + "\u258c")
-                except Exception as stream_err:
-                    # Handle streaming interruption gracefully
-                    if full_response:
-                        full_response += f"\n\n*(Stream interrupted: {stream_err})*"
-                    else:
-                        raise stream_err
-                message_placeholder.markdown(full_response)
+                    message_placeholder = st.empty()
+                    try:
+                        for chunk in response:
+                            if not chunk.parts:
+                                continue
+                            full_response += chunk.text
+                            message_placeholder.markdown(full_response + "\u258c")
+                    except Exception as stream_err:
+                        # Handle streaming interruption gracefully
+                        if full_response:
+                            full_response += f"\n\n*(Stream interrupted: {stream_err})*"
+                        else:
+                            raise stream_err
+                    message_placeholder.markdown(full_response)
 
-            except Exception as e:
-                full_response = f"Sorry, an error occurred: {str(e)}"
-                st.error(full_response)
-                if st.session_state.chat_histories[active_note['id']]:
-                    st.session_state.chat_histories[active_note['id']].pop()
+                except Exception as e:
+                    full_response = f"Sorry, an error occurred: {str(e)}"
+                    st.error(full_response, title="Chat failed")
+                    if history:
+                        history.pop()
 
         if 'full_response' in locals() and not full_response.startswith("Sorry"):
-            st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
-
-    # --- Analytics ---
-    st.divider()
-    st.subheader("History")
-
-    raw_summary_data = database.get_analytics_summary()
-    summary_dict = {}
-    if isinstance(raw_summary_data, dict):
-        summary_dict = raw_summary_data
-    elif isinstance(raw_summary_data, tuple) and raw_summary_data:
-        if isinstance(raw_summary_data[0], dict):
-            summary_dict = raw_summary_data[0]
-        else:
-            summary_dict['total_notes'] = raw_summary_data[0] if len(raw_summary_data) > 0 else 0
-            summary_dict['avg_time'] = raw_summary_data[1] if len(raw_summary_data) > 1 else 0.0
-            summary_dict['total_tokens'] = raw_summary_data[2] if len(raw_summary_data) > 2 else 0
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Notes", summary_dict.get('total_notes', 0))
-    c2.metric("Avg. Time / Note", f"{summary_dict.get('avg_time', 0.0):.1f}s")
-    c3.metric("Total Tokens", f"{summary_dict.get('total_tokens', 0):,}")
-
-    # --- Search & Filter ---
-    filter_col1, filter_col2 = st.columns([3, 1])
-    with filter_col1:
-        search_query = st.text_input("Search notes by file name", placeholder="Search notes...", label_visibility="collapsed")
-    with filter_col2:
-        type_filter = st.selectbox("Filter by meeting type", ["All Types"] + MEETING_TYPES, label_visibility="collapsed")
-
-    filtered_notes = notes
-    if search_query:
-        filtered_notes = [n for n in filtered_notes if search_query.lower() in n.get('file_name', '').lower()]
-    if type_filter != "All Types":
-        filtered_notes = [n for n in filtered_notes if n.get('meeting_type') == type_filter]
-
-    if not filtered_notes:
-        st.info("No notes match your search. Try a different keyword or clear the filter.")
-
-    for note in filtered_notes:
-        is_active = note['id'] == state.active_note_id
-        with st.container(border=True):
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                # Truncate long filenames for card display
-                card_name = note['file_name']
-                if len(card_name) > 60:
-                    card_name = card_name[:57] + "..."
-                label = f"**{card_name}**"
-                if is_active:
-                    label += " &nbsp; `viewing`"
-                st.markdown(label)
-                content_text = note.get('content', '')
-                if content_text:
-                    snippet = content_text[:150].replace('\n', ' ').strip()
-                    if len(content_text) > 150:
-                        snippet += "..."
-                    st.caption(snippet)
-                # Badge + date on one line
-                badge_col, date_col = st.columns([1, 2])
-                badge_col.badge(note['meeting_type'])
-                date_col.caption(datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M'))
-            with col2:
-                if st.button("View", key=f"view_{note['id']}", use_container_width=True, disabled=is_active):
-                    state.active_note_id = note['id']
-                    st.rerun()
-                if st.button("Delete", key=f"del_{note['id']}", use_container_width=True, type="tertiary"):
-                    _confirm_delete_dialog(note['id'], note['file_name'])
+            history.append({"role": "assistant", "content": full_response})
 
 def _build_ia_prompt_template(meeting_type: str) -> str:
     """Return the IA prompt for the given meeting type; {transcript} left as placeholder."""
@@ -4278,44 +4304,9 @@ def run_app():
 
     st.logo("https://placehold.co/64x64?text=SN", link="https://streamlit.io")
 
-    # --- Header with dark mode toggle ---
-    title_col, theme_col = st.columns([6, 1])
-    with title_col:
-        st.title("SynthNotes AI")
-    with theme_col:
-        # Detect current theme and show toggle
-        current_theme = st.context.theme
-        is_dark = current_theme.get("backgroundColor", "#ffffff").lower() in (
-            "#0e1117", "#111111", "#000000", "#0e1118", "#262730",
-        )
-        dark_mode = st.toggle(
-            "Dark" if is_dark else "Light",
-            value=is_dark,
-            key="dark_mode_toggle",
-            help="Switch between light and dark mode",
-        )
-        if dark_mode != is_dark:
-            # Inject JS to toggle Streamlit's theme via settings menu
-            target_theme = "Dark" if dark_mode else "Light"
-            components.html(
-                f"""
-                <script>
-                // Toggle theme by updating localStorage and reloading
-                const stTheme = '{target_theme.lower()}';
-                try {{
-                    const key = Object.keys(localStorage).find(k => k.includes('stActiveTheme')) || 'stActiveTheme-/-v1';
-                    localStorage.setItem(key, JSON.stringify({{name: stTheme, themeInput: {{}}}}));
-                    window.parent.location.reload();
-                }} catch(e) {{
-                    // Fallback: use URL params
-                    const url = new URL(window.parent.location);
-                    url.searchParams.set('embed_options', 'dark_theme' === stTheme ? 'dark_theme' : 'light_theme');
-                    window.parent.location = url;
-                }}
-                </script>
-                """,
-                height=0,
-            )
+    # Theme switching is handled by Streamlit's built-in settings menu —
+    # the old localStorage-rewrite toggle was brittle across versions.
+    st.title("SynthNotes AI")
 
     if "config_error" in st.session_state:
         st.error(st.session_state.config_error); st.stop()
