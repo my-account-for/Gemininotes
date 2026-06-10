@@ -918,6 +918,22 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
 
     progress.complete_step("refine")
 
+    # Durable checkpoint: persist the tagged transcript as a draft note so the
+    # refinement/tagging work survives a reload while the user reviews tags.
+    # process_tagged_to_notes_task fills in the content on the same row later;
+    # "Discard & Start Over" deletes it if no notes were generated.
+    draft_note_id = str(uuid.uuid4())
+    try:
+        database.save_note({
+            'id': draft_note_id, 'created_at': datetime.now().isoformat(),
+            'meeting_type': "Expert Meeting", 'file_name': file_name,
+            'content': "", 'raw_transcript': raw_transcript,
+            'refined_transcript': canonical_tagged, 'token_usage': total_tokens,
+            'processing_time': 0, 'pdf_blob': pdf_bytes_data,
+        })
+    except Exception:
+        draft_note_id = None
+
     return {
         "raw_transcript": raw_transcript,
         "file_name": file_name,
@@ -927,6 +943,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
         "speakers": speakers_list,
         "token_usage": total_tokens,
         "elapsed": time.time() - start_time,
+        "note_id": draft_note_id,
     }
 
 
@@ -941,6 +958,7 @@ def process_tagged_to_notes_task(
     pdf_bytes: Optional[bytes],
     downstream_style: str,
     prior_tokens: int = 0,
+    draft_note_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate notes from a user-edited, speaker-tagged transcript.
 
@@ -984,7 +1002,7 @@ def process_tagged_to_notes_task(
 
         progress.update("save", 0.5, "Writing to database...")
         note_data = {
-            'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(),
+            'id': draft_note_id or str(uuid.uuid4()), 'created_at': datetime.now().isoformat(),
             'meeting_type': "Expert Meeting",
             'file_name': file_name, 'content': final_notes_content,
             'raw_transcript': raw_transcript,
@@ -994,7 +1012,17 @@ def process_tagged_to_notes_task(
             'pdf_blob': pdf_bytes,
         }
         try:
-            database.save_note(note_data)
+            if draft_note_id:
+                # Fill in the draft row saved by the speaker-ID step, with the
+                # user-edited tagged transcript as the refined transcript.
+                database.update_note(draft_note_id, {
+                    'content': final_notes_content,
+                    'refined_transcript': tagged_transcript,
+                    'token_usage': total_tokens,
+                    'processing_time': note_data['processing_time'],
+                })
+            else:
+                database.save_note(note_data)
         except Exception as db_error:
             st.session_state.app_state.fallback_content = final_notes_content
             raise Exception(f"Processing succeeded, but failed to save the note to the database. You can download the unsaved note below. Error: {db_error}")
@@ -1005,6 +1033,8 @@ def process_tagged_to_notes_task(
 
 def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker):
     start_time = time.time()
+    note_id = str(uuid.uuid4())
+    created_at = datetime.now().isoformat()
     notes_model = _get_cached_model(state.notes_model)
     refinement_model = _get_cached_model(state.refinement_model)
 
@@ -1014,6 +1044,23 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
     # Checkpoint: save raw transcript so it survives connection drops
     st.session_state["_checkpoint_raw_transcript"] = raw_transcript
     st.session_state["_checkpoint_file_name"] = file_name
+
+    # Durable checkpoint: persist a draft note NOW so the transcript (which may
+    # have cost minutes of audio transcription) survives a crash, reload, or a
+    # failure in any later stage. The same row is updated as stages complete.
+    draft_saved = False
+    try:
+        database.save_note({
+            'id': note_id, 'created_at': created_at,
+            'meeting_type': state.selected_meeting_type, 'file_name': file_name,
+            'content': "", 'raw_transcript': raw_transcript,
+            'refined_transcript': None, 'token_usage': 0,
+            'processing_time': 0, 'pdf_blob': pdf_bytes_data,
+        })
+        draft_saved = True
+    except Exception:
+        # Non-fatal: processing continues; the final save below will retry.
+        pass
 
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
 
@@ -1088,6 +1135,11 @@ NEW TRANSCRIPT CHUNK TO REFINE:
 
     # Checkpoint: save refined transcript
     st.session_state["_checkpoint_refined_transcript"] = refined_transcript
+    if draft_saved and refined_transcript:
+        try:
+            database.update_note(note_id, {"refined_transcript": refined_transcript, "token_usage": total_tokens})
+        except Exception:
+            pass
 
     # --- Step 3: Generate Notes ---
     # Earnings calls should not be chunked: their topic-based structure causes
@@ -1121,14 +1173,22 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     progress.update("save", 0.5, "Writing to database...")
 
     note_data = {
-        'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
+        'id': note_id, 'created_at': created_at, 'meeting_type': state.selected_meeting_type,
         'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript,
         'refined_transcript': refined_transcript, 'token_usage': total_tokens,
         'processing_time': time.time() - start_time,
         'pdf_blob': pdf_bytes_data
     }
     try:
-        database.save_note(note_data)
+        if draft_saved:
+            database.update_note(note_id, {
+                'content': final_notes_content,
+                'refined_transcript': refined_transcript,
+                'token_usage': total_tokens,
+                'processing_time': note_data['processing_time'],
+            })
+        else:
+            database.save_note(note_data)
     except Exception as db_error:
         st.session_state.app_state.fallback_content = final_notes_content
         raise Exception(f"Processing succeeded, but failed to save the note to the database. You can download the unsaved note below. Error: {db_error}")
@@ -1335,7 +1395,7 @@ def render_input_and_processing_tab(state: AppState):
             st.session_state.sn_processing_id = True
             # Reset prior speaker-flow state so a fresh run starts clean,
             # including per-segment dropdown and per-speaker rename widget keys.
-            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked"):
+            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked", "sn_draft_note_id"):
                 st.session_state.pop(k, None)
             for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
                 st.session_state.pop(k, None)
@@ -1405,6 +1465,7 @@ def render_input_and_processing_tab(state: AppState):
                 st.session_state.sn_pdf_bytes = result["pdf_bytes"]
                 st.session_state.sn_id_tokens = result["token_usage"]
                 st.session_state.sn_id_elapsed = result["elapsed"]
+                st.session_state.sn_draft_note_id = result["note_id"]
                 progress.finish()
                 n_speakers = len(result["speakers"])
                 n_segments = len(result["segments"])
@@ -1432,10 +1493,23 @@ def render_input_and_processing_tab(state: AppState):
 
     if state.error_message:
         st.error(state.error_message, title="Processing failed")
-        err_col1, err_col2 = st.columns(2)
+        # Recovery: transcripts checkpointed before the failure are saved to
+        # History as an incomplete note and downloadable here.
+        ckpt_raw = st.session_state.get("_checkpoint_raw_transcript")
+        ckpt_refined = st.session_state.get("_checkpoint_refined_transcript")
+        if ckpt_raw or ckpt_refined:
+            st.caption(
+                "Work completed before the failure is not lost: the transcript was "
+                "checkpointed to **Output & History** and can also be downloaded below."
+            )
+        err_col1, err_col2, err_col3, err_col4 = st.columns(4)
         if state.fallback_content:
-            err_col1.download_button("Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt", use_container_width=True)
-        if err_col2.button("Dismiss Error", use_container_width=True):
+            err_col1.download_button("Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt", use_container_width=True)
+        if ckpt_raw:
+            err_col2.download_button("Raw Transcript (.txt)", ckpt_raw, "raw_transcript_checkpoint.txt", use_container_width=True)
+        if ckpt_refined:
+            err_col3.download_button("Refined Transcript (.txt)", ckpt_refined, "refined_transcript_checkpoint.txt", use_container_width=True)
+        if err_col4.button("Dismiss Error", use_container_width=True):
             state.error_message = None
             state.fallback_content = None
             st.rerun()
@@ -1634,6 +1708,7 @@ def _render_speaker_review_panel(state: AppState):
                     pdf_bytes=st.session_state.sn_pdf_bytes,
                     downstream_style=st.session_state.sn_downstream_style_locked,
                     prior_tokens=st.session_state.get("sn_id_tokens", 0),
+                    draft_note_id=st.session_state.get("sn_draft_note_id"),
                 )
                 state.active_note_id = final_note['id']
                 progress.finish()
@@ -1661,7 +1736,16 @@ def _render_speaker_review_panel(state: AppState):
     reset_col, _ = st.columns([1, 3])
     with reset_col:
         if st.button("Discard & Start Over", key="sn_reset_btn", use_container_width=True):
-            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked"):
+            # Remove the draft checkpoint note if no notes were generated on it.
+            draft_id = st.session_state.get("sn_draft_note_id")
+            if draft_id:
+                try:
+                    draft = database.get_note_by_id(draft_id)
+                    if draft and not (draft.get("content") or "").strip():
+                        database.delete_note(draft_id)
+                except Exception:
+                    pass
+            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked", "sn_draft_note_id"):
                 st.session_state.pop(k, None)
             for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
                 st.session_state.pop(k, None)
@@ -1806,6 +1890,8 @@ def _render_history_sidebar(state: AppState, notes: List[dict]):
                     f"{note['meeting_type']} · "
                     f"{datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M')}"
                 )
+                if not (note.get('content') or '').strip():
+                    st.caption("⚠️ Incomplete — transcript saved, no notes yet")
                 if action == "View":
                     if not is_active:
                         state.active_note_id = note['id']
@@ -1853,6 +1939,14 @@ Your generated notes, transcripts, and chat history will appear here.
         m1.metric("Time", f"{active_note.get('processing_time', 0):.1f}s")
         m2.metric("Tokens", f"{active_note.get('token_usage', 0):,}")
         m3.metric("Date", datetime.fromisoformat(active_note['created_at']).strftime('%b %d'))
+
+    if not (active_note.get('content') or '').strip():
+        st.warning(
+            "Notes generation didn't finish for this entry, but the transcript was "
+            "checkpointed and is shown on the right. Copy it into the Input & Generate "
+            "tab (refinement can be toggled off if it already ran) to retry.",
+            title="Incomplete note — transcript recovered",
+        )
 
     # --- Side-by-side Notes & Transcript ---
     final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
