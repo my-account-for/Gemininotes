@@ -300,7 +300,7 @@ MEETING_TYPE_HELP = {
     "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations. Option 4 enables a speaker-tagging review step before notes are generated.",
     "Earnings Call": "Financial data, management commentary, guidance, and analyst Q&A",
     "Management Meeting": "Decisions, action items, owners, and key discussion points",
-    "Internal Discussion": "Perspectives, ideas, reasoning, conclusions, and next steps",
+    "Internal Discussion": "Investment-team learnings document: thematic topics with bolded insights and mental models, consolidated mental models, unanswered questions, and follow-ups",
     "Custom": "Provide your own formatting instructions via the context field",
 }
 
