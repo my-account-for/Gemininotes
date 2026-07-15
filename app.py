@@ -26,7 +26,14 @@ import copy
 
 # --- Local Imports ---
 import database
-from chunking import create_chunks_with_context, estimate_chunk_count, cleanup_stitched_notes, strip_overlap
+from chunking import (
+    create_chunks_with_context,
+    estimate_chunk_count,
+    cleanup_stitched_notes,
+    strip_overlap,
+    strip_asr_meta_markers,
+    merge_learning_doc_sections,
+)
 from progress import (
     ProgressTracker,
     build_processing_plan,
@@ -1004,7 +1011,9 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
                 "Transcribe this audio recording verbatim, from the very beginning "
                 "to the very end. Do NOT stop early, skip, or summarize any section — "
                 "if a passage is hard to hear, transcribe your best guess and mark it "
-                "[inaudible] rather than omitting it. Pay special attention to "
+                "[inaudible] rather than omitting it. Output ONLY the transcribed speech — "
+                "no openings, closings, or markers of your own such as [END OF RECORDING]. "
+                "Pay special attention to "
                 "proper nouns — names of people, companies, products, and websites — "
                 "and transcribe them as accurately as possible."
             )
@@ -1072,6 +1081,10 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
                                     break
                                 time.sleep(2)
 
+                            # Drop model-added framing like "[END OF RECORDING]" —
+                            # mid-file it reads as a false ending, and trailing
+                            # meta-text breaks the seam dedup's tail anchoring.
+                            text = strip_asr_meta_markers(text)
                             time_range = f"{_fmt_audio_ts(chunk_start)}-{_fmt_audio_ts(chunk_end)}"
                             if len(text.split()) < min_words:
                                 # Still implausibly short after retries: keep
@@ -1544,6 +1557,11 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     was_chunked = not skip_chunking and len(final_transcript.split()) > (getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE)
     if was_chunked:
         final_notes_content = cleanup_stitched_notes(final_notes_content)
+        if state.selected_meeting_type == "Internal Discussion":
+            # Each processed section emits its own Consolidated Mental Models /
+            # Unanswered Questions / Follow-Ups blocks and restarts topic
+            # numbering. Merge them deterministically into one document.
+            final_notes_content = merge_learning_doc_sections(final_notes_content)
 
     # --- Step 5: Executive Summary (Expert Meeting Option 3 only) ---
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":

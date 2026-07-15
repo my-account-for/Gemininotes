@@ -10,6 +10,8 @@ from chunking import (
     estimate_chunk_count,
     cleanup_stitched_notes,
     strip_overlap,
+    strip_asr_meta_markers,
+    merge_learning_doc_sections,
 )
 
 
@@ -184,3 +186,107 @@ def test_strip_overlap_whole_next_duplicated():
     prev = " ".join(f"word{i}" for i in range(40))
     nxt = " ".join(f"word{i}" for i in range(28, 40))
     assert strip_overlap(prev, nxt) == ""
+
+
+def test_strip_overlap_tolerates_asr_variance_across_passes():
+    # Two ASR passes over the same audio rarely agree word-for-word: numbers
+    # come back as digits vs. words and odd words get garbled. The aligned
+    # blocks still identify the seam.
+    prev = ("earlier discussion continues here and we saw ranges of one five ten "
+            "and twenty percent across markets so the average is around four point "
+            "five percent depending on the mix")
+    nxt = ("we saw ranges of 1, 5, 10 and 20 percent across markets so the average "
+           "is about 4.5 percent depending on the mix and then the Philippines "
+           "discussion started")
+    out = strip_overlap(prev, nxt)
+    assert out == "and then the Philippines discussion started"
+
+
+# --- strip_asr_meta_markers: model-added framing around chunk transcripts ---
+
+def test_strip_asr_meta_markers_removes_framing_lines():
+    text = "[Beginning of transcript]\nSpeaker 1: hello there.\n\n[END OF RECORDING]"
+    cleaned = strip_asr_meta_markers(text)
+    assert "END OF RECORDING" not in cleaned
+    assert "Beginning of transcript" not in cleaned
+    assert "Speaker 1: hello there." in cleaned
+
+
+def test_strip_asr_meta_markers_keeps_content_and_gap_markers():
+    gap = "[TRANSCRIPTION GAP: audio from 30:00-35:00 could not be transcribed after 3 attempts.]"
+    sentence = "He said the end of the recording session was near, then continued."
+    text = f"{sentence}\n{gap}"
+    assert strip_asr_meta_markers(text) == text
+
+
+# --- merge_learning_doc_sections: chunked Internal Discussion output ---
+
+STITCHED_DOC = """### **Title: Seek — learnings, insights and mental models**
+Subtitle: read-across to Info Edge.
+
+### **1. Topic A**
+*   Point one.
+
+### **2. Consolidated Mental Models**
+*   **Model one.**
+
+### **3. Unanswered Questions**
+1.  Question one?
+
+### **4. Follow-Ups / Action Items**
+1.  Task one.
+
+### **1. Topic B**
+*   Point two.
+
+### **Consolidated Mental Models**
+*   **Model two.**
+*   **Model one.**
+
+### **Unanswered Questions**
+1.  Question two?
+
+### **Follow-Ups / Action Items**
+1.  Task two.
+"""
+
+
+def test_merge_learning_doc_end_sections_appear_once_at_end():
+    merged = merge_learning_doc_sections(STITCHED_DOC)
+    assert merged.count("Consolidated Mental Models") == 1
+    assert merged.count("Unanswered Questions") == 1
+    assert merged.count("Follow-Ups / Action Items") == 1
+    assert (merged.index("Topic B")
+            < merged.index("Consolidated Mental Models")
+            < merged.index("Unanswered Questions")
+            < merged.index("Follow-Ups / Action Items"))
+
+
+def test_merge_learning_doc_renumbers_topics_and_items():
+    merged = merge_learning_doc_sections(STITCHED_DOC)
+    assert "**1. Topic A**" in merged
+    assert "**2. Topic B**" in merged  # restarted numbering fixed
+    assert "**3. Consolidated Mental Models**" in merged  # final numbered topic
+    assert "1.  Question one?" in merged
+    assert "2.  Question two?" in merged
+    assert "1.  Task one." in merged
+    assert "2.  Task two." in merged
+
+
+def test_merge_learning_doc_dedups_exact_duplicates():
+    merged = merge_learning_doc_sections(STITCHED_DOC)
+    assert merged.count("Model one.") == 1
+    assert merged.count("Model two.") == 1
+
+
+def test_merge_learning_doc_preserves_all_content():
+    merged = merge_learning_doc_sections(STITCHED_DOC)
+    for needle in ("Title: Seek", "read-across to Info Edge", "Point one.", "Point two.",
+                   "Model one.", "Model two.", "Question one?", "Question two?",
+                   "Task one.", "Task two."):
+        assert needle in merged
+
+
+def test_merge_learning_doc_without_end_sections_unchanged():
+    doc = "### **1. Topic**\n* a point\n\n### **2. Another**\n* b point"
+    assert merge_learning_doc_sections(doc) == doc

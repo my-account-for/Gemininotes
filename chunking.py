@@ -141,20 +141,26 @@ def strip_overlap(
     *,
     window_words: int = 120,
     min_match_words: int = 8,
+    tail_slack: int = 15,
 ) -> str:
     """Remove from ``next_text`` the leading region that duplicates the tail
     of ``prev_text``.
 
     Used when audio chunks are transcribed with a deliberate overlap: the
     seam sentences appear at the end of one chunk's transcript and again at
-    the start of the next. The true overlap ends exactly where ``prev_text``
-    ends, so the matched block must reach (nearly) the end of ``prev_text``'s
-    tail — this stops a common phrase deeper in the text from being mistaken
-    for the seam and cutting real content.
+    the start of the next. Two ASR passes over the same audio rarely agree
+    word-for-word (numbers rendered as digits vs. words, fillers, garbles),
+    so requiring one long contiguous exact match misses most real seams.
+    Instead, the optimal alignment's matching blocks (>= 3 words each) are
+    collected; the seam is accepted when they total ``min_match_words`` and
+    the last block ends within ``tail_slack`` words of ``prev_text``'s end —
+    the true overlap always ends where ``prev_text`` ends, which stops a
+    common phrase deeper in the text from being mistaken for the seam.
+    ``next_text`` is then cut after the last matched block.
 
-    Conservative by design: when no confident match is found, ``next_text``
-    is returned unchanged. Duplicating a few seconds of conversation is far
-    preferable to silently losing it."""
+    Conservative by design: when no confident alignment is found,
+    ``next_text`` is returned unchanged. Duplicating a few seconds of
+    conversation is preferable to silently losing it."""
     if not prev_text or not next_text:
         return next_text
     prev_tokens = _normalized_tokens(prev_text)[-window_words:]
@@ -164,17 +170,177 @@ def strip_overlap(
 
     a = [t[0] for t in prev_tokens]
     b = [t[0] for t in next_tokens]
-    match = difflib.SequenceMatcher(None, a, b, autojunk=False).find_longest_match(
-        0, len(a), 0, len(b)
-    )
-    if match.size < min_match_words:
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    blocks = [blk for blk in matcher.get_matching_blocks() if blk.size >= 3]
+    if not blocks:
         return next_text
-    if match.a + match.size < len(a) - 5:
+    if sum(blk.size for blk in blocks) < min_match_words:
+        return next_text
+    last = blocks[-1]
+    if last.a + last.size < len(a) - tail_slack:
         return next_text
 
-    cut_offset = next_tokens[match.b + match.size - 1][1]
+    cut_offset = next_tokens[last.b + last.size - 1][1]
     remainder = next_text[cut_offset:]
     return re.sub(r"^[\s.,;:!?\-—–]+", "", remainder)
+
+
+# Standalone lines that ASR models add around a chunk's transcript. Mid-file
+# they read as false endings ("[END OF RECORDING]" halfway through a call).
+_ASR_META_LINE = re.compile(
+    r"^\s*[\[\(]?\s*(?:the\s+)?(?:beginning|begin|start|end)\s+of\s+(?:the\s+)?"
+    r"(?:recording|audio|transcript|transcription|call|meeting)\s*[\]\)]?\s*\.?\s*$"
+    r"|^\s*[\[\(]?\s*transcri(?:pt|ption)\s+(?:begins?|ends?|starts?)\s*(?:here)?\s*[\]\)]?\s*\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def strip_asr_meta_markers(text: str) -> str:
+    """Remove standalone ASR meta-marker lines the model adds around a chunk's
+    transcript ("[END OF RECORDING]", "(Beginning of audio)", ...).
+
+    Only whole lines matching known marker shapes are removed — content
+    sentences that merely mention a recording, and pipeline markers like
+    "[TRANSCRIPTION GAP: ...]", are untouched."""
+    if not text:
+        return text
+    lines = [line for line in text.split("\n") if not _ASR_META_LINE.match(line)]
+    return "\n".join(lines).strip()
+
+
+# --- Learnings-document merging (Internal Discussion, chunked runs) ---
+# Chunked runs emit the document's end sections once per processed section.
+# These maps recognise their headings in any of the shapes the model uses
+# ("### **10. Unanswered Questions**", "**Consolidated Mental Models**", ...).
+_END_SECTION_KEYS = {
+    "consolidatedmentalmodels": "mental_models",
+    "unansweredquestions": "unanswered",
+    "followupsactionitems": "followups",
+    "followupactionitems": "followups",
+    "followups": "followups",
+    "actionitems": "followups",
+}
+_END_SECTION_TITLES = {
+    "mental_models": "Consolidated Mental Models",
+    "unanswered": "Unanswered Questions",
+    "followups": "Follow-Ups / Action Items",
+}
+
+
+def _heading_text(line: str) -> "str | None":
+    """Return the inner text of a markdown heading line, else None.
+
+    Recognises '### Heading', '### **Heading**' and full-line '**Heading**'
+    forms; strips bold markers, list numbering, and surrounding quotes."""
+    s = line.strip()
+    if not s:
+        return None
+    m = re.match(r"^#{1,6}\s+(.*)$", s)
+    if m:
+        s = m.group(1).strip()
+    elif not re.match(r"^\*\*.+\*\*:?\s*$", s):
+        return None
+    s = s.strip("*").strip().rstrip(":").strip()
+    s = re.sub(r"^\(?\d+[.)]?\)?\s*[-—.:]?\s*", "", s)
+    return s.strip("\"'“”‘’").strip()
+
+
+def _renumber_ordered_items(lines: List[str]) -> List[str]:
+    """Renumber '1. ...' items sequentially, preserving original spacing."""
+    out: List[str] = []
+    counter = 0
+    for line in lines:
+        m = re.match(r"^(\s*)(\d+)([.)])(\s+)(.*)$", line)
+        if m:
+            counter += 1
+            out.append(f"{m.group(1)}{counter}{m.group(3)}{m.group(4)}{m.group(5)}")
+        else:
+            out.append(line)
+    return out
+
+
+def _dedup_key(line: str) -> str:
+    stripped = re.sub(r"^\s*(?:[*\-+]|\d+[.)])\s*", "", line)
+    return re.sub(r"[^a-z0-9]+", "", stripped.lower())
+
+
+def merge_learning_doc_sections(notes_text: str) -> str:
+    """Merge the per-section end blocks of a chunked learnings document.
+
+    When an Internal Discussion transcript is processed in sections, each
+    section emits its own "Consolidated Mental Models", "Unanswered
+    Questions" and "Follow-Ups / Action Items" blocks, and topic numbering
+    restarts at 1. This deterministically (no LLM, no content loss):
+
+    1. keeps all topic sections in order and renumbers them sequentially,
+    2. collects the three end sections from everywhere in the text and
+       emits each exactly once, at the end, in the canonical order,
+    3. renumbers the items inside Unanswered Questions / Follow-Ups and
+       drops exact-duplicate lines within each merged end section.
+
+    Text without any recognised end-section heading is returned unchanged.
+    """
+    if not notes_text or not notes_text.strip():
+        return notes_text
+
+    body: List[str] = []
+    buckets: Dict[str, List[str]] = {"mental_models": [], "unanswered": [], "followups": []}
+    current: "str | None" = None  # None -> body, else bucket key
+
+    for line in notes_text.split("\n"):
+        heading = _heading_text(line)
+        if heading is not None:
+            key = _END_SECTION_KEYS.get(re.sub(r"[^a-z0-9]+", "", heading.lower()))
+            if key:
+                current = key
+                continue
+            current = None
+        if current is None:
+            body.append(line)
+        elif line.strip():
+            buckets[current].append(line)
+
+    if not any(buckets.values()):
+        return notes_text
+
+    # Renumber topic headings sequentially across the whole body.
+    topic_count = 0
+    for i, line in enumerate(body):
+        if _heading_text(line) is None:
+            continue
+        m = re.match(r"^(\s*(?:#{1,6}\s+)?\**\s*)(\d+)([.)])(\s+)(.*)$", line)
+        if m:
+            topic_count += 1
+            body[i] = f"{m.group(1)}{topic_count}{m.group(3)}{m.group(4)}{m.group(5)}"
+
+    out_lines = [line for line in body]
+    while out_lines and not out_lines[-1].strip():
+        out_lines.pop()
+
+    for key in ("mental_models", "unanswered", "followups"):
+        items = buckets[key]
+        if not items:
+            continue
+        seen = set()
+        unique: List[str] = []
+        for item in items:
+            k = _dedup_key(item)
+            if k and k in seen:
+                continue
+            if k:
+                seen.add(k)
+            unique.append(item)
+        if key in ("unanswered", "followups"):
+            unique = _renumber_ordered_items(unique)
+        title = _END_SECTION_TITLES[key]
+        if key == "mental_models" and topic_count:
+            topic_count += 1
+            title = f"{topic_count}. {title}"
+        out_lines.append("")
+        out_lines.append(f"### **{title}**")
+        out_lines.extend(unique)
+
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines)).strip()
 
 
 def estimate_chunk_count(word_count: int, chunk_size: int) -> int:
