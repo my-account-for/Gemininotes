@@ -274,6 +274,12 @@ AVAILABLE_MODELS = {
     "Gemini 3 Pro Preview": "gemini-3-pro-preview",
     "Gemini 3.5 Flash": "gemini-3.5-flash",
 }
+# Model applied to every pipeline stage when the "use Flash for everything"
+# toggle in Settings & Models is on.
+FLASH_ALL_MODEL = "Gemini 3.5 Flash"
+# AppState fields overridden by that toggle (used to back up / restore the
+# user's per-stage picks when the toggle flips).
+MODEL_STAGE_FIELDS = ("notes_model", "refinement_model", "speaker_id_model", "transcription_model", "chat_model")
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Internal Discussion", "Custom"]
 MAX_TOPIC_DISCOVERY_FILES = 4  # Number of PDFs to scan for topic discovery
 SPEAKER_ID_FLOW_OPTION = "Option 4: Speaker ID Flow"
@@ -317,6 +323,7 @@ class AppState:
     speaker_id_model: str = "Gemini 3 Pro Preview"
     transcription_model: str =  "Gemini 3.0 Flash"
     chat_model: str = "Gemini 2.5 Pro"
+    use_flash_for_all: bool = False
     refinement_enabled: bool = True
     chunk_word_size: int = CHUNK_WORD_SIZE
     add_context_enabled: bool = False
@@ -1709,17 +1716,42 @@ def render_input_and_processing_tab(state: AppState):
                 if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
 
             st.divider()
-            state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
-            state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
-            _sid_default = state.speaker_id_model if state.speaker_id_model in AVAILABLE_MODELS else list(AVAILABLE_MODELS.keys())[0]
-            state.speaker_id_model = st.selectbox(
-                "Speaker ID Model",
-                list(AVAILABLE_MODELS.keys()),
-                index=list(AVAILABLE_MODELS.keys()).index(_sid_default),
-                help="Used only for the Speaker ID Flow (Expert Meeting Option 4). A stronger model produces better speaker separation and tag continuity across long transcripts.",
+            _was_flash_all = state.use_flash_for_all
+            state.use_flash_for_all = st.toggle(
+                f"Use {FLASH_ALL_MODEL} for everything",
+                value=state.use_flash_for_all,
+                help=f"Overrides every model below with {FLASH_ALL_MODEL} — the fastest, cheapest run. "
+                     "Turning it off restores your previous per-stage selections.",
             )
-            state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
-            state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
+            if state.use_flash_for_all and not _was_flash_all:
+                # Remember the per-stage picks so switching back restores them.
+                st.session_state["_model_picks_backup"] = {f: getattr(state, f) for f in MODEL_STAGE_FIELDS}
+            elif _was_flash_all and not state.use_flash_for_all:
+                for field_name, value in st.session_state.get("_model_picks_backup", {}).items():
+                    if field_name in MODEL_STAGE_FIELDS and value in AVAILABLE_MODELS:
+                        setattr(state, field_name, value)
+
+            if state.use_flash_for_all:
+                # Re-assert every rerun: cheap, idempotent, and keeps every
+                # downstream read of state.<stage>_model on Flash.
+                for field_name in MODEL_STAGE_FIELDS:
+                    setattr(state, field_name, FLASH_ALL_MODEL)
+                st.caption(
+                    f"All stages (notes, refinement, speaker ID, transcription, chat) are locked to "
+                    f"{FLASH_ALL_MODEL}. Turn the toggle off to choose models per stage."
+                )
+            else:
+                state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
+                state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
+                _sid_default = state.speaker_id_model if state.speaker_id_model in AVAILABLE_MODELS else list(AVAILABLE_MODELS.keys())[0]
+                state.speaker_id_model = st.selectbox(
+                    "Speaker ID Model",
+                    list(AVAILABLE_MODELS.keys()),
+                    index=list(AVAILABLE_MODELS.keys()).index(_sid_default),
+                    help="Used only for the Speaker ID Flow (Expert Meeting Option 4). A stronger model produces better speaker separation and tag continuity across long transcripts.",
+                )
+                state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
+                state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
 
             st.divider()
             st.caption("Browser notifications for processing completion.")
