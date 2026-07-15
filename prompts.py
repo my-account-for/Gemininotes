@@ -306,6 +306,63 @@ EXECUTIVE_SUMMARY_PROMPT = """Generate a structured executive summary from the f
 {notes}
 """
 
+# --- NOTE POST-PROCESSING PROMPTS (Output & History tab) ---
+# Both passes run on a finished note and carry a strict content-preservation
+# contract. Merging may only club adjacent blocks, carrying answer bullets
+# over verbatim. Topic grouping never rewrites text at all: the model returns
+# only a JSON plan over block indices and the app reorders whole blocks
+# deterministically (see chunking.split_qa_blocks / reorder_qa_blocks).
+
+QA_MERGE_PROMPT = """You are consolidating finished Q&A-format meeting notes. Some back-to-back Q&A blocks are small and cover the same narrow point — combined, they would read as one block without losing anything. Your task is to merge ONLY such blocks and reproduce everything else untouched.
+
+## WHAT COUNTS AS MERGEABLE
+Two (or more) CONSECUTIVE blocks qualify only if ALL of these hold:
+- They are directly back to back in the notes (no other block between them).
+- They clearly cover the same narrow topic — e.g. one is a follow-up, a clarification, or a rephrasing of the other.
+- At least one of them is small (roughly 1–3 bullets). Never merge two long, detailed blocks.
+- Merging would not change the meaning, emphasis, or speaker attribution of anything said.
+When in doubt, DO NOT merge. Returning the notes with only one or two merges — or none at all — is a perfectly good outcome.
+
+## HOW TO MERGE
+- **Question heading:** Keep the broader of the original questions verbatim as the merged heading. If both questions are needed, join their original wordings with a minimal connector ("... and ..." / "; "). Do NOT write a brand-new question in your own words.
+- **Answer bullets:** Copy EVERY bullet from ALL merged blocks word-for-word, keeping the first block's bullets first. Do NOT reword, condense, drop, or reorder anything. The only exception: if two bullets are word-for-word identical, keep one.
+
+## HARD RULES
+1. NEVER merge blocks that are not adjacent, and NEVER move a block to make it adjacent. The order of blocks must stay exactly as in the input.
+2. Every block you do not merge — plus any intro or background section before the first question — must be reproduced EXACTLY as it appears in the input: same words, same bold formatting, same bullets, same spacing.
+3. Do not add topic headings, summaries, commentary, or any text of your own.
+4. Do not fix typos, grammar, or wording anywhere — this is a structural pass only.
+5. Keep exactly one blank line between blocks.
+
+## OUTPUT
+Output ONLY the complete processed notes, from the first line to the last. No preamble, no explanation, no code fences.
+
+---
+**NOTES:**
+{notes}
+"""
+
+QA_TOPIC_GROUPING_PROMPT = """You are organizing finished meeting notes. Below is a numbered list of the note's Q&A blocks — each entry shows the block's question heading and a snippet of its answer.
+
+## TASK
+1. First, list the distinct TOPICS covered across all blocks, in order of each topic's first appearance in the notes.
+2. Assign EVERY block to exactly one topic, so same-topic blocks can be relocated next to each other without breaking the flow of the conversation.
+
+## OUTPUT
+Return ONLY valid JSON with no other text, in exactly this shape:
+{{"topics": [{{"name": "Topic name", "blocks": [0, 2, 5]}}, {{"name": "Another topic", "blocks": [1, 3]}}]}}
+
+## RULES
+- Every block index from 0 to {max_index} must appear EXACTLY ONCE across all topics ({block_count} blocks in total).
+- Order the topics by the first appearance of their earliest block, so the overall flow of the conversation is preserved.
+- Within a topic, keep block indices in ascending order.
+- Be conservative: a block joins a topic only when it clearly belongs there. A topic with a single block is fine — do NOT force unrelated blocks together or balance topic sizes.
+- Use short, specific topic names drawn from the content (e.g. "Pricing & take rates", not "Miscellaneous").
+
+## Q&A BLOCKS
+{block_list}
+"""
+
 REFINEMENT_INSTRUCTIONS = {
     "Expert Meeting": "Pay special attention to industry jargon, technical terms, company names, and domain-specific terminology. Preserve all proper nouns exactly.",
     "Earnings Call": "Pay special attention to financial terminology (EPS, EBITDA, basis points, margin, guidance, revenue, etc.), company names, ticker symbols, analyst names, and numerical data. Preserve all figures exactly as spoken.",

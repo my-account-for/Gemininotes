@@ -33,6 +33,9 @@ from chunking import (
     strip_overlap,
     strip_asr_meta_markers,
     merge_learning_doc_sections,
+    split_qa_blocks,
+    flatten_grouping_plan,
+    reorder_qa_blocks,
 )
 from progress import (
     ProgressTracker,
@@ -54,6 +57,8 @@ from prompts import (
     PROMPT_CONTINUATION,
     VALIDATION_DETAILED_PROMPT,
     EXECUTIVE_SUMMARY_PROMPT,
+    QA_MERGE_PROMPT,
+    QA_TOPIC_GROUPING_PROMPT,
     REFINEMENT_INSTRUCTIONS,
     SPEAKER_ID_PROMPT_INITIAL,
     SPEAKER_ID_PROMPT_CONTINUATION,
@@ -248,6 +253,11 @@ TRANSCRIPT_LOW_DENSITY_WPM = 50
 # below this fraction of the input words means the model compressed or dropped
 # passages; the run falls back to the unrefined text rather than lose content.
 REFINE_MIN_OUTPUT_RATIO = 0.6
+# The Q&A-merge post-processing pass must also preserve content: the only
+# words it may remove are merged-away question headings and exact-duplicate
+# bullets, so an output below this fraction of the input words is flagged in
+# the review UI before the user applies it.
+POSTPROCESS_MIN_WORD_RATIO = 0.9
 # Chunks are non-overlapping and aligned to speaker-turn boundaries (see
 # chunking.py). The trade-off: larger sections mean fewer seams and faster
 # runs, but the model compresses more per call — merging similar questions
@@ -2300,6 +2310,116 @@ def run_validation_in_chunks(notes: str, transcript: str, model_name: str) -> li
     return [r1.text, r2.text]
 
 
+# --- NOTE POST-PROCESSING (Output & History tab) ---
+
+def _strip_code_fences(text: str) -> str:
+    """Remove a wrapping markdown code fence from a model response, if any."""
+    text = text.strip()
+    if text.startswith("```"):
+        fence_lines = text.split("\n")[1:]
+        if fence_lines and fence_lines[-1].strip() == "```":
+            fence_lines = fence_lines[:-1]
+        text = "\n".join(fence_lines).strip()
+    return text
+
+
+def run_qa_merge(notes: str, model_name: str) -> dict:
+    """LLM pass that clubs small back-to-back Q&A blocks covering the same point.
+
+    The prompt's contract is strict — answer bullets are carried over verbatim
+    and unmerged blocks reproduced exactly — so the output must stay close to
+    the input length. The word ratio is returned for the review UI to flag."""
+    model = genai.GenerativeModel(model_name)
+    response = generate_with_retry(
+        model, QA_MERGE_PROMPT.format(notes=notes), generation_config=GENERATION_CONFIG
+    )
+    finish = _finish_reason_name(response)
+    if finish not in _OK_FINISH_REASONS:
+        raise ValueError(f"Merge pass did not complete (finish reason: {finish}).")
+    merged = _strip_code_fences(_extract_response_text(response))
+    if not merged:
+        raise ValueError("Merge pass returned an empty response.")
+    return {
+        "text": merged,
+        "word_ratio": len(merged.split()) / max(1, len(notes.split())),
+        "tokens": safe_get_token_count(response),
+    }
+
+
+def run_topic_grouping(notes: str, model_name: str) -> dict:
+    """Relocate same-topic Q&A blocks next to each other without rewriting text.
+
+    Two steps: the model first lists the topics and assigns every block to one,
+    returning only a JSON plan over block indices; the note is then reassembled
+    deterministically in Python from whole, untouched blocks — so this pass
+    cannot change a single word of the note."""
+    preamble, blocks = split_qa_blocks(notes)
+    if len(blocks) < 3:
+        raise ValueError(f"Topic grouping needs at least 3 Q&A blocks; this note has {len(blocks)}.")
+
+    def _heading(block: str) -> str:
+        return block.split("\n", 1)[0].strip().strip("*").strip()
+
+    # Compact digest per block — heading plus the first answer bullets — so the
+    # model clusters on content without needing (or being able to alter) the
+    # full text.
+    digests = []
+    for i, block in enumerate(blocks):
+        block_lines = [ln.strip() for ln in block.split("\n") if ln.strip()]
+        snippet = " ".join(ln for ln in block_lines[1:] if ln.startswith("-"))[:220]
+        digests.append(f"[{i}] {block_lines[0]}" + (f"\n    {snippet}" if snippet else ""))
+
+    prompt = QA_TOPIC_GROUPING_PROMPT.format(
+        block_count=len(blocks), max_index=len(blocks) - 1, block_list="\n".join(digests)
+    )
+    model = genai.GenerativeModel(model_name)
+    response = generate_with_retry(model, prompt, generation_config=GENERATION_CONFIG)
+    raw_json = _strip_code_fences(_extract_response_text(response))
+    json_match = re.search(r'\{[\s\S]*\}', raw_json)
+    if json_match:
+        raw_json = json_match.group(0)
+    plan = json.loads(raw_json)
+    topics = plan.get("topics") if isinstance(plan, dict) else None
+    if not isinstance(topics, list) or not topics:
+        raise ValueError("Topic discovery returned an invalid grouping plan.")
+
+    order, cleaned_topics = flatten_grouping_plan(topics, len(blocks))
+    topic_summary = [
+        {"name": t["name"], "headings": [_heading(blocks[i]) for i in t["blocks"]]}
+        for t in cleaned_topics
+    ]
+    return {
+        "text": reorder_qa_blocks(preamble, blocks, order),
+        "topics": topic_summary,
+        "moved": sum(1 for pos, idx in enumerate(order) if pos != idx),
+        "tokens": safe_get_token_count(response),
+    }
+
+
+def run_note_postprocess(notes: str, do_merge: bool, do_group: bool, model_name: str) -> dict:
+    """Run the selected post-processing passes in sequence — merge first, then
+    topic grouping on the merged text. Returns the processed text plus
+    per-pass stats for the review UI."""
+    _, source_blocks = split_qa_blocks(notes)
+    result = {
+        "text": notes,
+        "source_words": len(notes.split()),
+        "source_blocks": len(source_blocks),
+        "merge": None,
+        "grouping": None,
+        "tokens": 0,
+    }
+    if do_merge:
+        result["merge"] = run_qa_merge(notes, model_name)
+        result["text"] = result["merge"]["text"]
+        result["tokens"] += result["merge"]["tokens"]
+    if do_group:
+        result["grouping"] = run_topic_grouping(result["text"], model_name)
+        result["text"] = result["grouping"]["text"]
+        result["tokens"] += result["grouping"]["tokens"]
+    return result
+
+
 def _render_history_sidebar(state: AppState, notes: List[dict]):
     """Compact note history + analytics in the sidebar, so the main page
     stays focused on the active note."""
@@ -2484,6 +2604,112 @@ Your generated notes, transcripts, and chat history will appear here.
                 )
     with fb_col:
         st.feedback("thumbs", key=f"fb_{active_note['id']}")
+
+    # --- POST-PROCESS NOTES ---
+    if (edited_content or '').strip():
+        st.divider()
+        st.subheader("Post-Process Notes")
+        st.caption(
+            "Optional cleanup passes for the finished note. Select one or both and process — "
+            "the result is shown for review before anything replaces the note."
+        )
+        _, pp_source_blocks = split_qa_blocks(edited_content)
+        if len(pp_source_blocks) < 2:
+            st.info(
+                "No Q&A blocks detected in this note (bold question headings), "
+                "so there is nothing to merge or regroup."
+            )
+        else:
+            pp_key = f"postprocess_{note_id}"
+            opt_merge_col, opt_group_col = st.columns(2)
+            with opt_merge_col:
+                do_merge = st.checkbox(
+                    "Merge back-to-back Q&As",
+                    key=f"pp_merge_{note_id}",
+                    help="Clubs small adjacent Q&A blocks that clearly cover the same point into one "
+                         "block, reducing the number of Q&A blocks. Answer bullets are carried over "
+                         "word-for-word — nothing is reworded, and unrelated neighbours are left alone.",
+                )
+            with opt_group_col:
+                do_group = st.checkbox(
+                    "Group similar topics together",
+                    key=f"pp_group_{note_id}",
+                    help="First lists every topic in the note, then relocates whole Q&A blocks so "
+                         "same-topic questions sit together without breaking the conversation's flow. "
+                         "Blocks are only moved, never rewritten.",
+                )
+            if do_merge and do_group:
+                st.caption("Both selected: Q&As are merged first, then the merged note is regrouped by topic.")
+
+            if st.button("Process Output", key=f"pp_btn_{note_id}", type="secondary",
+                         disabled=not (do_merge or do_group)):
+                with st.spinner("Post-processing notes — this may take a moment..."):
+                    try:
+                        pp_model = AVAILABLE_MODELS.get(state.notes_model, "gemini-2.5-pro")
+                        st.session_state[pp_key] = run_note_postprocess(
+                            edited_content, do_merge, do_group, pp_model
+                        )
+                    except Exception as e:
+                        st.session_state[pp_key] = {"error": str(e)}
+
+            if pp_key in st.session_state:
+                pp = st.session_state[pp_key]
+                if pp.get("error"):
+                    st.error(pp["error"], title="Post-processing failed")
+                else:
+                    merge_stats = pp.get("merge")
+                    grouping = pp.get("grouping")
+                    final_blocks = len(split_qa_blocks(pp["text"])[1])
+                    words_after = len(pp["text"].split())
+
+                    s1, s2, s3 = st.columns(3)
+                    s1.metric("Q&A blocks", f"{final_blocks}",
+                              delta=(final_blocks - pp["source_blocks"]) or None,
+                              delta_color="inverse")
+                    s2.metric("Words", f"{words_after:,}",
+                              delta=(words_after - pp["source_words"]) or None)
+                    s3.metric("Blocks relocated", f"{grouping['moved']}" if grouping else "—")
+
+                    if merge_stats and merge_stats["word_ratio"] < POSTPROCESS_MIN_WORD_RATIO:
+                        st.warning(
+                            f"The merged output is only {merge_stats['word_ratio']:.0%} of the original "
+                            "length — the model may have dropped content. Review the preview carefully "
+                            "before applying.",
+                            title="Length check",
+                        )
+
+                    if grouping and grouping["topics"]:
+                        with st.expander(f"Topics identified ({len(grouping['topics'])})"):
+                            for topic in grouping["topics"]:
+                                st.markdown(f"**{topic['name']}**")
+                                for heading in topic["headings"]:
+                                    st.markdown(f"- {heading}")
+
+                    st.markdown("**Preview**")
+                    with st.container(height=500, border=True):
+                        st.markdown(pp["text"])
+
+                    apply_col, discard_col, dl_col = st.columns([1, 1, 2])
+                    with apply_col:
+                        if st.button("Apply to Note", key=f"pp_apply_{note_id}",
+                                     type="primary", use_container_width=True):
+                            database.update_note(note_id, {"content": pp["text"]})
+                            # Reset the editor and stale validation so the updated note reloads cleanly
+                            st.session_state.pop(f"output_editor_{note_id}", None)
+                            st.session_state.pop(f"validation_result_{note_id}", None)
+                            st.session_state.pop(pp_key, None)
+                            st.toast("Post-processed notes applied.", icon="✅")
+                            st.rerun()
+                    with discard_col:
+                        if st.button("Discard", key=f"pp_discard_{note_id}", use_container_width=True):
+                            st.session_state.pop(pp_key, None)
+                            st.rerun()
+                    with dl_col:
+                        st.download_button(
+                            "Download processed (.md)", data=pp["text"],
+                            file_name=f"PostProcessed_{fname}.md", mime="text/markdown",
+                            key=f"pp_dl_{note_id}", use_container_width=True,
+                        )
 
     # --- VALIDATE OUTPUT COMPLETENESS ---
     if final_transcript:

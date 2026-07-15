@@ -343,6 +343,89 @@ def merge_learning_doc_sections(notes_text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines)).strip()
 
 
+# --- Q&A-block post-processing helpers (Output & History tab) ---
+# The LLM's role in post-processing is deliberately narrow: topic grouping
+# only ever returns a plan over block indices, and these helpers do the
+# actual splitting and reassembly deterministically — so regrouping cannot
+# change a single word of the note.
+
+
+def split_qa_blocks(notes_text: str) -> Tuple[str, List[str]]:
+    """Split finished notes into ``(preamble, blocks)`` at full-line bold
+    headings.
+
+    A block is a bold question/topic heading — a line that both starts and
+    ends with ``**`` — plus everything under it up to the next heading. The
+    preamble is anything before the first heading (e.g. an expert-background
+    section). Bold speaker attributions inside answers (``- **Name:** ...``)
+    start with ``-`` so they never match. Rejoining preamble + blocks with
+    blank lines reproduces the note's content."""
+    if not notes_text or not notes_text.strip():
+        return "", []
+    lines = notes_text.split("\n")
+    heading_idx = [
+        i for i, line in enumerate(lines)
+        if line.strip().startswith("**") and line.strip().endswith("**") and len(line.strip()) > 4
+    ]
+    if not heading_idx:
+        return notes_text.strip(), []
+    preamble = "\n".join(lines[: heading_idx[0]]).strip()
+    blocks: List[str] = []
+    for start, end in zip(heading_idx, heading_idx[1:] + [len(lines)]):
+        block = "\n".join(lines[start:end]).strip()
+        if block:
+            blocks.append(block)
+    return preamble, blocks
+
+
+def flatten_grouping_plan(topics, block_count: int) -> Tuple[List[int], List[Dict]]:
+    """Turn an LLM topic-grouping plan into a full ordering of block indices.
+
+    ``topics`` is the parsed plan — a list of ``{"name": str, "blocks":
+    [int]}``. The plan is treated as untrusted: duplicate, out-of-range, and
+    non-integer indices are dropped, and any index the model forgot is
+    re-inserted right after its closest preceding original neighbour, so
+    every block appears exactly once and local flow is preserved.
+
+    Returns ``(order, cleaned_topics)`` where ``order`` is a permutation of
+    ``range(block_count)`` and ``cleaned_topics`` mirrors the plan with only
+    the indices that survived cleaning (empty topics dropped)."""
+    order: List[int] = []
+    seen = set()
+    cleaned: List[Dict] = []
+    for topic in topics or []:
+        if not isinstance(topic, dict):
+            continue
+        name = str(topic.get("name", "")).strip() or "Untitled topic"
+        indices: List[int] = []
+        for idx in topic.get("blocks", []) or []:
+            if isinstance(idx, bool) or not isinstance(idx, int):
+                continue
+            if 0 <= idx < block_count and idx not in seen:
+                seen.add(idx)
+                indices.append(idx)
+        if indices:
+            order.extend(indices)
+            cleaned.append({"name": name, "blocks": indices})
+    for idx in range(block_count):
+        if idx in seen:
+            continue
+        pos = 0
+        for prev in range(idx - 1, -1, -1):
+            if prev in seen:
+                pos = order.index(prev) + 1
+                break
+        order.insert(pos, idx)
+        seen.add(idx)
+    return order, cleaned
+
+
+def reorder_qa_blocks(preamble: str, blocks: List[str], order: List[int]) -> str:
+    """Reassemble a note from whole ``blocks`` in ``order``, preamble first."""
+    parts = ([preamble] if preamble and preamble.strip() else []) + [blocks[i] for i in order]
+    return "\n\n".join(parts).strip()
+
+
 def estimate_chunk_count(word_count: int, chunk_size: int) -> int:
     """Estimate how many chunks a transcript of ``word_count`` words will
     produce. Exact for word-aligned input; paragraph rounding can shift the

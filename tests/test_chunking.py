@@ -12,6 +12,9 @@ from chunking import (
     strip_overlap,
     strip_asr_meta_markers,
     merge_learning_doc_sections,
+    split_qa_blocks,
+    flatten_grouping_plan,
+    reorder_qa_blocks,
 )
 
 
@@ -290,3 +293,103 @@ def test_merge_learning_doc_preserves_all_content():
 def test_merge_learning_doc_without_end_sections_unchanged():
     doc = "### **1. Topic**\n* a point\n\n### **2. Another**\n* b point"
     assert merge_learning_doc_sections(doc) == doc
+
+
+# --- Q&A post-processing helpers: split / grouping plan / reorder ---
+
+QA_NOTES = """Expert background:
+- 20 years in hotel distribution.
+
+**What is the market size?**
+- Roughly $2B, growing 15% a year.
+
+**How do hotels view OTAs?**
+- Mixed: they value the demand but resent take rates.
+- **Deep Kalra:** attribution bullets must not be treated as headings.
+
+**What are the take rates?**
+- 15-25% depending on chain scale.
+
+**Any regulatory risks?**
+- Rate-parity clauses under scrutiny in the EU.
+"""
+
+
+def test_split_qa_blocks_basic():
+    preamble, blocks = split_qa_blocks(QA_NOTES)
+    assert preamble.startswith("Expert background")
+    assert len(blocks) == 4
+    assert blocks[0].startswith("**What is the market size?**")
+    assert "$2B" in blocks[0]
+
+
+def test_split_qa_blocks_ignores_inline_bold_attribution():
+    _, blocks = split_qa_blocks(QA_NOTES)
+    # The bold "- **Deep Kalra:** ..." line stays inside its answer block.
+    assert "Deep Kalra" in blocks[1]
+
+
+def test_split_qa_blocks_no_headings():
+    text = "Just some plain notes with no bold headings."
+    preamble, blocks = split_qa_blocks(text)
+    assert preamble == text
+    assert blocks == []
+
+
+def test_split_qa_blocks_empty_input():
+    assert split_qa_blocks("") == ("", [])
+    assert split_qa_blocks("  \n ") == ("", [])
+
+
+def test_split_and_reorder_identity_is_lossless():
+    preamble, blocks = split_qa_blocks(QA_NOTES)
+    rejoined = reorder_qa_blocks(preamble, blocks, list(range(len(blocks))))
+    assert rejoined.split() == QA_NOTES.split()
+
+
+def test_reorder_qa_blocks_moves_whole_blocks():
+    preamble, blocks = split_qa_blocks(QA_NOTES)
+    text = reorder_qa_blocks(preamble, blocks, [0, 2, 1, 3])
+    # Take-rates block now directly follows market size; preamble stays first.
+    assert (text.index("Expert background")
+            < text.index("**What is the market size?**")
+            < text.index("**What are the take rates?**")
+            < text.index("**How do hotels view OTAs?**")
+            < text.index("**Any regulatory risks?**"))
+    # Reordering must not lose or duplicate a single word.
+    assert sorted(text.split()) == sorted(QA_NOTES.split())
+
+
+def test_flatten_grouping_plan_valid_plan():
+    topics = [
+        {"name": "Market", "blocks": [0, 2]},
+        {"name": "Risk", "blocks": [1, 3]},
+    ]
+    order, cleaned = flatten_grouping_plan(topics, 4)
+    assert order == [0, 2, 1, 3]
+    assert [t["name"] for t in cleaned] == ["Market", "Risk"]
+
+
+def test_flatten_grouping_plan_repairs_missing_duplicate_and_out_of_range():
+    # The model repeated block 1, forgot block 2, and invented block 9.
+    topics = [
+        {"name": "A", "blocks": [0, 1]},
+        {"name": "B", "blocks": [1, 3, 9]},
+    ]
+    order, cleaned = flatten_grouping_plan(topics, 4)
+    assert sorted(order) == [0, 1, 2, 3]  # a full permutation — nothing lost
+    # The forgotten block is re-inserted right after its original neighbour.
+    assert order.index(2) == order.index(1) + 1
+    assert cleaned == [{"name": "A", "blocks": [0, 1]}, {"name": "B", "blocks": [3]}]
+
+
+def test_flatten_grouping_plan_garbage_falls_back_to_original_order():
+    order, cleaned = flatten_grouping_plan([{"name": "X", "blocks": ["a", None, True]}], 3)
+    assert order == [0, 1, 2]
+    assert cleaned == []
+
+
+def test_flatten_grouping_plan_empty_plan():
+    order, cleaned = flatten_grouping_plan([], 3)
+    assert order == [0, 1, 2]
+    assert cleaned == []
