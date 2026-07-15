@@ -9,6 +9,7 @@ from chunking import (
     create_chunks_with_context,
     estimate_chunk_count,
     cleanup_stitched_notes,
+    strip_overlap,
 )
 
 
@@ -132,3 +133,54 @@ def test_cleanup_preserves_distinct_headings():
     cleaned = cleanup_stitched_notes(notes)
     assert "**Heading A**" in cleaned
     assert "**Heading B**" in cleaned
+
+
+# --- strip_overlap: dedup of overlapping audio-chunk transcripts ---
+
+def test_strip_overlap_removes_duplicated_seam():
+    prev = "So the quick brown fox jumps over the lazy dog near the river bank today"
+    nxt = "jumps over the lazy dog near the river bank today and then we discussed pricing"
+    out = strip_overlap(prev, nxt)
+    assert out == "and then we discussed pricing"
+
+
+def test_strip_overlap_tolerates_punctuation_and_case_differences():
+    # Two ASR passes over the same audio render punctuation/casing differently.
+    prev = "He said the package gives you fifty five thousand dollars of credit, right? Yes exactly."
+    nxt = "The package gives you fifty five thousand Dollars of credit right... yes, EXACTLY! Then the next topic began."
+    out = strip_overlap(prev, nxt)
+    assert out == "Then the next topic began."
+
+
+def test_strip_overlap_no_match_returns_unchanged():
+    prev = "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+    nxt = "one two three four five six seven eight nine ten"
+    assert strip_overlap(prev, nxt) == nxt
+
+
+def test_strip_overlap_short_spurious_match_is_not_cut():
+    # A common short phrase must not be mistaken for the seam.
+    prev = "we talked about revenue you know and margins were up a lot this quarter overall"
+    nxt = "you know the other thing is churn stayed flat and retention improved further still"
+    assert strip_overlap(prev, nxt) == nxt
+
+
+def test_strip_overlap_requires_match_at_prev_tail():
+    # The duplicated words exist but prev continues well past them, so this
+    # is not the seam — next must be returned unchanged.
+    shared = "one two three four five six seven eight nine ten"
+    prev = shared + " " + " ".join(f"filler{i}" for i in range(30))
+    nxt = shared + " completely new content follows here"
+    assert strip_overlap(prev, nxt) == nxt
+
+
+def test_strip_overlap_empty_inputs():
+    assert strip_overlap("", "some text") == "some text"
+    assert strip_overlap("some text", "") == ""
+
+
+def test_strip_overlap_whole_next_duplicated():
+    # A tiny tail chunk can be fully contained in the overlap window.
+    prev = " ".join(f"word{i}" for i in range(40))
+    nxt = " ".join(f"word{i}" for i in range(28, 40))
+    assert strip_overlap(prev, nxt) == ""
