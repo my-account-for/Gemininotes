@@ -26,7 +26,7 @@ import copy
 
 # --- Local Imports ---
 import database
-from chunking import create_chunks_with_context, estimate_chunk_count, cleanup_stitched_notes
+from chunking import create_chunks_with_context, estimate_chunk_count, cleanup_stitched_notes, strip_overlap
 from progress import (
     ProgressTracker,
     build_processing_plan,
@@ -37,6 +37,7 @@ from progress import (
 # --- Prompt templates live in prompts.py ---
 from prompts import (
     ASR_CORRECTION_INSTRUCTION,
+    REFINEMENT_COMPLETENESS_INSTRUCTION,
     EXPERT_MEETING_DETAILED_PROMPT,
     EXPERT_MEETING_CONCISE_PROMPT,
     EARNINGS_CALL_PROMPT,
@@ -216,6 +217,30 @@ except Exception as e:
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
+# --- Transcription hardening (see _load_source_text) ---
+# Audio chunks after the first start this many ms early, so the sentences at
+# each 5-minute boundary appear in two chunks; strip_overlap() removes the
+# duplicated words at join time. A blind cut splits words mid-syllable, which
+# degrades ASR at every seam.
+TRANSCRIBE_OVERLAP_MS = 25 * 1000
+# A "successful" API response is not a successful transcription: on noisy,
+# crosstalk-heavy, or language-mixed chunks the model sometimes stops early or
+# returns nothing, with no error raised. Any chunk that comes back with fewer
+# words than this per minute of audio is treated as a failed attempt and
+# retried. Normal conversation runs 120-160 wpm; 40 is deliberately lax so
+# sparse or slow calls don't trigger false alarms.
+TRANSCRIBE_MIN_WORDS_PER_MINUTE = 40
+TRANSCRIBE_CHUNK_ATTEMPTS = 3
+# Chunks quieter than this are considered silence/hold-music and are exempt
+# from the word-count floor (pure silence legitimately transcribes to nothing).
+SILENT_CHUNK_DBFS = -45.0
+# Whole-file sanity floor: warn when the finished transcript averages fewer
+# words per minute than this — the signature of undetected missing chunks.
+TRANSCRIPT_LOW_DENSITY_WPM = 50
+# Refinement must preserve content (output length ≈ input length). An output
+# below this fraction of the input words means the model compressed or dropped
+# passages; the run falls back to the unrefined text rather than lose content.
+REFINE_MIN_OUTPUT_RATIO = 0.6
 # Chunks are non-overlapping and aligned to speaker-turn boundaries (see
 # chunking.py). The trade-off: larger sections mean fewer seams and faster
 # runs, but the model compresses more per call — merging similar questions
@@ -332,6 +357,40 @@ def safe_get_token_count(response):
     except (AttributeError, ValueError):
         pass
     return 0
+
+def _extract_response_text(response) -> str:
+    """Text from a non-streaming response, or "" when it has no usable parts.
+
+    The `response.text` quick accessor raises on safety blocks and empty
+    candidates, which aborts an entire multi-chunk run over one bad chunk.
+    Callers that want to detect-and-retry (or fall back) use this instead and
+    treat "" as a failed generation."""
+    try:
+        for cand in (getattr(response, "candidates", None) or []):
+            parts = getattr(getattr(cand, "content", None), "parts", None) or []
+            text = "".join(getattr(p, "text", "") or "" for p in parts)
+            if text.strip():
+                return text
+    except Exception:
+        pass
+    return ""
+
+# Finish reasons that mean the model completed normally. Anything else —
+# MAX_TOKENS (output truncated, or a thinking model spent the whole budget on
+# reasoning), SAFETY, RECITATION — marks the attempt as failed.
+_OK_FINISH_REASONS = {"", "STOP", "FINISH_REASON_STOP", "1"}
+
+def _finish_reason_name(response) -> str:
+    """Finish reason of the first candidate as a string ("" if unavailable)."""
+    try:
+        cands = getattr(response, "candidates", None) or []
+        if cands:
+            fr = getattr(cands[0], "finish_reason", None)
+            if fr is not None:
+                return getattr(fr, "name", None) or str(fr)
+    except Exception:
+        pass
+    return ""
 
 def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False, generation_config=None):
     """Wrapper around generate_content with exponential backoff for transient API failures."""
@@ -481,6 +540,14 @@ def _parse_tagged_transcript(text: str) -> List[Dict[str, str]]:
     if not matches:
         return []
     segments: List[Dict[str, str]] = []
+    # Text before the first speaker marker used to be dropped silently. A
+    # short preamble is model meta-text ("Here is the tagged transcript:")
+    # and is still discarded, but anything longer is real content the model
+    # failed to tag — keep it as a Skip segment so it stays visible in the
+    # review panel, where the user can reassign it to a real speaker.
+    preamble = text[: matches[0].start()].strip()
+    if preamble and len(preamble.split()) > 25:
+        segments.append({"speaker": SKIP_TAG, "text": preamble})
     for i, m in enumerate(matches):
         raw = m.group(1).strip()
         if raw.lower().startswith("skip"):
@@ -618,6 +685,25 @@ def _detect_speakers_in_segments(segments: List[Dict[str, str]]) -> List[str]:
     return seen
 
 
+def _refine_with_guard(model, prompt: str, source_words: int, attempts: int = 2) -> Tuple[Optional[str], int]:
+    """Run a refinement prompt and validate the output length against the
+    source. Refinement must preserve content (output ≈ input length), so an
+    output below REFINE_MIN_OUTPUT_RATIO of the input words means the model
+    compressed or dropped passages — retry, then return None so the caller
+    falls back to the unrefined text instead of silently losing content.
+
+    Returns (refined_text_or_None, tokens_used)."""
+    tokens = 0
+    floor = max(1, int(source_words * REFINE_MIN_OUTPUT_RATIO))
+    for _ in range(attempts):
+        response = generate_with_retry(model, prompt, generation_config=GENERATION_CONFIG)
+        tokens += safe_get_token_count(response)
+        text = _extract_response_text(response)
+        if len(text.split()) >= floor:
+            return text, tokens
+    return None, tokens
+
+
 def generate_notes_from_transcript(
     state: AppState,
     final_transcript: str,
@@ -683,6 +769,7 @@ def generate_notes_from_transcript(
     # thread in the polling loop below.
     words_generated = [0] * n
     results: List[Optional[str]] = [None] * n
+    errors: List[Optional[Exception]] = [None] * n
     chunk_tokens = [0] * n
 
     def _generate_chunk(idx: int, prompt: str):
@@ -701,7 +788,14 @@ def generate_notes_from_transcript(
         while pending:
             done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
             for future in done:
-                idx, text, tokens = future.result()  # re-raises worker errors
+                idx = futures[future]
+                # One failed section must not abort the other sections'
+                # completed work; it gets a synchronous retry below.
+                try:
+                    _, text, tokens = future.result()
+                except Exception as e:
+                    errors[idx] = e
+                    text, tokens = "", 0
                 results[idx] = text
                 chunk_tokens[idx] = tokens
                 words_generated[idx] = len(text.split())
@@ -718,7 +812,34 @@ def generate_notes_from_transcript(
         executor.shutdown(wait=False, cancel_futures=True)
 
     if not any(r and r.strip() for r in results):
+        # Everything failed — likely a config/model problem, so surface the
+        # real error when there is one.
+        first_error = next((e for e in errors if e is not None), None)
+        if first_error is not None:
+            raise first_error
         raise ValueError("Failed to generate notes from any section. Please try again or use a different model.")
+
+    # Per-section recovery: a section that failed or streamed back empty
+    # (safety block, truncation) while the others succeeded used to be
+    # dropped from the stitched notes without a trace. Retry it once; if it
+    # still fails, insert a VISIBLE marker so the gap can be seen and filled.
+    for i in range(n):
+        if results[i] and results[i].strip():
+            continue
+        try:
+            response = generate_with_retry(notes_model, prompts[i], generation_config=GENERATION_CONFIG)
+            results[i] = _extract_response_text(response)
+            chunk_tokens[i] += safe_get_token_count(response)
+        except Exception:
+            results[i] = ""
+        if not (results[i] and results[i].strip()):
+            source_words = len(chunks[i]["text"].split())
+            results[i] = (
+                f"**[MISSING SECTION {i + 1} of {n}]** — no notes could be generated for this "
+                f"portion of the transcript (~{source_words:,} source words). "
+                f"Re-run the notes or try a different model to fill this gap."
+            )
+            st.warning(f"⚠️ Notes generation failed for section {i + 1} of {n}; a placeholder marker was inserted.")
 
     final_notes = "\n\n".join(r.strip() for r in results if r and r.strip())
     return final_notes, sum(chunk_tokens)
@@ -839,6 +960,14 @@ def send_browser_notification(title: str, body: str):
         height=1,  # st.iframe requires a positive height; 1px keeps it invisible
     )
 
+def _fmt_audio_ts(ms: int) -> str:
+    """Format a millisecond offset as MM:SS (or H:MM:SS past the hour)."""
+    total_s = int(ms // 1000)
+    h, rem = divmod(total_s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
 def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> Tuple[str, str, Optional[bytes]]:
     """Load raw transcript from the configured input source (text/upload/recording).
 
@@ -861,8 +990,14 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
         if file_type == "audio_file":
             progress.update("transcribe", 0, "Processing audio file...")
             # Proper nouns are where ASR fails; prime it with what we know.
+            # The full-coverage contract matters just as much: on noisy or
+            # language-mixed chunks the model's failure mode is stopping
+            # early, not erroring.
             transcribe_instruction = (
-                "Transcribe this audio recording verbatim. Pay special attention to "
+                "Transcribe this audio recording verbatim, from the very beginning "
+                "to the very end. Do NOT stop early, skip, or summarize any section — "
+                "if a passage is hard to hear, transcribe your best guess and mark it "
+                "[inaudible] rather than omitting it. Pay special attention to "
                 "proper nouns — names of people, companies, products, and websites — "
                 "and transcribe them as accurately as possible."
             )
@@ -876,13 +1011,24 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
                 raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
 
             chunk_length_ms = 5 * 60 * 1000
-            audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
+            # Chunks after the first start TRANSCRIBE_OVERLAP_MS early so the
+            # sentences at each boundary appear in two chunks; strip_overlap()
+            # removes the duplicated words at join time.
+            audio_chunks = []
+            for start in range(0, len(audio), chunk_length_ms):
+                chunk_start = max(0, start - TRANSCRIBE_OVERLAP_MS) if start else 0
+                chunk_end = min(start + chunk_length_ms, len(audio))
+                audio_chunks.append((chunk_start, chunk_end, audio[chunk_start:chunk_end]))
             # Re-scale the transcription step now that the real workload is known.
             progress.set_units("transcribe", max(2.0, len(audio_chunks) * 2.0))
 
-            all_transcripts, cloud_files, local_files = [], [], []
+            all_transcripts, suspect_ranges, cloud_files, local_files = [], [], [], []
+            # Per-chunk checkpoint: lets a partial/failed run be diagnosed
+            # (which chunk, which time range) instead of leaving one opaque
+            # joined string.
+            st.session_state["_checkpoint_transcript_chunks"] = []
             try:
-                for i, chunk in enumerate(audio_chunks):
+                for i, (chunk_start, chunk_end, chunk) in enumerate(audio_chunks):
                     try:
                         progress.update("transcribe", i / len(audio_chunks), f"Chunk {i+1}/{len(audio_chunks)}")
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
@@ -895,12 +1041,75 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
                                 cloud_ref = genai.get_file(cloud_ref.name)
                             if cloud_ref.state.name != "ACTIVE":
                                 raise Exception(f"Audio chunk {i+1} cloud processing failed.")
-                            response = generate_with_retry(transcription_model, [transcribe_instruction, cloud_ref])
-                            all_transcripts.append(response.text)
+
+                            # A "successful" response is not a successful
+                            # transcription: the model can stop early or return
+                            # nothing on hard chunks, with no error raised.
+                            # Validate word count against duration and retry;
+                            # exempt near-silent chunks, where a short (or
+                            # empty) transcript is the correct answer.
+                            duration_min = (chunk_end - chunk_start) / 60000.0
+                            near_silent = chunk.dBFS < SILENT_CHUNK_DBFS
+                            min_words = 0 if near_silent or duration_min < 0.5 else int(duration_min * TRANSCRIBE_MIN_WORDS_PER_MINUTE)
+                            text = ""
+                            for attempt in range(TRANSCRIBE_CHUNK_ATTEMPTS):
+                                response = generate_with_retry(
+                                    transcription_model,
+                                    [transcribe_instruction, cloud_ref],
+                                    generation_config=GENERATION_CONFIG,
+                                )
+                                attempt_text = _extract_response_text(response)
+                                if len(attempt_text.split()) > len(text.split()):
+                                    text = attempt_text  # keep the best attempt
+                                if len(text.split()) >= min_words and _finish_reason_name(response) in _OK_FINISH_REASONS:
+                                    break
+                                time.sleep(2)
+
+                            time_range = f"{_fmt_audio_ts(chunk_start)}-{_fmt_audio_ts(chunk_end)}"
+                            if len(text.split()) < min_words:
+                                # Still implausibly short after retries: keep
+                                # whatever came back, but leave a VISIBLE
+                                # marker instead of an invisible seam.
+                                suspect_ranges.append(time_range)
+                                if text.strip():
+                                    text += (
+                                        f"\n\n[POSSIBLE MISSING CONTENT: transcription of audio {time_range} "
+                                        f"returned only {len(text.split())} words and may be incomplete.]"
+                                    )
+                                else:
+                                    text = (
+                                        f"[TRANSCRIPTION GAP: audio from {time_range} could not be "
+                                        f"transcribed after {TRANSCRIBE_CHUNK_ATTEMPTS} attempts.]"
+                                    )
+                            all_transcripts.append(text)
+                            st.session_state["_checkpoint_transcript_chunks"].append(
+                                {"index": i, "range": time_range, "words": len(text.split()), "text": text}
+                            )
                     except Exception as e:
                         raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
 
-                raw_transcript = "\n\n".join(all_transcripts).strip()
+                merged_transcripts: List[str] = []
+                for i, t in enumerate(all_transcripts):
+                    if i and merged_transcripts and t.strip():
+                        t = strip_overlap(merged_transcripts[-1], t)
+                    if t.strip():
+                        merged_transcripts.append(t.strip())
+                raw_transcript = "\n\n".join(merged_transcripts).strip()
+
+                if suspect_ranges:
+                    st.warning(
+                        f"⚠️ Transcription may be incomplete for audio range(s): {', '.join(suspect_ranges)}. "
+                        "Markers were inserted in the transcript at the affected points — consider re-running."
+                    )
+                total_minutes = len(audio) / 60000.0
+                if total_minutes >= 1:
+                    wpm = len(raw_transcript.split()) / total_minutes
+                    if wpm < TRANSCRIPT_LOW_DENSITY_WPM:
+                        st.warning(
+                            f"⚠️ The transcript averages only {wpm:.0f} words per minute of audio "
+                            f"(normal conversation is 120-160). Parts of the recording may not have "
+                            f"been transcribed — review the transcript before trusting the notes."
+                        )
                 progress.complete_step("transcribe")
             finally:
                 for path in local_files:
@@ -963,7 +1172,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
             transcript=raw_transcript,
         )
         response = generate_with_retry(sid_model, prompt, generation_config=GENERATION_CONFIG)
-        tagged_chunks.append(response.text)
+        tagged_chunks.append(_extract_response_text(response))
         total_tokens += safe_get_token_count(response)
         progress.update("refine", 1.0, "Done")
     else:
@@ -995,7 +1204,17 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
                     chunk=chunk,
                 )
             response = generate_with_retry(sid_model, prompt, generation_config=GENERATION_CONFIG)
-            chunk_tagged = response.text
+            chunk_tagged = _extract_response_text(response)
+            if not chunk_tagged.strip():
+                # A blocked/empty response for one section must not leave a
+                # hole in the transcript. Keep the raw text untagged — when
+                # the joined output is parsed it attaches to the previous
+                # speaker's segment, where the user can see and reassign it.
+                st.warning(
+                    f"⚠️ Speaker tagging returned nothing for section {i+1} of {len(chunks)}; "
+                    "keeping that section's original text untagged so no content is lost."
+                )
+                chunk_tagged = chunk
             tagged_chunks.append(chunk_tagged)
             total_tokens += safe_get_token_count(response)
 
@@ -1206,10 +1425,15 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
         lang_instruction = "IMPORTANT: Your entire output MUST be in English. If the transcript contains Hindi, Hinglish, or any other non-English language, translate all content into clear, natural English while preserving the original meaning, nuance, and speaker intent."
 
         if len(words) <= chunk_size:
-            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n{ASR_CORRECTION_INSTRUCTION}\n\nTRANSCRIPT:\n{raw_transcript}"
-            response = generate_with_retry(refinement_model, refine_prompt, generation_config=GENERATION_CONFIG)
-            refined_transcript = response.text
-            total_tokens += safe_get_token_count(response)
+            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n{REFINEMENT_COMPLETENESS_INSTRUCTION}\n{ASR_CORRECTION_INSTRUCTION}\n\nTRANSCRIPT:\n{raw_transcript}"
+            refined_transcript, guard_tokens = _refine_with_guard(refinement_model, refine_prompt, len(words))
+            total_tokens += guard_tokens
+            if refined_transcript is None:
+                st.warning(
+                    "⚠️ Refinement output was much shorter than the transcript (likely dropped content); "
+                    "continuing with the unrefined transcript so nothing is lost."
+                )
+                refined_transcript = raw_transcript
         else:
             # Non-overlapping, turn-aligned chunks: each region is refined
             # exactly once, so joining the refined chunks cannot duplicate
@@ -1220,11 +1444,12 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
             prompts = []
             for i, chunk in enumerate(chunks):
                 if i == 0:
-                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n{ASR_CORRECTION_INSTRUCTION}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk['text']}")
+                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n{REFINEMENT_COMPLETENESS_INSTRUCTION}\n{ASR_CORRECTION_INSTRUCTION}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk['text']}")
                 else:
                     prompts.append(f"""You are continuing to refine a long transcript. Below is the tail end of the previous section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition. Do NOT include the context itself in your output — refine and output ONLY the new chunk.
 {speaker_info} {refinement_extra}
 {lang_instruction}
+{REFINEMENT_COMPLETENESS_INSTRUCTION}
 {ASR_CORRECTION_INSTRUCTION}
 ---
 CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY — DO NOT REFINE OR OUTPUT):
@@ -1237,24 +1462,47 @@ NEW TRANSCRIPT CHUNK TO REFINE:
             progress.update("refine", 0.1, f"{len(chunks)} sections in parallel")
 
             # Process chunks in parallel (max 3 concurrent to respect API rate limits)
-            all_refined_chunks = [None] * len(chunks)
+            all_refined_chunks: List[Optional[str]] = [None] * len(chunks)
+            refine_done = [False] * len(chunks)
             chunk_tokens = [0] * len(chunks)
 
             def refine_chunk(idx, prompt):
-                resp = generate_with_retry(refinement_model, prompt, generation_config=GENERATION_CONFIG)
-                return idx, resp.text, safe_get_token_count(resp)
+                # Per-chunk failures (safety block, hard API error after
+                # retries, dropped-content output) must not kill the whole
+                # run OR vanish silently: return None and let the fallback
+                # below substitute the raw chunk text.
+                try:
+                    text, tokens = _refine_with_guard(refinement_model, prompt, len(chunks[idx]["text"].split()))
+                    return idx, text, tokens
+                except Exception:
+                    return idx, None, 0
 
             with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as executor:
                 futures = {executor.submit(refine_chunk, i, p): i for i, p in enumerate(prompts)}
                 for future in as_completed(futures):
                     idx, text, tokens = future.result()
                     all_refined_chunks[idx] = text
+                    refine_done[idx] = True
                     chunk_tokens[idx] = tokens
-                    done_count = sum(1 for c in all_refined_chunks if c is not None)
+                    done_count = sum(refine_done)
                     progress.update("refine", 0.1 + (0.9 * done_count / len(chunks)), f"{done_count}/{len(chunks)} sections")
 
             total_tokens += sum(chunk_tokens)
-            refined_transcript = "\n\n".join(c for c in all_refined_chunks if c) if any(all_refined_chunks) else ""
+            # Every slot gets filled: a section whose refinement failed keeps
+            # its raw text (unrefined but complete) instead of being dropped
+            # from the join — a silent drop here is an invisible hole in the
+            # transcript that no later stage can detect.
+            fallback_sections = []
+            for i, text in enumerate(all_refined_chunks):
+                if not (text and text.strip()):
+                    fallback_sections.append(str(i + 1))
+                    all_refined_chunks[i] = chunks[i]["text"]
+            if fallback_sections:
+                st.warning(
+                    f"⚠️ Refinement failed or dropped content for section(s) {', '.join(fallback_sections)} "
+                    f"of {len(chunks)}; the original transcript text was kept for those sections so nothing is lost."
+                )
+            refined_transcript = "\n\n".join(all_refined_chunks)
 
         final_transcript = refined_transcript
         progress.complete_step("refine")

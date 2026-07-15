@@ -27,6 +27,12 @@ PANEL_HANDLING_SECTION = """
 # flag for anything the model can't confidently identify.
 ASR_CORRECTION_INSTRUCTION = """PROPER-NOUN CORRECTION: This transcript comes from automatic speech recognition, so names of people, companies, products, and websites are often phonetically garbled. Where a garbled proper noun clearly refers to a real, identifiable entity given the context — a company's founder, a known brand or product, a well-known website — correct it to its canonical real-world spelling (e.g., a garbled rendering of a travel company founder's name should become the founder's actual name; a garbled product name like "My BusinessME" in a MakeMyTrip discussion should become "myBiz"). Apply the same corrected spelling consistently throughout. If you CANNOT identify the real entity with reasonable confidence, keep the transcript's spelling and append [sp?] immediately after it to flag it for human review — never invent a plausible-looking name."""
 
+# Appended to every refinement prompt. Refinement exists to clean up ASR
+# output, not to shorten it — without an explicit completeness contract the
+# model occasionally skips or condenses passages, and downstream stages have
+# no way to detect the loss.
+REFINEMENT_COMPLETENESS_INSTRUCTION = """COMPLETENESS: Refine EVERY sentence of the transcript from start to finish. Do NOT omit, summarize, or condense anything — filler words ("um", "uh") may be dropped, but every question, answer, aside, digression, and repeated point must appear in your output. The refined text should be roughly the same length as the input. Preserve any [TRANSCRIPTION GAP: ...] or [POSSIBLE MISSING CONTENT: ...] markers exactly as they appear — they flag audio that could not be transcribed."""
+
 EXPERT_MEETING_DETAILED_PROMPT = """### **PRIMARY DIRECTIVE: MAXIMUM DETAIL & STRICT COMPLETENESS**
 Your goal is to produce the most thorough, granular notes possible. Remove conversational filler ("um," "you know," repetition) but **nothing substantive should be omitted.** Every factual claim, example, explanation, aside, and data point in the transcript must appear in your notes. When in doubt, INCLUDE it. Err heavily on the side of over-inclusion. Longer, more detailed notes are always preferred over concise ones.
 

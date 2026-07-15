@@ -22,11 +22,16 @@ aligned to paragraph boundaries (speaker turns in refined transcripts), so:
    Because the context comes from the raw transcript (known upfront) rather
    than previously generated notes, all chunk prompts can be built before any
    generation starts — which lets chunks be processed in parallel.
+
+``strip_overlap`` is the inverse concern for *audio* chunking: audio chunks
+are transcribed with a deliberate time overlap (so no words are lost to a
+blind cut), and the duplicated seam words are removed here at join time.
 """
 
+import difflib
 import math
 import re
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 
 def _split_oversized_block(block: str, chunk_size: int) -> List[str]:
@@ -115,6 +120,61 @@ def create_chunks_with_context(
             context = " ".join(prev_words[-context_words:])
         result.append({"text": chunk, "context": context})
     return result
+
+
+def _normalized_tokens(text: str) -> List[Tuple[str, int]]:
+    """Tokenize ``text`` into (normalized_word, end_char_offset) pairs.
+
+    Normalization (lowercase, strip non-alphanumerics) lets two ASR passes
+    over the same audio match even when punctuation/casing differ."""
+    tokens: List[Tuple[str, int]] = []
+    for m in re.finditer(r"\S+", text):
+        norm = re.sub(r"[\W_]+", "", m.group(0)).lower()
+        if norm:
+            tokens.append((norm, m.end()))
+    return tokens
+
+
+def strip_overlap(
+    prev_text: str,
+    next_text: str,
+    *,
+    window_words: int = 120,
+    min_match_words: int = 8,
+) -> str:
+    """Remove from ``next_text`` the leading region that duplicates the tail
+    of ``prev_text``.
+
+    Used when audio chunks are transcribed with a deliberate overlap: the
+    seam sentences appear at the end of one chunk's transcript and again at
+    the start of the next. The true overlap ends exactly where ``prev_text``
+    ends, so the matched block must reach (nearly) the end of ``prev_text``'s
+    tail — this stops a common phrase deeper in the text from being mistaken
+    for the seam and cutting real content.
+
+    Conservative by design: when no confident match is found, ``next_text``
+    is returned unchanged. Duplicating a few seconds of conversation is far
+    preferable to silently losing it."""
+    if not prev_text or not next_text:
+        return next_text
+    prev_tokens = _normalized_tokens(prev_text)[-window_words:]
+    next_tokens = _normalized_tokens(next_text)[:window_words]
+    if not prev_tokens or not next_tokens:
+        return next_text
+
+    a = [t[0] for t in prev_tokens]
+    b = [t[0] for t in next_tokens]
+    match = difflib.SequenceMatcher(None, a, b, autojunk=False).find_longest_match(
+        0, len(a), 0, len(b)
+    )
+    if match.size < min_match_words:
+        return next_text
+    if match.a + match.size < len(a) - 5:
+        return next_text
+
+    cut_offset = next_tokens[match.b + match.size - 1][1]
+    remainder = next_text[cut_offset:]
+    return re.sub(r"^[\s.,;:!?\-—–]+", "", remainder)
 
 
 def estimate_chunk_count(word_count: int, chunk_size: int) -> int:
