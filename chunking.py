@@ -12,9 +12,13 @@ Design notes
 Chunks produced by ``create_chunks_with_context`` are **non-overlapping** and
 aligned to paragraph boundaries (speaker turns in refined transcripts), so:
 
-1. No content is ever processed twice → no duplicate Q&As in the output and
-   no stitching/de-duplication step is needed; chunk outputs are simply
-   concatenated.
+1. No content is ever processed twice, so chunk outputs are (almost) simply
+   concatenated. One seam artifact remains: an *answer* can straddle a
+   boundary (multi-turn answers, or a single oversized turn split at
+   sentence boundaries), in which case the continuation chunk re-states the
+   question as an inferred heading. The continuation prompt tags that
+   heading with a ``(contd.)`` marker and ``merge_continuation_seams``
+   folds its bullets back into the previous section's last block.
 2. A speaker turn is never split mid-answer (unless a single turn exceeds the
    chunk size, in which case it is split at sentence boundaries).
 3. Continuity across the boundary is provided by ``context``: the tail of the
@@ -433,17 +437,91 @@ def estimate_chunk_count(word_count: int, chunk_size: int) -> int:
     return max(1, math.ceil(word_count / chunk_size))
 
 
+_CONTD_MARKER_RE = re.compile(r"\s*\(cont(?:[’']?d|inued)?\.?\)", re.IGNORECASE)
+
+
+def _contd_heading_cleaned(line: str) -> "str | None":
+    """If ``line`` is a bold heading (optionally ``#``-prefixed) carrying a
+    ``(contd.)``-style continuation marker, return the line with the marker
+    removed; otherwise return None."""
+    stripped = line.strip()
+    if not stripped or not _CONTD_MARKER_RE.search(stripped):
+        return None
+    core = re.sub(r"^#{1,6}\s+", "", stripped)
+    without = _CONTD_MARKER_RE.sub("", core).strip()
+    if without.startswith("**") and without.endswith("**") and len(without) > 4:
+        return _CONTD_MARKER_RE.sub("", line.rstrip())
+    return None
+
+
+def normalize_bullet_markers(notes_text: str) -> str:
+    """Normalize list markers so independently generated sections agree.
+
+    Parallel chunk generation lets each section pick its own bullet style —
+    one section emits ``- point``, the next ``*   point``, and some emit a
+    doubled marker (``*   - **Name:** point``). Rewrites every ``*`` list
+    marker to ``-``, collapses doubled markers, and normalizes the gap after
+    the marker to one space, leaving indentation (and therefore nesting)
+    untouched. Bold text (``**``), and marker-only lines such as ``***`` /
+    ``* * *`` horizontal rules, are never modified."""
+    if not notes_text:
+        return notes_text
+    out_lines = []
+    for line in notes_text.split("\n"):
+        if not re.match(r"^\s*[*\-\s]+$", line):
+            line = re.sub(r"^(\s*)\*(\s+)", r"\1-\2", line)
+            while re.match(r"^\s*-\s+[-*]\s+", line):
+                line = re.sub(r"^(\s*)-\s+[-*]\s+", r"\1- ", line, count=1)
+            line = re.sub(r"^(\s*)-\s+", r"\1- ", line)
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def merge_continuation_seams(sections: List[str]) -> str:
+    """Concatenate per-section chunk notes, attaching mid-answer
+    continuations to the block they continue.
+
+    A section that starts in the middle of an answer re-states the question
+    as an inferred heading, which the continuation prompt tags with a
+    ``(contd.)`` marker. When that marker heading is the first line of a
+    section, the same question already closes the previous section — so the
+    duplicate heading is dropped and its bullets are appended directly to
+    the previous section's last block. A marker anywhere else (or following
+    a missing-section placeholder, where there is nothing to attach to)
+    leaves the block in place; ``cleanup_stitched_notes`` strips the stray
+    marker text afterwards."""
+    parts: List[str] = []
+    for section in sections:
+        text = (section or "").strip()
+        if not text:
+            continue
+        lines = text.split("\n")
+        prev_attachable = bool(parts) and "[MISSING SECTION" not in parts[-1].split("\n")[-1]
+        if prev_attachable and _contd_heading_cleaned(lines[0]) is not None:
+            body = "\n".join(lines[1:]).strip("\n")
+            if body.strip():
+                parts[-1] = parts[-1].rstrip() + "\n" + body
+            continue
+        parts.append(text)
+    return "\n\n".join(parts).strip()
+
+
 def cleanup_stitched_notes(notes_text: str) -> str:
     """Deterministic cleanup of concatenated chunk notes — no LLM call, zero
     risk of content loss.
 
     Handles:
-    1. Remove meta-commentary / processing artifacts from chunked generation
+    0. Normalize bullet markers that drift between parallel sections
+    1. Remove meta-commentary / processing artifacts from chunked generation,
+       and strip stray ``(contd.)`` continuation markers left on headings
     2. Collapse duplicate consecutive headings across chunk boundaries
     3. Fix formatting: excessive blank lines, trailing whitespace
     """
     if not notes_text or not notes_text.strip():
         return notes_text
+
+    # --- 0. Normalize bullet markers ---
+    notes_text = normalize_bullet_markers(notes_text)
 
     # --- 1. Remove known meta-commentary artifacts ---
     artifact_patterns = [
@@ -458,23 +536,28 @@ def cleanup_stitched_notes(notes_text: str) -> str:
         stripped = line.strip()
         is_artifact = any(re.match(p, stripped, re.IGNORECASE) for p in artifact_patterns)
         if not is_artifact:
-            cleaned_lines.append(line)
+            # A (contd.) marker that survived seam merging (e.g. the model put
+            # it on a mid-section heading) is an artifact — drop just the marker.
+            without_marker = _contd_heading_cleaned(line)
+            cleaned_lines.append(without_marker if without_marker is not None else line)
 
-    # --- 2. Collapse duplicate consecutive bold headings ---
-    # Pattern: **Heading** appears twice in a row (possibly separated by blank lines)
+    # --- 2. Collapse duplicate adjacent headings ---
+    # A chunk seam can re-state the previous block's heading verbatim (or
+    # verbatim once its (contd.) marker was stripped above). Comparing each
+    # heading against the heading of the block it would interrupt — not just
+    # the previous line — drops the duplicate so its bullets flow into the
+    # block they continue. Repeats further apart (with another heading in
+    # between) are legitimate structure and stay.
     result_lines = []
-    last_heading = None
+    block_heading = None
     for line in cleaned_lines:
         stripped = line.strip()
-        heading_match = re.match(r'^(\*\*.+?\*\*)\s*$', stripped)
+        heading_match = re.match(r'^(?:#{1,6}\s+)?(\*\*.+?\*\*)\s*$', stripped)
         if heading_match:
-            current_heading = heading_match.group(1).strip()
-            if current_heading == last_heading:
+            if stripped == block_heading:
                 # Skip duplicate heading — keep first occurrence
                 continue
-            last_heading = current_heading
-        elif stripped:  # Non-empty, non-heading line resets heading tracker
-            last_heading = None
+            block_heading = stripped
         result_lines.append(line)
 
     text = '\n'.join(result_lines)

@@ -30,6 +30,7 @@ from chunking import (
     create_chunks_with_context,
     estimate_chunk_count,
     cleanup_stitched_notes,
+    merge_continuation_seams,
     strip_overlap,
     strip_asr_meta_markers,
     merge_learning_doc_sections,
@@ -865,7 +866,18 @@ def generate_notes_from_transcript(
             )
             st.warning(f"⚠️ Notes generation failed for section {i + 1} of {n}; a placeholder marker was inserted.")
 
-    final_notes = "\n\n".join(r.strip() for r in results if r and r.strip())
+    if state.selected_meeting_type == "Internal Discussion":
+        # Learnings-doc sections each end with their own Consolidated Mental
+        # Models / Unanswered Questions / Follow-Ups blocks, which
+        # merge_learning_doc_sections reorganizes later — attaching a
+        # continued topic's bullets to the previous section's tail would put
+        # them inside the wrong block, so sections are joined verbatim.
+        final_notes = "\n\n".join(r.strip() for r in results if r and r.strip())
+    else:
+        # A section that starts mid-answer re-states the question as a
+        # "(contd.)"-marked heading; fold those bullets back into the block
+        # they continue instead of emitting a duplicate question.
+        final_notes = merge_continuation_seams(results)
     return final_notes, sum(chunk_tokens)
 
 
