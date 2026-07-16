@@ -179,6 +179,7 @@ PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task
 Your primary directive is **100% completeness and accuracy**. Process the transcript sequentially and generate notes following the structure below.
 
 **COVERAGE RULE:** Your output must contain one Q&A block for EVERY question asked in the transcript below. Count them: if the transcript contains 12 questions, your notes must contain 12 bold question headings. Do NOT merge, combine, or skip questions to save space — long transcripts deserve proportionally long notes.
+{length_anchor}
 ---
 {base_instructions}
 ---
@@ -200,7 +201,7 @@ The text below is the tail end of the transcript section that was already proces
 4.  **NO META-COMMENTARY:** NEVER produce statements about the transcript itself, such as "the transcript does not contain an answer," "no relevant information in this section," "the section starts mid-conversation," or similar. Always extract and document whatever substantive content exists.
 5.  **MAINTAIN OUTPUT VOLUME:** This section contains as much content as any other. Your output MUST be equally detailed and equally long. Do NOT produce a shorter or more condensed output just because this is a continuation. Do NOT taper off, summarize, or become briefer.
 6.  **COVERAGE RULE:** Your output must contain one Q&A block for EVERY question asked in the new section. Count them: if it contains 12 questions, your notes must contain 12 bold question headings. Do NOT merge, combine, or skip questions to save space.
-
+{length_anchor}
 ---
 {base_instructions}
 ---

@@ -487,16 +487,21 @@ def merge_continuation_seams(sections: List[str]) -> str:
     section, the same question already closes the previous section — so the
     duplicate heading is dropped and its bullets are appended directly to
     the previous section's last block. A marker anywhere else (or following
-    a missing-section placeholder, where there is nothing to attach to)
-    leaves the block in place; ``cleanup_stitched_notes`` strips the stray
-    marker text afterwards."""
+    a missing/incomplete-section marker, where the block it would continue
+    is absent or suspect) leaves the block in place;
+    ``cleanup_stitched_notes`` strips the stray marker text afterwards."""
     parts: List[str] = []
     for section in sections:
         text = (section or "").strip()
         if not text:
             continue
         lines = text.split("\n")
-        prev_attachable = bool(parts) and "[MISSING SECTION" not in parts[-1].split("\n")[-1]
+        # A previous section that IS a failure placeholder, or ends with an
+        # incompleteness marker, is no home for continuation bullets — the
+        # block they continue is absent or suspect, so keep the heading.
+        prev_attachable = bool(parts) and not re.search(
+            r"\[(?:MISSING|POSSIBLY INCOMPLETE) (?:SECTION|NOTES)", parts[-1].split("\n")[-1]
+        )
         if prev_attachable and _contd_heading_cleaned(lines[0]) is not None:
             body = "\n".join(lines[1:]).strip("\n")
             if body.strip():

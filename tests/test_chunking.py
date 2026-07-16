@@ -497,3 +497,16 @@ def test_cleanup_normalizes_bullets_across_sections():
     out = cleanup_stitched_notes(text)
     assert "- **CEO:** Point one." in out
     assert "- Point two." in out
+
+
+def test_seam_merge_skips_possibly_incomplete_marker_tail():
+    # A section flagged as possibly incomplete ends with a marker line; the
+    # block a continuation would attach to is suspect, so keep the heading.
+    sections = [
+        "**Q?**\n- A.\n\n**[POSSIBLY INCOMPLETE SECTION 1 of 2]** — only 100 "
+        "notes words for ~6,000 transcript words after 3 attempts.",
+        "**Q? (contd.)**\n- Tail bullets.",
+    ]
+    out = merge_continuation_seams(sections)
+    assert "**Q? (contd.)**" in out
+    assert "- Tail bullets." in out
