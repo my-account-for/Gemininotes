@@ -9,6 +9,8 @@ from chunking import (
     create_chunks_with_context,
     estimate_chunk_count,
     cleanup_stitched_notes,
+    merge_continuation_seams,
+    normalize_bullet_markers,
     strip_overlap,
     strip_asr_meta_markers,
     merge_learning_doc_sections,
@@ -393,3 +395,118 @@ def test_flatten_grouping_plan_empty_plan():
     order, cleaned = flatten_grouping_plan([], 3)
     assert order == [0, 1, 2]
     assert cleaned == []
+
+
+# --- normalize_bullet_markers ---
+
+
+def test_normalize_star_bullets_become_dashes():
+    text = "**Q?**\n*   First point.\n*   Second point.\n    * Nested point."
+    out = normalize_bullet_markers(text)
+    assert out == "**Q?**\n- First point.\n- Second point.\n    - Nested point."
+
+
+def test_normalize_collapses_doubled_markers():
+    # Sections sometimes emit a doubled marker: `*   - **Name:** point`.
+    text = "*   - **Mohit Joshi:** Revenue grew 6.1% YoY."
+    assert normalize_bullet_markers(text) == "- **Mohit Joshi:** Revenue grew 6.1% YoY."
+
+
+def test_normalize_leaves_bold_and_rules_alone():
+    text = "**Bold heading**\n***\n* * *\n---\n- Already fine."
+    assert normalize_bullet_markers(text) == text
+
+
+def test_normalize_does_not_touch_content_dashes():
+    # A bullet whose content starts with a negative number keeps its dash.
+    text = "- -5% decline in the segment."
+    assert normalize_bullet_markers(text) == text
+
+
+# --- merge_continuation_seams ---
+
+
+def test_seam_merge_folds_contd_block_into_previous_section():
+    sections = [
+        "**Were you surprised by Q1?**\n- **CEO:** Results beat plan.",
+        "**Were you surprised by the performance? (contd.)**\n"
+        "- Demand challenges include manual testing.\n\n"
+        "**What drives growth next?**\n- **CFO:** Large deal ramp-ups.",
+    ]
+    out = merge_continuation_seams(sections)
+    # The duplicate inferred heading is gone; its bullets attach to the
+    # previous section's last block, and later blocks are untouched.
+    assert "(contd.)" not in out
+    assert out.count("**Were you surprised") == 1
+    _, blocks = split_qa_blocks(out)
+    assert len(blocks) == 2
+    assert "Demand challenges include manual testing." in blocks[0]
+
+
+def test_seam_merge_plain_sections_join_unchanged():
+    sections = ["**Q1?**\n- A.", "**Q2?**\n- B."]
+    assert merge_continuation_seams(sections) == "**Q1?**\n- A.\n\n**Q2?**\n- B."
+
+
+def test_seam_merge_handles_marker_variants_and_hash_headings():
+    for marker in ["(contd.)", "(contd)", "(cont'd)", "(Continued)"]:
+        sections = ["**Q?**\n- A.", f"### **Q? {marker}**\n- B."]
+        out = merge_continuation_seams(sections)
+        assert marker not in out
+        assert out == "**Q?**\n- A.\n- B."
+
+
+def test_seam_merge_skips_missing_section_placeholder():
+    placeholder = "**[MISSING SECTION 1 of 2]** — no notes could be generated."
+    sections = [placeholder, "**Q? (contd.)**\n- Tail of an answer."]
+    out = merge_continuation_seams(sections)
+    # Nothing to attach to — the block stays standalone with its heading.
+    assert placeholder in out
+    assert "**Q? (contd.)**" in out
+
+
+def test_seam_merge_ignores_mid_section_markers():
+    # A marker deeper inside a section is not a seam; the block stays put
+    # (cleanup_stitched_notes strips the stray marker text later).
+    sections = [
+        "**Q1?**\n- A.",
+        "**Q2?**\n- B.\n\n**Q3? (contd.)**\n- C.",
+    ]
+    out = merge_continuation_seams(sections)
+    _, blocks = split_qa_blocks(out)
+    assert len(blocks) == 3
+
+
+def test_cleanup_strips_stray_contd_markers_from_headings():
+    text = "**Q1? (contd.)**\n- A point.\n\n- Not a heading (contd.) example."
+    out = cleanup_stitched_notes(text)
+    assert "**Q1?**" in out
+    # Non-heading lines keep their text untouched.
+    assert "- Not a heading (contd.) example." in out
+
+
+def test_cleanup_collapses_heading_duplicated_by_stripped_marker():
+    text = "**Q1?**\n- A.\n\n**Q1? (contd.)**\n- B."
+    out = cleanup_stitched_notes(text)
+    assert out.count("**Q1?**") == 1
+    assert "- A." in out and "- B." in out
+
+
+def test_cleanup_normalizes_bullets_across_sections():
+    text = "**Q1?**\n*   - **CEO:** Point one.\n*   Point two."
+    out = cleanup_stitched_notes(text)
+    assert "- **CEO:** Point one." in out
+    assert "- Point two." in out
+
+
+def test_seam_merge_skips_possibly_incomplete_marker_tail():
+    # A section flagged as possibly incomplete ends with a marker line; the
+    # block a continuation would attach to is suspect, so keep the heading.
+    sections = [
+        "**Q?**\n- A.\n\n**[POSSIBLY INCOMPLETE SECTION 1 of 2]** — only 100 "
+        "notes words for ~6,000 transcript words after 3 attempts.",
+        "**Q? (contd.)**\n- Tail bullets.",
+    ]
+    out = merge_continuation_seams(sections)
+    assert "**Q? (contd.)**" in out
+    assert "- Tail bullets." in out

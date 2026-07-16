@@ -30,6 +30,7 @@ from chunking import (
     create_chunks_with_context,
     estimate_chunk_count,
     cleanup_stitched_notes,
+    merge_continuation_seams,
     strip_overlap,
     strip_asr_meta_markers,
     merge_learning_doc_sections,
@@ -271,6 +272,17 @@ CONTEXT_TAIL_WORDS = 800
 # Rough ratio of generated-notes words to transcript words, used only to
 # estimate within-chunk progress while streaming.
 NOTES_OUTPUT_RATIO = 0.6
+# Completeness floor: notes below this fraction of the source words are
+# treated as a failed generation (model stopped early / over-compressed) and
+# retried, keeping the best attempt. Applied only to completeness-contract
+# meeting types (Expert Meeting, Earnings Call) — condensing formats
+# (learnings docs, decisions-only, custom instructions) legitimately produce
+# far less output than the transcript. Deliberately conservative: it exists
+# to catch catastrophic loss, not to police stylistic brevity.
+NOTES_MIN_OUTPUT_RATIO = 0.1
+# Total attempts per notes call before accepting a short/truncated output
+# and flagging it visibly (mirrors TRANSCRIBE_CHUNK_ATTEMPTS for audio).
+NOTES_GEN_ATTEMPTS = 3
 # High output token ceiling for notes generation.
 # Without this, Gemini defaults to ~8192 output tokens and silently
 # truncates long, detailed notes — especially on later chunks. Also applied
@@ -728,6 +740,81 @@ def _refine_with_guard(model, prompt: str, source_words: int, attempts: int = 2)
     return None, tokens
 
 
+def _notes_floor_words(state: AppState, source_words: int) -> int:
+    """Minimum plausible notes length (in words) for a transcript portion of
+    ``source_words``, below which the generation is treated as incomplete.
+    Returns 0 — no floor — for formats that legitimately condense (learnings
+    docs, decisions-only meeting notes, custom instructions, enrichment of
+    existing notes)."""
+    mt = state.selected_meeting_type
+    if mt not in ("Expert Meeting", "Earnings Call"):
+        return 0
+    if mt == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes":
+        return 0
+    return int(source_words * NOTES_MIN_OUTPUT_RATIO)
+
+
+def _notes_length_anchor(state: AppState, source_words: int) -> str:
+    """One prompt paragraph anchoring the expected notes volume, or "".
+
+    The model's strongest failure mode on large transcript portions —
+    especially when several sections generate in parallel with no view of
+    each other — is silent over-compression: notes that touch every topic
+    but shed half the bullets, with a normal STOP finish. An explicit
+    numeric volume expectation is the most effective counter. Only
+    completeness-contract styles get an anchor; condensing formats
+    legitimately compress and get none."""
+    mt = state.selected_meeting_type
+    if mt == "Expert Meeting":
+        ratio = 0.45 if state.selected_note_style == "Option 1: Detailed & Strict" else 0.3
+    elif mt == "Earnings Call" and state.earnings_call_mode != "Enrich Existing Notes":
+        ratio = 0.35
+    else:
+        return ""
+    expected = int(source_words * ratio)
+    if expected < 150:
+        return ""
+    return (
+        f"**EXPECTED VOLUME:** This transcript portion is ~{source_words:,} words. Complete notes for it "
+        f"typically run AT LEAST {expected:,} words. If your notes are coming out much shorter than that, "
+        f"you are over-compressing — go back and capture more bullets per answer, not fewer."
+    )
+
+
+def _retry_incomplete_notes(notes_model, prompt, text, finish, floor_words, progress, label):
+    """Retry a suspect notes generation — empty output, implausibly few words
+    for its source, or a finish reason other than STOP (thinking-budget
+    exhaustion, safety block, truncation) — keeping the best attempt by word
+    count. Mirrors the plausibility-check-and-retry the transcription and
+    refinement stages already have. Returns (text, finish, extra_tokens)."""
+    extra_tokens = 0
+    attempt = 1
+    while (
+        not text.strip() or len(text.split()) < floor_words or finish not in _OK_FINISH_REASONS
+    ) and attempt < NOTES_GEN_ATTEMPTS:
+        attempt += 1
+        progress.update(
+            "generate", 0.97,
+            f"{label} looked incomplete — regenerating (attempt {attempt}/{NOTES_GEN_ATTEMPTS})",
+        )
+        try:
+            response = generate_with_retry(notes_model, prompt, generation_config=GENERATION_CONFIG)
+            retry_text = _extract_response_text(response)
+            extra_tokens += safe_get_token_count(response)
+            if len(retry_text.split()) > len(text.split()):
+                text, finish = retry_text, _finish_reason_name(response)
+        except Exception:
+            pass
+    return text, finish, extra_tokens
+
+
+def _incomplete_notes_reason(text: str, finish: str, source_words: int) -> str:
+    """Human-readable reason a kept-but-suspect notes output was flagged."""
+    if finish not in _OK_FINISH_REASONS:
+        return f"the model stopped early (finish reason: {finish})"
+    return f"only {len(text.split()):,} notes words were generated for ~{source_words:,} transcript words"
+
+
 def generate_notes_from_transcript(
     state: AppState,
     final_transcript: str,
@@ -767,6 +854,19 @@ def generate_notes_from_transcript(
             )
 
         notes, tokens = stream_and_collect(response, on_progress=_on_stream, live_preview=live_preview)
+        floor_words = _notes_floor_words(state, len(words))
+        notes, finish, extra_tokens = _retry_incomplete_notes(
+            notes_model, prompt, notes, _finish_reason_name(response), floor_words,
+            progress, "Notes output",
+        )
+        tokens += extra_tokens
+        if notes.strip() and (len(notes.split()) < floor_words or finish not in _OK_FINISH_REASONS):
+            reason = _incomplete_notes_reason(notes, finish, len(words))
+            notes += (
+                f"\n\n**[POSSIBLY INCOMPLETE NOTES]** — {reason} after {NOTES_GEN_ATTEMPTS} attempts. "
+                "Some content may be missing — re-run the notes or use the validation pass on the Output page."
+            )
+            st.warning(f"⚠️ The notes may be incomplete: {reason}.")
         return notes, tokens
 
     # --- Chunked path ---
@@ -778,11 +878,17 @@ def generate_notes_from_transcript(
     prompt_base = _speaker_legend_block(speaker_legend) + _get_base_prompt_for_type(state)
     prompts = []
     for i, chunk in enumerate(chunks):
+        anchor = _notes_length_anchor(state, len(chunk["text"].split()))
         if i == 0:
-            prompts.append(PROMPT_INITIAL.format(base_instructions=prompt_base, chunk_text=chunk["text"]))
+            prompts.append(PROMPT_INITIAL.format(
+                base_instructions=prompt_base,
+                length_anchor=anchor,
+                chunk_text=chunk["text"],
+            ))
         else:
             prompts.append(PROMPT_CONTINUATION.format(
                 base_instructions=prompt_base,
+                length_anchor=anchor,
                 context_tail=chunk["context"],
                 chunk_text=chunk["text"],
             ))
@@ -795,6 +901,7 @@ def generate_notes_from_transcript(
     results: List[Optional[str]] = [None] * n
     errors: List[Optional[Exception]] = [None] * n
     chunk_tokens = [0] * n
+    finishes = [""] * n
 
     def _generate_chunk(idx: int, prompt: str):
         response = generate_with_retry(notes_model, prompt, stream=True, generation_config=GENERATION_CONFIG)
@@ -803,7 +910,7 @@ def generate_notes_from_transcript(
             if part.parts:
                 text += part.text
                 words_generated[idx] = len(text.split())
-        return idx, text, safe_get_token_count(response)
+        return idx, text, safe_get_token_count(response), _finish_reason_name(response)
 
     executor = ThreadPoolExecutor(max_workers=min(3, n))
     try:
@@ -816,22 +923,29 @@ def generate_notes_from_transcript(
                 # One failed section must not abort the other sections'
                 # completed work; it gets a synchronous retry below.
                 try:
-                    _, text, tokens = future.result()
+                    _, text, tokens, finish = future.result()
                 except Exception as e:
                     errors[idx] = e
-                    text, tokens = "", 0
+                    text, tokens, finish = "", 0, ""
                 results[idx] = text
                 chunk_tokens[idx] = tokens
+                finishes[idx] = finish
                 words_generated[idx] = len(text.split())
             done_count = sum(1 for r in results if r is not None)
             frac = sum(
                 1.0 if results[i] is not None else min(words_generated[i] / expected_words[i], 0.95)
                 for i in range(n)
             ) / n
-            progress.update(
-                "generate", frac,
-                f"{done_count}/{n} sections · {sum(words_generated):,} words generated",
-            )
+            # Per-section live status — sections run in parallel, so without
+            # this the user never sees section 2+ being worked on.
+            if n <= 8:
+                detail = " · ".join(
+                    f"S{i + 1} {'✅' if results[i] is not None else '⏳'} {words_generated[i]:,}w"
+                    for i in range(n)
+                )
+            else:
+                detail = f"{done_count}/{n} sections · {sum(words_generated):,} words generated"
+            progress.update("generate", frac, detail)
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
@@ -843,29 +957,49 @@ def generate_notes_from_transcript(
             raise first_error
         raise ValueError("Failed to generate notes from any section. Please try again or use a different model.")
 
-    # Per-section recovery: a section that failed or streamed back empty
-    # (safety block, truncation) while the others succeeded used to be
-    # dropped from the stitched notes without a trace. Retry it once; if it
-    # still fails, insert a VISIBLE marker so the gap can be seen and filled.
+    # Per-section completeness recovery: a section that failed, streamed back
+    # empty, or looks incomplete — implausibly few words for its source, or a
+    # finish reason other than STOP (thinking-budget exhaustion, safety
+    # block, truncation) — used to be accepted silently, so the stitched
+    # notes simply lacked that content with no trace. Retry keeping the best
+    # attempt; if it still looks incomplete, keep it but flag it VISIBLY.
     for i in range(n):
-        if results[i] and results[i].strip():
-            continue
-        try:
-            response = generate_with_retry(notes_model, prompts[i], generation_config=GENERATION_CONFIG)
-            results[i] = _extract_response_text(response)
-            chunk_tokens[i] += safe_get_token_count(response)
-        except Exception:
-            results[i] = ""
-        if not (results[i] and results[i].strip()):
-            source_words = len(chunks[i]["text"].split())
-            results[i] = (
+        source_words = len(chunks[i]["text"].split())
+        floor_words = _notes_floor_words(state, source_words)
+        text, finish, extra_tokens = _retry_incomplete_notes(
+            notes_model, prompts[i], results[i] or "", finishes[i], floor_words,
+            progress, f"Section {i + 1} of {n}",
+        )
+        chunk_tokens[i] += extra_tokens
+        if not text.strip():
+            text = (
                 f"**[MISSING SECTION {i + 1} of {n}]** — no notes could be generated for this "
                 f"portion of the transcript (~{source_words:,} source words). "
                 f"Re-run the notes or try a different model to fill this gap."
             )
             st.warning(f"⚠️ Notes generation failed for section {i + 1} of {n}; a placeholder marker was inserted.")
+        elif len(text.split()) < floor_words or finish not in _OK_FINISH_REASONS:
+            reason = _incomplete_notes_reason(text, finish, source_words)
+            text += (
+                f"\n\n**[POSSIBLY INCOMPLETE SECTION {i + 1} of {n}]** — {reason} after "
+                f"{NOTES_GEN_ATTEMPTS} attempts. Content from this portion of the transcript may be "
+                "missing; re-run the notes to regenerate it."
+            )
+            st.warning(f"⚠️ Section {i + 1} of {n} may be incomplete: {reason}.")
+        results[i] = text
 
-    final_notes = "\n\n".join(r.strip() for r in results if r and r.strip())
+    if state.selected_meeting_type == "Internal Discussion":
+        # Learnings-doc sections each end with their own Consolidated Mental
+        # Models / Unanswered Questions / Follow-Ups blocks, which
+        # merge_learning_doc_sections reorganizes later — attaching a
+        # continued topic's bullets to the previous section's tail would put
+        # them inside the wrong block, so sections are joined verbatim.
+        final_notes = "\n\n".join(r.strip() for r in results if r and r.strip())
+    else:
+        # A section that starts mid-answer re-states the question as a
+        # "(contd.)"-marked heading; fold those bullets back into the block
+        # they continue instead of emitting a duplicate question.
+        final_notes = merge_continuation_seams(results)
     return final_notes, sum(chunk_tokens)
 
 
@@ -904,7 +1038,14 @@ def get_dynamic_prompt(state: AppState, transcript_chunk: str, speaker_legend: s
     if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes":
         return f"Enrich the following existing notes based on the new transcript. Maintain the same structure and format.\n\n{base}\n\n**EXISTING NOTES:**\n{state.existing_notes_input}\n\n**NEW TRANSCRIPT:**\n{transcript_chunk}"
 
-    return f"{base}\n\n{context_section}\n\n**MEETING TRANSCRIPT:**\n{transcript_chunk}"
+    anchor = _notes_length_anchor(state, len(transcript_chunk.split()))
+    parts = [base]
+    if anchor:
+        parts.append(anchor)
+    if context_section:
+        parts.append(context_section)
+    parts.append(f"**MEETING TRANSCRIPT:**\n{transcript_chunk}")
+    return "\n\n".join(parts)
 
 def validate_inputs(state: AppState) -> Optional[str]:
     if state.input_method == "Paste Text" and not state.text_input.strip():
