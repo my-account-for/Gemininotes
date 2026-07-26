@@ -1770,8 +1770,13 @@ def render_input_and_processing_tab(state: AppState):
     else:
         col_upload, col_record = st.columns(2)
         with col_upload:
-            # "audio" is a MIME shortcut (audio/*) covering mp3/m4a/wav/ogg/flac.
-            state.uploaded_file = st.file_uploader("Upload a File", type=['pdf', 'txt', 'md', 'audio'], help="PDF, TXT, MD, or any audio file")
+            # st.file_uploader filters by file extension, not MIME type, so the
+            # audio formats must be listed explicitly (there is no "audio/*" shortcut).
+            state.uploaded_file = st.file_uploader(
+                "Upload a File",
+                type=['pdf', 'txt', 'md', 'wav', 'mp3', 'm4a', 'ogg', 'flac'],
+                help="PDF, TXT, MD, or audio (WAV, MP3, M4A, OGG, FLAC)",
+            )
         with col_record:
             state.audio_recording = st.audio_input("Record Microphone")
 
