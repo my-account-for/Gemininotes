@@ -377,6 +377,9 @@ class AppState:
     context_audio_file: Optional[Any] = None
     context_audio_recording: Optional[Any] = None
     context_audio_text: str = ""
+    # Internal Discussion: route through the speaker-ID verification flow
+    # (refine → auto-tag → user review) before generating speaker-grouped notes.
+    internal_verify_speakers: bool = True
     speakers: str = ""
     earnings_call_topics: str = ""
     existing_notes_input: str = ""
@@ -1389,7 +1392,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
 
     speakers = sanitize_input(state.speakers)
     speaker_info = f"Known participants (use as hint only, but still tag as Speaker 1/2/3): {speakers}." if speakers else ""
-    refinement_extra = REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "") + "\n" + ASR_CORRECTION_INSTRUCTION
+    refinement_extra = REFINEMENT_INSTRUCTIONS.get(state.selected_meeting_type, REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "")) + "\n" + ASR_CORRECTION_INSTRUCTION
 
     progress.update("refine", 0, "Refining and tagging speakers...")
     words = raw_transcript.split()
@@ -1492,7 +1495,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
     try:
         database.save_note({
             'id': draft_note_id, 'created_at': datetime.now().isoformat(),
-            'meeting_type': "Expert Meeting", 'file_name': file_name,
+            'meeting_type': state.selected_meeting_type, 'file_name': file_name,
             'content': "", 'raw_transcript': raw_transcript,
             'refined_transcript': canonical_tagged, 'token_usage': total_tokens,
             'processing_time': 0, 'pdf_blob': pdf_bytes_data,
@@ -1536,11 +1539,14 @@ def process_tagged_to_notes_task(
     """
     start_time = time.time()
     notes_model = _get_cached_model(state.notes_model)
+    is_internal = state.selected_meeting_type == "Internal Discussion"
 
-    # Temporarily override note style so _get_base_prompt_for_type returns the
-    # downstream pick (Option 1/2/3). Restore on exit.
+    # For Expert Meeting, temporarily override note style so
+    # _get_base_prompt_for_type returns the downstream pick (Option 1/2/3).
+    # Internal Discussion has no style — its speaker-grouped prompt is fixed.
     original_style = state.selected_note_style
-    state.selected_note_style = downstream_style
+    if not is_internal:
+        state.selected_note_style = downstream_style
     total_tokens = prior_tokens
     final_notes_content = ""
     try:
@@ -1558,9 +1564,20 @@ def process_tagged_to_notes_task(
         if was_chunked:
             # Deterministic cleanup — no LLM call, zero content-loss risk.
             final_notes_content = cleanup_stitched_notes(final_notes_content)
+            if is_internal:
+                final_notes_content = renumber_topic_sections(final_notes_content)
 
-        # Executive summary if downstream style is Option 3
-        if downstream_style == "Option 3: Less Verbose + Summary":
+        # Internal Discussion post-processing: highlight learnings inline and
+        # append the consolidated action-items backlog (same as the direct flow).
+        if is_internal:
+            final_notes_content, pp_tokens = _postprocess_internal_discussion_notes(
+                final_notes_content, notes_model, progress
+            )
+            total_tokens += pp_tokens
+            progress.complete_step("postprocess")
+
+        # Executive summary if downstream style is Option 3 (Expert Meeting only)
+        if not is_internal and downstream_style == "Option 3: Less Verbose + Summary":
             progress.update("summary", 0.3, "Working...")
             summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
             response = generate_with_retry(notes_model, summary_prompt)
@@ -1571,7 +1588,7 @@ def process_tagged_to_notes_task(
         progress.update("save", 0.5, "Writing to database...")
         note_data = {
             'id': draft_note_id or str(uuid.uuid4()), 'created_at': datetime.now().isoformat(),
-            'meeting_type': "Expert Meeting",
+            'meeting_type': state.selected_meeting_type,
             'file_name': file_name, 'content': final_notes_content,
             'raw_transcript': raw_transcript,
             'refined_transcript': tagged_transcript,
@@ -2053,6 +2070,16 @@ def render_input_and_processing_tab(state: AppState):
     elif state.selected_meeting_type == "Custom":
         state.context_input = st.text_area("Custom Instructions", value=state.context_input, height=120, placeholder="Describe how you want the notes structured...")
 
+    if state.selected_meeting_type == "Internal Discussion":
+        state.internal_verify_speakers = st.checkbox(
+            "Verify speakers before generating notes",
+            value=state.internal_verify_speakers,
+            help="Recommended for audio. First refines the transcript and tags each speaker, "
+                 "lets you rename and correct them, then generates the speaker-grouped notes "
+                 "using the names you confirm. Turn off to generate notes directly (attribution "
+                 "then relies on whatever speaker labels the transcript already contains).",
+        )
+
     # --- General Context (all non-Custom meeting types) ---
     if state.selected_meeting_type != "Custom":
         state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
@@ -2177,6 +2204,9 @@ def render_input_and_processing_tab(state: AppState):
     is_speaker_flow = (
         state.selected_meeting_type == "Expert Meeting"
         and state.selected_note_style == SPEAKER_ID_FLOW_OPTION
+    ) or (
+        state.selected_meeting_type == "Internal Discussion"
+        and state.internal_verify_speakers
     )
 
     if is_speaker_flow:
@@ -2212,7 +2242,7 @@ def render_input_and_processing_tab(state: AppState):
         if is_speaker_flow:
             preview = SPEAKER_ID_PROMPT_INITIAL.format(
                 speaker_info=f"Known participants: {sanitize_input(state.speakers)}." if state.speakers else "",
-                refinement_extra=REFINEMENT_INSTRUCTIONS.get("Expert Meeting", ""),
+                refinement_extra=REFINEMENT_INSTRUCTIONS.get(state.selected_meeting_type, REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "")),
                 transcript="[...transcript content...]",
             )
         else:
@@ -2510,30 +2540,44 @@ def _render_speaker_review_panel(state: AppState):
     st.divider()
 
     # --- Downstream notes step ---
+    is_internal = state.selected_meeting_type == "Internal Discussion"
     st.markdown("**Generate Final Notes**")
-    ds_col1, ds_col2 = st.columns([2, 1])
-    with ds_col1:
-        downstream_style = st.selectbox(
-            "Final note style (uses the existing Expert Meeting prompts)",
-            SPEAKER_ID_DOWNSTREAM_OPTIONS,
-            index=1,  # default to Option 2: Less Verbose
-            key="sn_downstream_style",
+    if is_internal:
+        # No style choice — the Internal Discussion speaker-grouped prompt is fixed.
+        st.caption(
+            "Notes are grouped by topic and attributed to the speakers you confirmed above; "
+            "learnings are highlighted and action items consolidated automatically."
         )
-    with ds_col2:
-        st.write("")  # spacer for vertical alignment
-        st.write("")
         if st.button("Generate Notes", type="primary", use_container_width=True, key="sn_generate_notes_btn"):
             st.session_state.sn_processing_notes = True
-            st.session_state.sn_downstream_style_locked = downstream_style
+            st.session_state.sn_downstream_style_locked = state.selected_note_style
             st.rerun()
+    else:
+        ds_col1, ds_col2 = st.columns([2, 1])
+        with ds_col1:
+            downstream_style = st.selectbox(
+                "Final note style (uses the existing Expert Meeting prompts)",
+                SPEAKER_ID_DOWNSTREAM_OPTIONS,
+                index=1,  # default to Option 2: Less Verbose
+                key="sn_downstream_style",
+            )
+        with ds_col2:
+            st.write("")  # spacer for vertical alignment
+            st.write("")
+            if st.button("Generate Notes", type="primary", use_container_width=True, key="sn_generate_notes_btn"):
+                st.session_state.sn_processing_notes = True
+                st.session_state.sn_downstream_style_locked = downstream_style
+                st.rerun()
 
     # --- Run notes generation ---
     if st.session_state.get("sn_processing_notes"):
         with st.status("Generating notes from tagged transcript...", expanded=True) as status:
             progress = ProgressTracker(build_notes_only_plan(
                 with_summary=(
-                    st.session_state.sn_downstream_style_locked == "Option 3: Less Verbose + Summary"
+                    not is_internal
+                    and st.session_state.sn_downstream_style_locked == "Option 3: Less Verbose + Summary"
                 ),
+                with_learning_postprocess=is_internal,
             ))
             try:
                 final_note = process_tagged_to_notes_task(
