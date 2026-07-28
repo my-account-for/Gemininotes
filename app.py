@@ -663,13 +663,15 @@ def _merge_consecutive_segments(segments: List[Dict[str, str]]) -> List[Dict[str
     return merged
 
 
-def _infer_speaker_names(sid_model, tagged_transcript: str, participants: str) -> Tuple[Dict[str, str], int]:
-    """Map generic Speaker N labels to the user-provided participant names so
-    the rename fields come pre-filled. Best-effort: returns ({}, tokens) on
-    any failure — the user can always rename manually."""
+def _infer_speaker_names(sid_model, tagged_transcript: str, participants: str, raw_transcript: str = "") -> Tuple[Dict[str, str], int]:
+    """Map generic Speaker N labels to real names so the rename fields come
+    pre-filled. Uses both the participant list AND any speaker names already
+    present in the uploaded (original) transcript. Best-effort: returns
+    ({}, tokens) on any failure — the user can always rename manually."""
     try:
         prompt = SPEAKER_NAME_MAP_PROMPT.format(
-            participants=participants,
+            participants=participants or "(none provided)",
+            original_sample=(raw_transcript or "(not available)")[:12000],
             transcript_sample=tagged_transcript[:12000],
         )
         response = generate_with_retry(sid_model, prompt)
@@ -1477,13 +1479,14 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
     canonical_tagged = _serialize_tagged_segments(segments)
     speakers_list = _detect_speakers_in_segments(segments)
 
-    # Pre-fill speaker display names from the user-provided participants list
-    # (best-effort) so renaming is usually already done.
-    inferred_names: Dict[str, str] = {}
-    if speakers:
-        progress.update("refine", 1.0, "Matching speakers to participants...")
-        inferred_names, name_tokens = _infer_speaker_names(sid_model, canonical_tagged, speakers)
-        total_tokens += name_tokens
+    # Pre-fill speaker display names (best-effort) so renaming is usually
+    # already done — from the participants list AND from any real speaker
+    # names already present in the uploaded transcript.
+    progress.update("refine", 1.0, "Matching speakers to names...")
+    inferred_names, name_tokens = _infer_speaker_names(
+        sid_model, canonical_tagged, speakers, raw_transcript=raw_transcript
+    )
+    total_tokens += name_tokens
 
     progress.complete_step("refine")
 
@@ -2499,14 +2502,18 @@ def _render_speaker_review_panel(state: AppState):
                 if picked_tag != seg["speaker"]:
                     seg["speaker"] = picked_tag
             with text_col:
+                # Prefix each segment with the live display name so renaming a
+                # speaker above immediately replaces "Speaker N" in the
+                # transcript here (the name is read fresh from speaker_names).
+                display = _display_for_tag(seg["speaker"])
                 preview = seg["text"] if len(seg["text"]) <= 600 else seg["text"][:600] + "…"
                 if is_skip:
-                    st.markdown(f":gray[*(excluded from notes)*  \n{preview}]")
+                    st.markdown(f":gray[**{display}:** *(excluded from notes)*  \n{preview}]")
                 else:
-                    st.markdown(preview)
+                    st.markdown(f"**{display}:** {preview}")
                 if len(seg["text"]) > 600:
                     with st.expander("Full text", expanded=False):
-                        st.markdown(seg["text"])
+                        st.markdown(f"**{display}:** {seg['text']}")
 
     st.divider()
 

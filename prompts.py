@@ -411,8 +411,10 @@ SPEAKER_ID_PROMPT_INITIAL = """You are refining a transcript AND identifying dis
 
 ## TASK
 1. Clean up the transcript: fix spelling, grammar, punctuation, and conversational filler. Translate any non-English content into clear, natural English while preserving meaning and tone.
-2. Identify distinct speakers. **ASSUME 2 SPEAKERS by default.** Only introduce a 3rd speaker if you are highly confident a clearly distinct third voice is present (e.g., a different role explicitly introduced, a third name addressed in the conversation, or unambiguously different perspective sustained across multiple turns).
-   - **ROLE ANCHORING (critical):** In interview-style calls (expert calls, channel checks, analyst interviews), assign **Speaker 1 to the interviewer/analyst** — the person who asks questions, sets the agenda, and speaks in short turns — and **Speaker 2 to the expert/respondent** — the person giving long, substantive answers. Decide this mapping from the first few turns and apply it consistently for the ENTIRE transcript. Question turns and answer turns must never share a label.
+2. Identify distinct speakers.
+   - **EXISTING LABELS TAKE PRIORITY:** If the transcript is ALREADY labelled with speaker names or tags (e.g. "Amit:", "Jitin (PM):", "Interviewer:"), RESPECT them — preserve those speaker distinctions and turn boundaries, map each distinct existing speaker consistently to its own `Speaker N` label, and honour however many distinct speakers the transcript identifies. Never merge two distinct named speakers into one. (Names are still normalised to generic `Speaker N` here; the real names are re-attached in a later step.)
+   - When the transcript is NOT already labelled: **ASSUME 2 SPEAKERS by default.** Only introduce a 3rd speaker if you are highly confident a clearly distinct third voice is present (e.g., a different role explicitly introduced, a third name addressed in the conversation, or unambiguously different perspective sustained across multiple turns).
+   - **ROLE ANCHORING (critical):** In interview-style calls (expert calls, channel checks, analyst interviews) where speakers are NOT already labelled, assign **Speaker 1 to the interviewer/analyst** — the person who asks questions, sets the agenda, and speaks in short turns — and **Speaker 2 to the expert/respondent** — the person giving long, substantive answers. Decide this mapping from the first few turns and apply it consistently for the ENTIRE transcript. Question turns and answer turns must never share a label.
 3. Tag any **off-topic logistical chatter** with `**Skip:**` instead of `**Speaker N:**`. Logistics includes:
    - Tech checks: "can you hear me?", "let me share my screen", "your mic is muted", "is the recording on?"
    - Personal/comfort: "can I get a charger?", "do you want water?", "should we order food?", "let me grab my notes"
@@ -492,20 +494,25 @@ TRANSCRIPT EXCERPT:
 {transcript_sample}
 """
 
-SPEAKER_NAME_MAP_PROMPT = """Below is the beginning of a speaker-tagged meeting transcript and a list of known participants. Map each generic speaker label to the most likely participant.
+SPEAKER_NAME_MAP_PROMPT = """You are mapping generic speaker labels (Speaker 1, Speaker 2, ...) in a tagged transcript to real names.
 
-Return ONLY valid JSON with no other text, in exactly this shape (one entry per speaker label that appears in the transcript):
-{{"Speaker 1": "participant name (role)", "Speaker 2": ""}}
+You are given three things: a list of known participants (may be empty), the beginning of the ORIGINAL transcript as uploaded (which MAY already label speakers by their real names), and the beginning of the tagged transcript (generic Speaker N labels).
 
-Rules:
-- Use the participant names/roles EXACTLY as written in the participants list below.
-- Map a label only when the evidence is reasonably clear: who asks questions vs who answers, names used when speakers address each other, roles or companies mentioned in introductions.
+Return ONLY valid JSON with no other text, one entry per speaker label that appears in the tagged transcript:
+{{"Speaker 1": "name (role)", "Speaker 2": ""}}
+
+Rules (in priority order):
+- If the ORIGINAL transcript already identifies who is speaking by name (e.g. "Amit:", "Jitin (PM):"), USE those names — align each Speaker N to the matching person by comparing the turns/wording between the two versions.
+- Otherwise use the participants list: map by who asks questions vs who answers, names used when speakers address each other, and roles or companies mentioned in introductions. Use participant names/roles EXACTLY as written.
+- You MAY use a real name that appears in the original transcript even if it is not in the participants list. But do NOT invent a name that appears in neither the original transcript nor the participants list.
 - If you cannot confidently map a label, use an empty string "" for it. Do NOT guess.
-- Do NOT invent names that are not in the participants list.
 
 PARTICIPANTS: {participants}
 
-TAGGED TRANSCRIPT (beginning):
+ORIGINAL TRANSCRIPT (beginning — may include real speaker names):
+{original_sample}
+
+TAGGED TRANSCRIPT (beginning — generic Speaker N labels):
 {transcript_sample}
 """
 
