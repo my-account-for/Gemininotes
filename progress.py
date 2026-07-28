@@ -181,12 +181,18 @@ def build_processing_plan(
     return plan
 
 
-def build_speaker_id_plan(*, is_audio: bool) -> List[Tuple[str, str, float]]:
-    """Plan for the speaker-identification step (Expert Meeting Option 4)."""
+def build_speaker_id_plan(*, is_audio: bool, with_merge: bool = False) -> List[Tuple[str, str, float]]:
+    """Plan for the speaker-identification step (Expert Meeting Option 4 and
+    Internal Discussion). With `with_merge`, the Gemini tagging step is
+    replaced by AssemblyAI diarization + an LLM merge."""
     plan: List[Tuple[str, str, float]] = [("prepare", "Preparing source content", 0.5)]
     if is_audio:
-        plan.append(("transcribe", "Transcribing audio", 6.0))
-    plan.append(("refine", "Refining & tagging speakers", 6.0))
+        plan.append(("transcribe", "Transcribing audio (Gemini)", 6.0))
+    if with_merge:
+        plan.append(("diarize", "Diarizing (AssemblyAI)", 5.0))
+        plan.append(("merge", "Merging transcripts", 5.0))
+    else:
+        plan.append(("refine", "Refining & tagging speakers", 6.0))
     return plan
 
 

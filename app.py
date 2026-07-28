@@ -55,6 +55,7 @@ from prompts import (
     MANAGEMENT_MEETING_PROMPT,
     INTERNAL_DISCUSSION_PROMPT,
     INTERNAL_DISCUSSION_POSTPROCESS_PROMPT,
+    TRANSCRIPT_MERGE_PROMPT,
     PROMPT_INITIAL,
     PROMPT_CONTINUATION,
     VALIDATION_DETAILED_PROMPT,
@@ -380,6 +381,9 @@ class AppState:
     # Internal Discussion: route through the speaker-ID verification flow
     # (refine → auto-tag → user review) before generating speaker-grouped notes.
     internal_verify_speakers: bool = True
+    # Speaker-ID flow: also diarize the audio with AssemblyAI and merge it with
+    # the Gemini transcript for stronger speaker attribution (needs a key).
+    use_assemblyai_merge: bool = False
     speakers: str = ""
     earnings_call_topics: str = ""
     existing_notes_input: str = ""
@@ -1370,29 +1374,105 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
     return raw_transcript, file_name, pdf_bytes_data
 
 
-def run_speaker_identification_task(state: AppState, status_ui, progress: ProgressTracker) -> Dict[str, Any]:
-    """Refine transcript AND tag speakers (2 or 3, auto-detected).
+def _assemblyai_configured() -> bool:
+    """True when an AssemblyAI API key is available in the environment."""
+    return bool(os.environ.get("ASSEMBLYAI_API_KEY"))
 
-    Returns a dict with: raw_transcript, file_name, pdf_bytes, tagged_transcript,
-    segments, speakers, token_usage. The result is stored in session_state so
-    the user can edit speaker tags before generating notes.
-    """
-    start_time = time.time()
-    # Speaker ID uses its own model (defaults to a stronger one than refinement)
-    # because distinguishing voices across a long transcript benefits from the
-    # bigger context model. Fall back to refinement_model if unset.
-    sid_model_name = getattr(state, "speaker_id_model", None) or state.refinement_model
-    sid_model = _get_cached_model(sid_model_name)
 
-    raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
+def _use_assemblyai_merge(state: AppState) -> bool:
+    """Whether the AssemblyAI diarization + merge path should run for this run:
+    the toggle is on, a key is configured, and the input is audio."""
+    return bool(getattr(state, "use_assemblyai_merge", False)) and _input_is_audio(state) and _assemblyai_configured()
 
-    # Save checkpoints in case the user reloads
-    st.session_state["_checkpoint_raw_transcript"] = raw_transcript
-    st.session_state["_checkpoint_file_name"] = file_name
 
-    progress.complete_step("prepare")
+def _transcribe_with_assemblyai(audio_bytes: bytes) -> Tuple[str, str]:
+    """Diarize audio with AssemblyAI and return (utterances_text, error).
 
-    speakers = sanitize_input(state.speakers)
+    utterances_text is one line per utterance: "Speaker A [MM:SS]: text",
+    which is the attribution source (Transcript B) for the merge. Returns
+    ("", <reason>) on any failure so the caller can fall back to Gemini
+    tagging — this path is strictly best-effort."""
+    api_key = os.environ.get("ASSEMBLYAI_API_KEY")
+    if not api_key:
+        return "", "ASSEMBLYAI_API_KEY is not set."
+    try:
+        import assemblyai as aai
+    except ImportError:
+        return "", "The 'assemblyai' package is not installed."
+
+    tmp_path = None
+    try:
+        aai.settings.api_key = api_key
+        # speaker_labels gives per-utterance diarization; language detection
+        # keeps it usable for code-switched / non-English recordings.
+        config = aai.TranscriptionConfig(speaker_labels=True, language_detection=True)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".audio") as tf:
+            tf.write(audio_bytes)
+            tmp_path = tf.name
+        transcript = aai.Transcriber(config=config).transcribe(tmp_path)
+        if getattr(transcript, "status", None) == aai.TranscriptStatus.error:
+            return "", f"AssemblyAI error: {getattr(transcript, 'error', 'unknown')}"
+        utterances = getattr(transcript, "utterances", None) or []
+        if not utterances:
+            return "", "AssemblyAI returned no diarized utterances."
+        lines = [f"Speaker {u.speaker} [{_fmt_audio_ts(int(u.start))}]: {u.text}" for u in utterances]
+        return "\n".join(lines), ""
+    except Exception as e:
+        return "", str(e)
+    finally:
+        if tmp_path:
+            try: os.remove(tmp_path)
+            except Exception: pass
+
+
+def _merge_dual_transcripts(transcript_a: str, transcript_b: str, speaker_info: str, merge_model) -> Tuple[str, int]:
+    """Merge the Gemini content transcript (A) and the AssemblyAI diarized
+    transcript (B) into one speaker-attributed transcript of tagged turns.
+    Returns (merged_text, tokens); ("", tokens) if the model returns nothing."""
+    prompt = TRANSCRIPT_MERGE_PROMPT.format(
+        speaker_info=speaker_info or "Unknown — infer from the conversation.",
+        output_language="Clear English (translate any non-English or code-switched speech; keep proper nouns, product names, and technical terms as-is).",
+        transcript_a=transcript_a,
+        transcript_b=transcript_b,
+    )
+    # Reconstruction, not generation — keep it deterministic.
+    response = generate_with_retry(
+        merge_model, prompt,
+        generation_config={**GENERATION_CONFIG, "temperature": 0.1},
+    )
+    return _extract_response_text(response), safe_get_token_count(response)
+
+
+def _parse_named_tagged_transcript(text: str) -> List[Dict[str, str]]:
+    """Parse a merge transcript whose turns are tagged with arbitrary
+    ``**Name:**`` (or ``**Skip:**``) labels into
+    {"speaker": <name>|"Skip", "text": ...} segments. Generalises
+    _parse_tagged_transcript, which only accepts generic "Speaker N" labels."""
+    if not text:
+        return []
+    # A turn marker is a short bold label ending in a colon, e.g. "**Amit:**".
+    pattern = re.compile(r"\*\*\s*([^\n*:]{1,60}?)\s*:\s*\*\*\s*")
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return []
+    segments: List[Dict[str, str]] = []
+    preamble = text[: matches[0].start()].strip()
+    if preamble and len(preamble.split()) > 25:
+        segments.append({"speaker": SKIP_TAG, "text": preamble})
+    for i, m in enumerate(matches):
+        label = m.group(1).strip()
+        speaker = SKIP_TAG if label.lower() == "skip" else label
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        seg_text = text[start:end].strip()
+        if seg_text:
+            segments.append({"speaker": speaker, "text": seg_text})
+    return segments
+
+
+def _gemini_tag_speakers(state: AppState, sid_model, raw_transcript: str, speakers: str, progress) -> Tuple[List[Dict[str, str]], int]:
+    """Default speaker-ID path: refine the transcript AND tag speakers with
+    Gemini (chunked for long transcripts). Returns (segments, tokens)."""
     speaker_info = f"Known participants (use as hint only, but still tag as Speaker 1/2/3): {speakers}." if speakers else ""
     refinement_extra = REFINEMENT_INSTRUCTIONS.get(state.selected_meeting_type, REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "")) + "\n" + ASR_CORRECTION_INSTRUCTION
 
@@ -1466,7 +1546,68 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
             prev_tagged_tail = _serialize_tagged_segments(chunk_segments[-4:]) if chunk_segments else ""
 
     tagged_transcript = "\n\n".join(c.strip() for c in tagged_chunks if c and c.strip())
-    segments = _parse_tagged_transcript(tagged_transcript)
+    return _parse_tagged_transcript(tagged_transcript), total_tokens
+
+
+def run_speaker_identification_task(state: AppState, status_ui, progress: ProgressTracker) -> Dict[str, Any]:
+    """Refine transcript AND tag speakers (2 or 3, auto-detected).
+
+    Returns a dict with: raw_transcript, file_name, pdf_bytes, tagged_transcript,
+    segments, speakers, token_usage. The result is stored in session_state so
+    the user can edit speaker tags before generating notes.
+    """
+    start_time = time.time()
+    # Speaker ID uses its own model (defaults to a stronger one than refinement)
+    # because distinguishing voices across a long transcript benefits from the
+    # bigger context model. Fall back to refinement_model if unset.
+    sid_model_name = getattr(state, "speaker_id_model", None) or state.refinement_model
+    sid_model = _get_cached_model(sid_model_name)
+
+    raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
+
+    # Save checkpoints in case the user reloads
+    st.session_state["_checkpoint_raw_transcript"] = raw_transcript
+    st.session_state["_checkpoint_file_name"] = file_name
+
+    progress.complete_step("prepare")
+
+    speakers = sanitize_input(state.speakers)
+    total_tokens = 0
+    segments: List[Dict[str, str]] = []
+    merged_via_assemblyai = False
+
+    if _use_assemblyai_merge(state):
+        # Dual-engine path: Gemini transcript (content) + AssemblyAI
+        # diarization (attribution), merged into one speaker-attributed
+        # transcript. Best-effort — any failure falls back to Gemini tagging.
+        try:
+            audio_bytes = (
+                state.audio_recording.getvalue() if state.audio_recording
+                else (state.uploaded_file.getvalue() if state.uploaded_file else None)
+            )
+            progress.update("diarize", 0, "Diarizing audio with AssemblyAI...")
+            transcript_b, aai_err = _transcribe_with_assemblyai(audio_bytes) if audio_bytes else ("", "No audio available.")
+            if transcript_b:
+                progress.complete_step("diarize")
+                progress.update("merge", 0.2, "Merging Gemini + AssemblyAI transcripts...")
+                merged, merge_tokens = _merge_dual_transcripts(
+                    raw_transcript, transcript_b, speakers, _get_cached_model(state.notes_model)
+                )
+                total_tokens += merge_tokens
+                segments = _parse_named_tagged_transcript(merged)
+                if segments:
+                    merged_via_assemblyai = True
+                else:
+                    st.warning("The transcript merge produced no usable segments; falling back to Gemini speaker tagging.")
+            else:
+                st.warning(f"AssemblyAI diarization unavailable; falling back to Gemini speaker tagging. {aai_err}")
+        except Exception as e:
+            st.warning(f"AssemblyAI merge failed; falling back to Gemini speaker tagging. Details: {e}")
+
+    if not merged_via_assemblyai:
+        segments, tag_tokens = _gemini_tag_speakers(state, sid_model, raw_transcript, speakers, progress)
+        total_tokens += tag_tokens
+
     if not segments:
         raise ValueError("Speaker identification did not return any tagged segments. Try re-running, or switch to Option 1/2/3.")
 
@@ -1479,16 +1620,21 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
     canonical_tagged = _serialize_tagged_segments(segments)
     speakers_list = _detect_speakers_in_segments(segments)
 
-    # Pre-fill speaker display names (best-effort) so renaming is usually
-    # already done — from the participants list AND from any real speaker
-    # names already present in the uploaded transcript.
-    progress.update("refine", 1.0, "Matching speakers to names...")
-    inferred_names, name_tokens = _infer_speaker_names(
-        sid_model, canonical_tagged, speakers, raw_transcript=raw_transcript
-    )
-    total_tokens += name_tokens
-
-    progress.complete_step("refine")
+    if merged_via_assemblyai:
+        # The merge already assigned real names as the tags — use them as the
+        # display names directly; no separate name inference needed.
+        inferred_names = {s: s for s in speakers_list if s != SKIP_TAG}
+        progress.complete_step("merge")
+    else:
+        # Pre-fill speaker display names (best-effort) so renaming is usually
+        # already done — from the participants list AND from any real speaker
+        # names already present in the uploaded transcript.
+        progress.update("refine", 1.0, "Matching speakers to names...")
+        inferred_names, name_tokens = _infer_speaker_names(
+            sid_model, canonical_tagged, speakers, raw_transcript=raw_transcript
+        )
+        total_tokens += name_tokens
+        progress.complete_step("refine")
 
     # Durable checkpoint: persist the tagged transcript as a draft note so the
     # refinement/tagging work survives a reload while the user reviews tags.
@@ -2119,6 +2265,20 @@ def render_input_and_processing_tab(state: AppState):
     with col_settings:
         with st.popover("Settings & Models", use_container_width=True):
             state.refinement_enabled = st.toggle("Transcript Refinement", value=state.refinement_enabled)
+
+            _aai_ready = _assemblyai_configured()
+            state.use_assemblyai_merge = st.toggle(
+                "Diarize with AssemblyAI + merge",
+                value=state.use_assemblyai_merge and _aai_ready,
+                disabled=not _aai_ready,
+                help="For audio in the speaker-verification flow (Internal Discussion, or "
+                     "Expert Meeting Option 4): transcribe with Gemini for detail AND diarize "
+                     "with AssemblyAI for speaker turns, then merge into one speaker-attributed "
+                     "transcript (merged with the Notes model). Improves 'who said what' on "
+                     "multi-speaker recordings. Falls back to Gemini tagging if AssemblyAI fails.",
+            )
+            if not _aai_ready:
+                st.caption("Set `ASSEMBLYAI_API_KEY` to enable AssemblyAI diarization + merge.")
             _chunk_options = CHUNK_SIZE_OPTIONS if state.chunk_word_size in CHUNK_SIZE_OPTIONS else sorted(set(CHUNK_SIZE_OPTIONS + [state.chunk_word_size]))
             state.chunk_word_size = st.select_slider(
                 "Section size (words)",
@@ -2299,7 +2459,10 @@ def render_input_and_processing_tab(state: AppState):
         # in the tree); the text persists on state for the later notes step.
         _transcribe_context_audio(state)
         with st.status("Identifying speakers...", expanded=True) as status:
-            progress = ProgressTracker(build_speaker_id_plan(is_audio=_input_is_audio(state)))
+            progress = ProgressTracker(build_speaker_id_plan(
+                is_audio=_input_is_audio(state),
+                with_merge=_use_assemblyai_merge(state),
+            ))
             try:
                 result = run_speaker_identification_task(state, status, progress)
                 st.session_state.sn_segments = result["segments"]
