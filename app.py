@@ -357,6 +357,11 @@ class AppState:
     chunk_word_size: int = CHUNK_WORD_SIZE
     add_context_enabled: bool = True
     context_input: str = ""
+    # Optional General Context voice note: captured in the UI, transcribed at
+    # generate time into context_audio_text and combined with context_input.
+    context_audio_file: Optional[Any] = None
+    context_audio_recording: Optional[Any] = None
+    context_audio_text: str = ""
     speakers: str = ""
     earnings_call_topics: str = ""
     existing_notes_input: str = ""
@@ -1032,8 +1037,12 @@ def _get_base_prompt_for_type(state):
 
 def get_dynamic_prompt(state: AppState, transcript_chunk: str, speaker_legend: str = "") -> str:
     base = _speaker_legend_block(speaker_legend) + _get_base_prompt_for_type(state)
+    # Context can come from the typed field and/or a transcribed voice note;
+    # both are combined into one ADDITIONAL CONTEXT block.
     sanitized_context = sanitize_input(state.context_input)
-    context_section = f"**ADDITIONAL CONTEXT:**\n{sanitized_context}" if state.add_context_enabled and sanitized_context else ""
+    audio_context = sanitize_input(getattr(state, "context_audio_text", "") or "")
+    combined_context = "\n\n".join(part for part in (sanitized_context, audio_context) if part)
+    context_section = f"**ADDITIONAL CONTEXT:**\n{combined_context}" if state.add_context_enabled and combined_context else ""
 
     if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes":
         return f"Enrich the following existing notes based on the new transcript. Maintain the same structure and format.\n\n{base}\n\n**EXISTING NOTES:**\n{state.existing_notes_input}\n\n**NEW TRANSCRIPT:**\n{transcript_chunk}"
@@ -1799,31 +1808,41 @@ def on_sector_change():
     all_sectors = db_get_sectors()
     state.earnings_call_topics = all_sectors.get(new_sector, "")
 
-def _process_context_voice(state: AppState, uploaded_file, audio_recording) -> None:
-    """Transcribe + refine a general-context voice note and append the result
-    to state.context_input. Uses the same transcription and refinement stages
-    as the main transcript so context audio is handled just like the main app.
-    Reruns on success so the updated Context Details text area re-renders."""
+def _transcribe_context_audio(state: AppState) -> None:
+    """Transcribe (and refine) a General Context voice note into
+    state.context_audio_text, run as the first step of the generate flow.
+
+    The transcribed text is combined with the typed context in
+    get_dynamic_prompt, so downstream note generation sees the spoken context
+    as ordinary text. context_audio_text is recomputed from scratch on every
+    generate (so re-running never duplicates it), and cleared when no voice
+    note is present. Failures warn and are non-fatal — generation proceeds
+    with whatever typed context exists."""
+    # Always recompute from the current voice note (or clear it), so a second
+    # generation never stacks a duplicate transcript onto the context.
+    state.context_audio_text = ""
+    if not state.add_context_enabled or state.selected_meeting_type == "Custom":
+        return
+
     audio_bytes = None
-    if audio_recording is not None:
-        audio_bytes = audio_recording.getvalue()
-    elif uploaded_file is not None:
-        ext = os.path.splitext(uploaded_file.name)[1].lower()
+    if state.context_audio_recording is not None:
+        audio_bytes = state.context_audio_recording.getvalue()
+    elif state.context_audio_file is not None:
+        ext = os.path.splitext(state.context_audio_file.name)[1].lower()
         if ext not in AUDIO_EXTENSIONS:
-            st.error(f"Unsupported audio format '{ext}'. Use one of: {', '.join(AUDIO_EXTENSIONS)}.")
+            st.warning(f"Ignoring context voice note: unsupported format '{ext}'.")
             return
-        audio_bytes = uploaded_file.getvalue()
+        audio_bytes = state.context_audio_file.getvalue()
     if not audio_bytes:
-        st.warning("Please upload or record a voice note first.")
         return
 
     transcription_model = _get_cached_model(state.transcription_model)
-    with st.status("Processing voice note...", expanded=True) as status:
+    with st.status("Transcribing context voice note...", expanded=True) as status:
         bar = st.progress(0.0)
 
         def _cb(done, total, message):
             bar.progress(done / total if total else 0.0)
-            status.update(label=f"Transcribing voice note — {message}")
+            status.update(label=f"Transcribing context voice note — {message}")
 
         try:
             raw_text, _suspect, warnings = _transcribe_audio_bytes(
@@ -1833,21 +1852,20 @@ def _process_context_voice(state: AppState, uploaded_file, audio_recording) -> N
                 progress_cb=_cb,
             )
         except Exception as e:
-            status.update(label="Voice note transcription failed", state="error")
-            st.error(f"Could not transcribe the voice note: {e}")
+            status.update(label="Context voice note transcription failed", state="error")
+            st.warning(f"Could not transcribe the context voice note; continuing without it. Details: {e}")
             return
 
         for w in warnings:
             st.warning(w)
         if not raw_text or not raw_text.strip():
-            status.update(label="No speech detected", state="error")
-            st.warning("No speech could be transcribed from the voice note.")
+            status.update(label="No speech detected in context voice note", state="error")
             return
 
         final_text = raw_text
         # Refine to the same standard as the main transcript, when enabled.
         if state.refinement_enabled:
-            status.update(label="Refining voice note...")
+            status.update(label="Refining context voice note...")
             bar.progress(0.9)
             refinement_model = _get_cached_model(state.refinement_model)
             refine_prompt = (
@@ -1862,12 +1880,9 @@ def _process_context_voice(state: AppState, uploaded_file, audio_recording) -> N
                 final_text = refined.strip()
 
         bar.progress(1.0)
-        status.update(label="Voice note added to context", state="complete")
+        status.update(label="Context voice note added", state="complete")
 
-    existing = (state.context_input or "").strip()
-    state.context_input = f"{existing}\n\n{final_text}".strip() if existing else final_text
-    st.toast("Voice note added to General Context.")
-    st.rerun()
+    state.context_audio_text = final_text.strip()
 
 def render_input_and_processing_tab(state: AppState):
     # --- Source Input ---
@@ -1977,32 +1992,30 @@ def render_input_and_processing_tab(state: AppState):
     if state.selected_meeting_type != "Custom":
         state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
         if state.add_context_enabled:
-            # No widget key: the text area is driven by value=state.context_input
-            # so that _process_context_voice can update it and st.rerun() to show
-            # the appended transcript (a keyed widget would ignore the new value).
             state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
             with st.expander("🎙️ Add context from voice"):
                 st.caption(
                     "Upload a voice note or record one. It's transcribed and refined "
-                    "just like the main transcript, then appended to Context Details above."
+                    "just like the main transcript when you click Generate Notes, then "
+                    "used together with the text above as context."
                 )
                 vc_upload_col, vc_record_col = st.columns(2)
                 with vc_upload_col:
-                    context_voice_file = st.file_uploader(
+                    state.context_audio_file = st.file_uploader(
                         "Upload voice note",
                         type=['wav', 'mp3', 'm4a', 'ogg', 'flac'],
                         key="context_voice_upload",
                         help="Any audio file (mp3, m4a, wav, ogg, flac).",
                     )
                 with vc_record_col:
-                    context_voice_rec = st.audio_input("Record voice note", key="context_voice_record")
-                if st.button(
-                    "Process voice → context",
-                    key="process_context_voice_btn",
-                    use_container_width=True,
-                    disabled=not (context_voice_file or context_voice_rec),
-                ):
-                    _process_context_voice(state, context_voice_file, context_voice_rec)
+                    state.context_audio_recording = st.audio_input("Record voice note", key="context_voice_record")
+                if state.context_audio_file or state.context_audio_recording:
+                    st.caption("🎙️ Voice note ready — it will be transcribed when you generate notes.")
+        else:
+            # Context disabled: drop any captured voice note so it isn't used.
+            state.context_audio_file = None
+            state.context_audio_recording = None
+            state.context_audio_text = ""
 
     # --- Settings & Participants row ---
     col_settings, col_participants = st.columns(2)
@@ -2143,6 +2156,9 @@ def render_input_and_processing_tab(state: AppState):
 
     # --- Standard Processing (non-speaker flows) ---
     if state.processing:
+        # Transcribe any General Context voice note first, so downstream
+        # prompts see the spoken context as ordinary text.
+        _transcribe_context_audio(state)
         with st.status("Processing your request...", expanded=True) as status:
             progress = ProgressTracker(build_processing_plan(
                 is_audio=_input_is_audio(state),
@@ -2178,6 +2194,9 @@ def render_input_and_processing_tab(state: AppState):
 
     # --- Speaker ID Processing (speaker-tag step) ---
     if st.session_state.get("sn_processing_id"):
+        # Transcribe any General Context voice note now (while its widgets are
+        # in the tree); the text persists on state for the later notes step.
+        _transcribe_context_audio(state)
         with st.status("Identifying speakers...", expanded=True) as status:
             progress = ProgressTracker(build_speaker_id_plan(is_audio=_input_is_audio(state)))
             try:
