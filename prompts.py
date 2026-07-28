@@ -132,48 +132,67 @@ For each topic:
 **PRIORITY #2: CAPTURE ALL DATA.** Names, numbers, dates, metrics, and specific references.
 **PRIORITY #3: PRESERVE CONTEXT.** Include the reasoning behind decisions and any dissenting views."""
 
-INTERNAL_DISCUSSION_PROMPT = """### **ROLE & GOAL: INTERNAL DISCUSSION → LEARNINGS DOCUMENT**
+INTERNAL_DISCUSSION_PROMPT = """### **ROLE & GOAL: INTERNAL DISCUSSION → STRUCTURED NOTES**
 
-You are a research associate at a long-term, fundamentals-focused equity investment firm. Your job is to convert a raw internal discussion transcript between analysts into a clean, comprehensive learnings document that the team will refer back to for years.
+You are a meticulous note-taker. Convert a raw internal discussion transcript — a conversation between two or more people on ANY subject — into a clean, comprehensive, well-organised notes document the team can refer back to later. This is a general-purpose internal discussion; it may or may not be about investments, so do NOT assume a finance context or impose finance framing.
 
-**CONTEXT ABOUT THE READER:**
-The reader is a long-term business owner-investor. They care about business models, competitive advantages, pricing power, management behavior, disruption risk, and mental models that transfer across companies and markets. They do NOT want commentary on valuation, stock prices, or market movements. They value intellectual humility: where the analysts disagreed, were uncertain, or flagged something as a hypothesis rather than a fact, the document must preserve that uncertainty rather than smooth it over.
+**WHAT THIS DOCUMENT IS FOR:** Capture everything of substance that was discussed — the topics covered, what each person said, decisions taken, questions raised and answered, information shared, and any learnings or action items. A reader should be able to reconstruct the discussion without listening to it. Aggressively ignore social chit-chat and noise (greetings, small talk, personal-life tangents, scheduling, "can you hear me?", typing/device/recording chatter) UNLESS it carries a real decision, learning, or action item.
 
-**DOCUMENT STRUCTURE — produce a single document with exactly this structure, in this order:**
+**HOW TO STRUCTURE — WORK TOPIC BY TOPIC, ATTRIBUTED BY SPEAKER:**
 
-**(1.) Title:** A short title naming the company/topic discussed and the purpose (e.g., "learnings, insights and mental models"), plus a one-line subtitle noting any read-across company the team was drawing implications for.
+1. **Identify the topics.** Read the whole discussion and determine the distinct topics/threads that were talked about. Include as many topics as the discussion actually contains — do NOT force a fixed number, and do NOT pad. Order them thematically (group related discussion together), not strictly chronologically.
 
-**(2.) Numbered topic sections:** Group the discussion into 8-12 coherent topics — thematic, NOT chronological. Each topic gets:
-- A descriptive **bold heading** (e.g., "The Recruiter Re-pricing Episode — A Case Study in Latent Pricing Power"), numbered sequentially.
-- Bullet points beneath it. Bullets only — no sub-sections, no tables, no paragraphs.
-- **Bold** the sentences that are genuine insights or mental models. In this team's transcripts, speakers sometimes literally say the word "insight" or "mental model" — treat those as mandatory captures, but also bold anything that clearly functions as one even if not labeled.
+2. **Give each topic a numbered, bold heading**, e.g. "**1. Q3 launch timeline**".
 
-**(3.) "Consolidated Mental Models"** as the final numbered topic: pull together every transferable mental model from across the discussion into one list, each stated crisply in one or two sentences (e.g., "small share of customer's cost + mission-critical activity + near-monopoly = durable pricing power"). State them generally, so they can be applied to other businesses.
+3. **Under each topic, attribute the discussion to the speakers.** For every person who spoke on that topic, add a **bold lead-in bullet with their name followed by a colon**, and list what they said as INDENTED sub-bullets beneath it. Use the speakers' real names wherever the transcript or the participant list identifies them; otherwise use "Speaker 1", "Speaker 2", etc., applied consistently throughout. For example:
+    - **Amit:**
+        - Point one — what Amit said or proposed, as a full sentence, with every specific (names, numbers, dates) intact.
+        - Point two — the next distinct thing he said.
+    - **Jitin:**
+        - Point one — Jitin's response, view, or addition.
+        - Point two — ...
+   Capture ALL substantive points each person made on the topic — never merge two speakers together, and never drop a point to save space. If people went back and forth, keep the exchange readable while preserving who said what.
 
-**(4.) "Unanswered Questions":** Number every question the analysts raised but did not resolve, every "we don't know," every disagreement left open, and every explicitly flagged risk that lacks an answer. Where the analysts sketched how they might answer a question, note that method in parentheses.
-
-**(5.) "Follow-Ups / Action Items":** List concrete tasks the analysts assigned themselves during the discussion (data to pull, sources to check, things to document or file somewhere).
-
-**EXTRACTION RULES — FOLLOW THESE STRICTLY:**
-- Capture every number exactly as stated: shares, CAGRs, price points, mix shifts, take rates, time periods. Numbers are the spine of the document. If the analysts corrected a number mid-discussion, use the corrected one.
-- Decompose growth wherever they did: if they split revenue into volume and price, or discussed mix shifts, reproduce the decomposition faithfully.
-- Preserve causal reasoning chains, not just conclusions. If they reasoned "X happened, likely because Y, and the evidence is Z (expert call)," capture all three links.
-- Attribute sources mentioned in the transcript (e.g., expert-network calls, company disclosures, competitor interviews) so the team knows the provenance of each claim.
-- Preserve caveats and data-quality warnings: unknown survey methodology, re-based disclosures, definitional ambiguities, unreliable comparator markets. Never present a caveated claim as settled.
-- Preserve disagreements as disagreements. If one analyst saw something as a risk and the other was skeptical, present both views and mark the question unresolved. Do not adjudicate.
-- Distinguish hypothesis from fact. If the analysts said "this is a hypothesis" or "if this was true," keep that framing (e.g., "mental model, not forecast").
-- Do not invent anything. No outside knowledge, no filled-in numbers, no speculation beyond what the transcript contains. If a figure is ambiguous in the transcript, flag it rather than guess.
-- Ignore transcript noise: phone calls, typing sounds, device chatter, tangents about recording tools — unless the tangent contains a real action item (then it goes in Follow-Ups / Action Items).
-- Read-across implications (e.g., lessons from the studied company applied to the company the team actually owns or tracks) deserve their own topic section or clearly marked bullets — these are often the most valuable content.
+**WHAT TO CAPTURE FAITHFULLY:**
+- Every decision reached, and who made or agreed to it.
+- Every specific: names, numbers, dates, figures, metrics, targets, and any data shared. If a number was corrected mid-discussion, use the corrected one.
+- The reasoning behind a conclusion, not just the conclusion.
+- Questions raised — both those answered (capture the answer) and those left open.
+- Disagreements as disagreements — present both sides under their respective speakers; do not adjudicate.
+- Any to-dos, next steps, owners, deadlines, and things to track that come up — keep them in place under the relevant speaker/topic (they will also be consolidated in a later step).
+- Do not invent anything. No outside knowledge or filled-in facts. If something in the transcript is ambiguous, flag it rather than guess.
 
 **FORMATTING RULES:**
-- Topic headings with plain bullet points underneath. No nested sub-headings within topics, no tables, no images.
-- Bullets should be substantive — one to three sentences each, not fragments.
-- **Bold** only insights and mental models (plus the topic headings themselves), nothing else.
-- Neutral, precise, analytical tone. No hype, no filler, no executive-summary fluff at the top.
-- Length: whatever comprehensiveness requires. Err on the side of including a marginal learning rather than dropping it.
+- Numbered, bold topic headings. Under each, one bold speaker lead-in bullet per speaker, with that speaker's points as indented sub-bullets. This single speaker → points nesting is the ONLY nesting — no deeper sub-headings, no tables, no images, no long paragraphs.
+- Bullets should be substantive and self-contained — usually one to three sentences.
+- Neutral, precise tone. No hype, no filler, no preamble or executive summary at the top.
+- Length: whatever completeness requires. Prefer including a marginal point over dropping it.
 
-**SECTIONED PROCESSING:** If you are told you are continuing from an earlier section of a long transcript, do NOT repeat the document title. Output only the numbered topic sections for the new content, followed by that section's additions under the exact headings "Consolidated Mental Models", "Unanswered Questions", and "Follow-Ups / Action Items" (keeping the headings identical lets the sections be merged afterwards)."""
+**SECTIONED PROCESSING:** If you are told you are continuing from an earlier section of a long transcript, do NOT repeat any document title. Continue with numbered, bold topic headings in the exact same speaker-attributed format, for the new content only. Do NOT add any consolidated, summary, or action-item sections — those are handled in a later step."""
+
+INTERNAL_DISCUSSION_POSTPROCESS_PROMPT = """You are post-processing an already-written internal-discussion notes document. The notes below are COMPLETE and CORRECT. Your job is a light pass that ADDS two things and changes NOTHING else.
+
+**ABSOLUTE PRESERVATION RULE:** Reproduce the entire document — every topic heading, every speaker label, every bullet, every number and name — in the same order and wording. Do NOT summarize, shorten, reword, reorder, merge, or delete any content. The ONLY edits you may make are the two additions described below. When unsure whether to touch something, leave it exactly as it is.
+
+**ADDITION 1 — HIGHLIGHT LEARNINGS (in place):**
+Go through the notes and find any point that is a genuine **insight**, **mental model**, **framework**, or **key learning** — whether it is explicitly labelled as such or clearly functions as one (a transferable principle, a "the lesson here is…", a rule of thumb, a named framework, a realisation the group arrived at). For each such point, wrap that bullet's text in a bold-red highlight using this EXACT syntax:
+    `:red[**…the learning text…**]`
+Example:
+    `- The real lesson is that speed of iteration beats up-front planning here.`
+  becomes
+    `- :red[**The real lesson is that speed of iteration beats up-front planning here.**]`
+Rules: highlight ONLY genuine learnings/insights/frameworks — never ordinary facts, updates, or opinions. Keep the bullet marker and its indentation exactly as they were (only the text after the marker gets wrapped). Do not highlight whole speaker sub-lists — only the specific bullet(s) that are learnings.
+
+**ADDITION 2 — CONSOLIDATED ACTION ITEMS (appended at the very end):**
+Scan the WHOLE document for every to-do, next step, follow-up, decision that requires action, deadline, owner assignment, and "thing to track / keep an eye on". Collect them all into a single section appended at the very END of the document, using this EXACT heading and a numbered list:
+
+### **Action Items, Next Steps & To-Track**
+1. <the action item — include the owner and/or due date in parentheses if they were mentioned>
+2. ...
+
+Keep the items as they appear inline above as well — this appended section is a consolidated backlog, not a move. If the discussion contained no action items at all, still add the heading with a single line: "1. None identified."
+
+Output the FULL document (all preserved content, plus the two additions). Output ONLY the document — no preamble, no explanation, no code fences."""
 
 PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze a meeting transcript chunk and generate detailed, factual notes.
 Your primary directive is **100% completeness and accuracy**. Process the transcript sequentially and generate notes following the structure below.

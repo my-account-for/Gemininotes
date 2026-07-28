@@ -33,7 +33,7 @@ from chunking import (
     merge_continuation_seams,
     strip_overlap,
     strip_asr_meta_markers,
-    merge_learning_doc_sections,
+    renumber_topic_sections,
     split_qa_blocks,
     flatten_grouping_plan,
     reorder_qa_blocks,
@@ -54,6 +54,7 @@ from prompts import (
     EARNINGS_CALL_PROMPT,
     MANAGEMENT_MEETING_PROMPT,
     INTERNAL_DISCUSSION_PROMPT,
+    INTERNAL_DISCUSSION_POSTPROCESS_PROMPT,
     PROMPT_INITIAL,
     PROMPT_CONTINUATION,
     VALIDATION_DETAILED_PROMPT,
@@ -994,11 +995,10 @@ def generate_notes_from_transcript(
         results[i] = text
 
     if state.selected_meeting_type == "Internal Discussion":
-        # Learnings-doc sections each end with their own Consolidated Mental
-        # Models / Unanswered Questions / Follow-Ups blocks, which
-        # merge_learning_doc_sections reorganizes later — attaching a
-        # continued topic's bullets to the previous section's tail would put
-        # them inside the wrong block, so sections are joined verbatim.
+        # Each section emits its own numbered, speaker-attributed topic blocks
+        # (numbering restarts per section). They are joined verbatim here; a
+        # later deterministic pass renumbers the topics and an LLM post-process
+        # highlights learnings and appends the consolidated action items.
         final_notes = "\n\n".join(r.strip() for r in results if r and r.strip())
     else:
         # A section that starts mid-answer re-states the question as a
@@ -1587,6 +1587,47 @@ def process_tagged_to_notes_task(
         state.selected_note_style = original_style
 
 
+def _postprocess_internal_discussion_notes(notes_content: str, notes_model, progress) -> Tuple[str, int]:
+    """Step 2 for Internal Discussion notes: an additive LLM pass over the
+    finished step-1 document that (a) highlights genuine insights / mental
+    models / frameworks / learnings inline as bold-red (``:red[**...**]``) and
+    (b) appends a consolidated "Action Items, Next Steps & To-Track" backlog.
+
+    The pass only ADDS content, so the output should be at least as long as the
+    input; if it comes back materially shorter (the model truncated or dropped
+    content), the original complete step-1 notes are kept instead. Returns
+    (notes, tokens)."""
+    if not notes_content or not notes_content.strip():
+        return notes_content, 0
+
+    progress.update("postprocess", 0.3, "Highlighting learnings & consolidating action items...")
+    prompt = f"{INTERNAL_DISCUSSION_POSTPROCESS_PROMPT}\n\n---\n\nNOTES DOCUMENT:\n{notes_content}"
+    source_words = len(notes_content.split())
+    # Additive pass: never accept an output that lost more than ~10% of the
+    # document, which would mean content was dropped rather than annotated.
+    floor_words = int(source_words * 0.9)
+    tokens = 0
+    best = ""
+    for _ in range(2):
+        response = generate_with_retry(notes_model, prompt, generation_config=GENERATION_CONFIG)
+        tokens += safe_get_token_count(response)
+        text = _extract_response_text(response)
+        if len(text.split()) > len(best.split()):
+            best = text
+        if best.strip() and len(best.split()) >= floor_words and _finish_reason_name(response) in _OK_FINISH_REASONS:
+            progress.update("postprocess", 1.0, "Done")
+            return best.strip(), tokens
+
+    # Guard tripped — keep the complete step-1 notes rather than a lossy rewrite.
+    progress.update("postprocess", 1.0, "Kept original notes (post-process guard)")
+    st.warning(
+        "⚠️ The learnings-highlight / action-item pass returned less content than the "
+        "notes it was given (often on very long discussions), so the un-highlighted notes "
+        "were kept to avoid losing anything."
+    )
+    return notes_content, tokens
+
+
 def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker):
     start_time = time.time()
     note_id = str(uuid.uuid4())
@@ -1758,10 +1799,19 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     if was_chunked:
         final_notes_content = cleanup_stitched_notes(final_notes_content)
         if state.selected_meeting_type == "Internal Discussion":
-            # Each processed section emits its own Consolidated Mental Models /
-            # Unanswered Questions / Follow-Ups blocks and restarts topic
-            # numbering. Merge them deterministically into one document.
-            final_notes_content = merge_learning_doc_sections(final_notes_content)
+            # Parallel sections each restart topic numbering at 1; renumber the
+            # topic headings sequentially across the whole document.
+            final_notes_content = renumber_topic_sections(final_notes_content)
+
+    # --- Step 4b: Internal Discussion post-processing ---
+    # Highlight insights / mental models / frameworks / learnings inline and
+    # append a consolidated action-items backlog at the end.
+    if state.selected_meeting_type == "Internal Discussion":
+        final_notes_content, pp_tokens = _postprocess_internal_discussion_notes(
+            final_notes_content, notes_model, progress
+        )
+        total_tokens += pp_tokens
+        progress.complete_step("postprocess")
 
     # --- Step 5: Executive Summary (Expert Meeting Option 3 only) ---
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
@@ -2167,6 +2217,7 @@ def render_input_and_processing_tab(state: AppState):
                     state.selected_note_style == "Option 3: Less Verbose + Summary"
                     and state.selected_meeting_type == "Expert Meeting"
                 ),
+                with_learning_postprocess=state.selected_meeting_type == "Internal Discussion",
             ))
             try:
                 final_note = process_and_save_task(state, status, progress)
