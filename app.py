@@ -267,6 +267,20 @@ POSTPROCESS_MIN_WORD_RATIO = 0.9
 # capture; the user can raise it via the Settings slider for speed.
 CHUNK_WORD_SIZE = 6000  # default; user-adjustable per session in Settings & Models
 CHUNK_SIZE_OPTIONS = [4000, 6000, 8000, 10000, 15000, 20000]
+
+# Audio formats accepted for upload. ffmpeg (installed via packages.txt) backs
+# pydub, so anything ffmpeg can decode works — every chunk is re-exported to
+# WAV before transcription regardless of the source container. Beyond the core
+# formats this includes the MPEG family (.mpeg/.mpg/.mpga, MPEG-4 audio) and
+# other common recorder outputs. Single source of truth — reused by the file
+# uploaders, get_file_content, size validation, and the audio-input detection.
+AUDIO_EXTENSIONS = [
+    ".wav", ".mp3", ".m4a", ".ogg", ".flac",
+    ".mpeg", ".mpg", ".mpga", ".mp4", ".m4b", ".aac",
+    ".opus", ".webm", ".oga", ".wma", ".amr", ".3gp", ".3gpp", ".aiff", ".aif",
+]
+# Extension list (no leading dot) for st.file_uploader's `type=` argument.
+AUDIO_UPLOAD_TYPES = [ext.lstrip(".") for ext in AUDIO_EXTENSIONS]
 # Tail of the previous chunk passed to the model as read-only continuity
 # context. It is never processed into notes, so it cannot create duplicates.
 CONTEXT_TAIL_WORDS = 800
@@ -554,7 +568,7 @@ def get_file_content(uploaded_file, audio_recording=None) -> Tuple[Optional[str]
             elif ext in [".txt", ".md"]:
                 return file_bytes_io.read().decode("utf-8"), name, None
 
-            elif ext in [".wav", ".mp3", ".m4a", ".ogg", ".flac"]:
+            elif ext in AUDIO_EXTENSIONS:
                 return "audio_file", name, None
 
         except Exception as e:
@@ -1069,7 +1083,7 @@ def validate_inputs(state: AppState) -> Optional[str]:
             ext = os.path.splitext(state.uploaded_file.name)[1].lower()
             if ext == ".pdf" and size_mb > MAX_PDF_MB:
                 return f"PDF is too large ({size_mb:.1f}MB). Limit: {MAX_PDF_MB}MB."
-            elif ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac'] and size_mb > MAX_AUDIO_MB:
+            elif ext in AUDIO_EXTENSIONS and size_mb > MAX_AUDIO_MB:
                 return f"Audio is too large ({size_mb:.1f}MB). Limit: {MAX_AUDIO_MB}MB."
 
     if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes" and not state.existing_notes_input:
@@ -1094,8 +1108,6 @@ def is_mobile_device() -> bool:
     # Note: This is a heuristic. Streamlit doesn't expose device info directly.
     # We'll use a session state flag that can be set via JS, defaulting to False.
     return st.session_state.get("_is_mobile", False)
-
-AUDIO_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.ogg', '.flac']
 
 def _input_is_audio(state: AppState) -> bool:
     """Whether the configured input will require audio transcription.
@@ -1945,8 +1957,11 @@ def render_input_and_processing_tab(state: AppState):
     else:
         col_upload, col_record = st.columns(2)
         with col_upload:
-            # "audio" is a MIME shortcut (audio/*) covering mp3/m4a/wav/ogg/flac.
-            state.uploaded_file = st.file_uploader("Upload a File", type=['pdf', 'txt', 'md', 'audio'], help="PDF, TXT, MD, or any audio file")
+            state.uploaded_file = st.file_uploader(
+                "Upload a File",
+                type=['pdf', 'txt', 'md'] + AUDIO_UPLOAD_TYPES,
+                help="PDF, TXT, MD, or an audio file (mp3, m4a, wav, ogg, flac, mpeg/mpg, mp4, aac, opus, and more)",
+            )
         with col_record:
             state.audio_recording = st.audio_input("Record Microphone")
 
@@ -1956,7 +1971,7 @@ def render_input_and_processing_tab(state: AppState):
         preview_text = state.text_input
     elif state.input_method == "Upload / Record" and state.uploaded_file:
         ext = os.path.splitext(state.uploaded_file.name)[1].lower()
-        if ext not in ['.wav', '.mp3', '.m4a', '.ogg', '.flac']:
+        if ext not in AUDIO_EXTENSIONS:
             content, _, _ = get_file_content(state.uploaded_file, None)
             if content and not str(content).startswith("Error:") and content != "audio_file":
                 preview_text = content
@@ -1970,7 +1985,7 @@ def render_input_and_processing_tab(state: AppState):
         st.caption(info)
     elif state.input_method == "Upload / Record" and state.uploaded_file:
         ext = os.path.splitext(state.uploaded_file.name)[1].lower()
-        if ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac']:
+        if ext in AUDIO_EXTENSIONS:
             st.caption("Audio file — word count available after transcription")
 
     st.divider()
@@ -2053,9 +2068,9 @@ def render_input_and_processing_tab(state: AppState):
                 with vc_upload_col:
                     state.context_audio_file = st.file_uploader(
                         "Upload voice note",
-                        type=['wav', 'mp3', 'm4a', 'ogg', 'flac'],
+                        type=AUDIO_UPLOAD_TYPES,
                         key="context_voice_upload",
-                        help="Any audio file (mp3, m4a, wav, ogg, flac).",
+                        help="Any audio file (mp3, m4a, wav, ogg, flac, mpeg/mpg, mp4, aac, opus, and more).",
                     )
                 with vc_record_col:
                     state.context_audio_recording = st.audio_input("Record voice note", key="context_voice_record")
