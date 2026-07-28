@@ -1619,8 +1619,10 @@ def process_tagged_to_notes_task(
 def _postprocess_internal_discussion_notes(notes_content: str, notes_model, progress) -> Tuple[str, int]:
     """Step 2 for Internal Discussion notes: an additive LLM pass over the
     finished step-1 document that (a) highlights genuine insights / mental
-    models / frameworks / learnings inline as bold-red (``:red[**...**]``) and
-    (b) appends a consolidated "Action Items, Next Steps & To-Track" backlog.
+    models / frameworks / learnings inline as bold-red (``:red[**...**]``),
+    (b) highlights unanswered/open questions as bold-orange, and (c) appends
+    consolidated "Open Questions" and "Action Items, Next Steps & To-Track"
+    sections.
 
     The pass only ADDS content, so the output should be at least as long as the
     input; if it comes back materially shorter (the model truncated or dropped

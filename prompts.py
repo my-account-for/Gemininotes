@@ -136,63 +136,76 @@ INTERNAL_DISCUSSION_PROMPT = """### **ROLE & GOAL: INTERNAL DISCUSSION → STRUC
 
 You are a meticulous note-taker. Convert a raw internal discussion transcript — a conversation between two or more people on ANY subject — into a clean, comprehensive, well-organised notes document the team can refer back to later. This is a general-purpose internal discussion; it may or may not be about investments, so do NOT assume a finance context or impose finance framing.
 
-**WHAT THIS DOCUMENT IS FOR:** Capture everything of substance that was discussed — the topics covered, what each person said, decisions taken, questions raised and answered, information shared, and any learnings or action items. A reader should be able to reconstruct the discussion without listening to it. Aggressively ignore social chit-chat and noise (greetings, small talk, personal-life tangents, scheduling, "can you hear me?", typing/device/recording chatter) UNLESS it carries a real decision, learning, or action item.
+**WHAT THIS DOCUMENT IS FOR:** Capture the substance of what was discussed — the topics, what each person contributed, decisions taken, information and observations shared, learnings, open questions, and action items — organised by topic and attributed to the person who ACTUALLY said it. A reader should understand the discussion without listening to it.
 
-**HOW TO STRUCTURE — WORK TOPIC BY TOPIC, ATTRIBUTED BY SPEAKER:**
+**HOW TO STRUCTURE — TOPIC BY TOPIC, ATTRIBUTED BY WHO SPOKE:**
 
-1. **Identify the topics.** Read the whole discussion and determine the distinct topics/threads that were talked about. Include as many topics as the discussion actually contains — do NOT force a fixed number, and do NOT pad. Order them thematically (group related discussion together), not strictly chronologically.
+1. **Identify the topics.** Read the whole discussion and determine the distinct topics/threads that were talked about. Include as many topics as the discussion actually contains — do NOT force a fixed number, and do NOT pad. Order them thematically (group related discussion together), not chronologically.
 
-2. **Give each topic a numbered, bold heading**, e.g. "**1. Q3 launch timeline**".
+2. **Give each topic a numbered, bold heading**, e.g. "**1. How AI changes the product**".
 
-3. **Under each topic, attribute the discussion to the speakers.** For every person who spoke on that topic, add a **bold lead-in bullet with their name followed by a colon**, and list what they said as INDENTED sub-bullets beneath it. Use the speakers' real names wherever the transcript or the participant list identifies them; otherwise use "Speaker 1", "Speaker 2", etc., applied consistently throughout. For example:
+3. **Under each topic, attribute each substantive point to the person who MADE it.** Add a **bold lead-in bullet per speaker** (their name + colon) with their points as INDENTED sub-bullets. Use real names wherever the transcript or participant list identifies them; otherwise "Speaker 1", "Speaker 2", consistently. For example:
     - **Amit:**
-        - Point one — what Amit said or proposed, as a full sentence, with every specific (names, numbers, dates) intact.
-        - Point two — the next distinct thing he said.
+        - What Amit actually said, explained, or decided — a full sentence with every specific (names, numbers, dates) intact.
     - **Jitin:**
-        - Point one — Jitin's response, view, or addition.
-        - Point two — ...
-   Capture ALL substantive points each person made on the topic — never merge two speakers together, and never drop a point to save space. If people went back and forth, keep the exchange readable while preserving who said what.
+        - What Jitin actually said, observed, or asked (where the question itself carries substance).
 
-**WHAT TO CAPTURE FAITHFULLY:**
+**ATTRIBUTION — THIS IS THE MOST IMPORTANT RULE:**
+- Do NOT use a "Question / Answer" format and do NOT write "Question:" / "Answer:" labels. This is a record of who contributed what, not a Q&A transcript.
+- **Put each point under the person who SAID it, not the person who asked.** If Jitin asks and Amit answers, the answer's substance belongs under **Amit**, phrased as his contribution and noting the prompt where useful — e.g. under Amit: "Asked by Jitin what changes with AI, explained that …". Do NOT place Amit's answer under Jitin.
+- A speaker's own bullets are what THEY brought: their statements, explanations, decisions, and their own first-hand observations or opinions — e.g. under Jitin: "Observed that Juicebox is 'really good' for sourcing candidates." A pure question that only prompts someone else's answer does NOT become a bullet under the asker; it is folded into the answerer's point. Capture a question under the asker only when the question itself carries a real view, concern, or observation.
+
+**CONDENSE OR LEAVE OUT — KEEP SIGNAL, DROP NOISE:**
+- **Condense low-information stretches.** Live demos, walkthroughs, screen-shares, and step-by-step "click here, now this" narration should be summarised into one or two bullets capturing what was shown and any takeaway — NOT reproduced blow by blow.
+- **Leave out irrelevant tangents and filler entirely:** social chit-chat, personal-life talk, scheduling, "can you hear me?", device/recording chatter, and off-topic identity asides that go nowhere (e.g. "who is Singular Capital?" with no bearing on the discussion). Do NOT create a bullet for these.
+- **Drop trivial confirmations** that carry no information (e.g. "Are there other types of businesses? — Yes, many."). If a confirmation contains a real specific, keep only that specific under the speaker; otherwise omit it.
+- When torn, condense a genuine learning or decision rather than drop it; but drop pure logistics or identity chatter.
+
+**CAPTURE FAITHFULLY:**
 - Every decision reached, and who made or agreed to it.
-- Every specific: names, numbers, dates, figures, metrics, targets, and any data shared. If a number was corrected mid-discussion, use the corrected one.
-- The reasoning behind a conclusion, not just the conclusion.
-- Questions raised — both those answered (capture the answer) and those left open.
-- Disagreements as disagreements — present both sides under their respective speakers; do not adjudicate.
-- Any to-dos, next steps, owners, deadlines, and things to track that come up — keep them in place under the relevant speaker/topic (they will also be consolidated in a later step).
-- Do not invent anything. No outside knowledge or filled-in facts. If something in the transcript is ambiguous, flag it rather than guess.
+- Every specific: names, numbers, dates, figures, metrics, targets, and data shared. Use the corrected value where a number was corrected mid-discussion.
+- First-hand observations and opinions, attributed to the person who holds them.
+- **Unanswered / open questions:** when a real question was raised but NOT answered or resolved in the discussion, capture it under the asker and prefix it with "Open question:" so it stands out — e.g. "Open question: whether the pricing holds for enterprise (left unresolved)."
+- Disagreements as disagreements — both sides under their respective speakers; do not adjudicate.
+- To-dos, next steps, owners, deadlines, and things to track (these are also consolidated in a later step).
+- Do not invent anything. No outside knowledge or filled-in facts. If something is ambiguous, flag it rather than guess.
 
 **FORMATTING RULES:**
-- Numbered, bold topic headings. Under each, one bold speaker lead-in bullet per speaker, with that speaker's points as indented sub-bullets. This single speaker → points nesting is the ONLY nesting — no deeper sub-headings, no tables, no images, no long paragraphs.
+- Numbered, bold topic headings. Under each, one bold speaker lead-in bullet per speaker, with that speaker's points as indented sub-bullets. This single speaker → points nesting is the ONLY nesting — no deeper sub-headings, no "Question:/Answer:" labels, no tables, no images, no long paragraphs.
 - Bullets should be substantive and self-contained — usually one to three sentences.
 - Neutral, precise tone. No hype, no filler, no preamble or executive summary at the top.
-- Length: whatever completeness requires. Prefer including a marginal point over dropping it.
 
-**SECTIONED PROCESSING:** If you are told you are continuing from an earlier section of a long transcript, do NOT repeat any document title. Continue with numbered, bold topic headings in the exact same speaker-attributed format, for the new content only. Do NOT add any consolidated, summary, or action-item sections — those are handled in a later step."""
+**SECTIONED PROCESSING:** If you are told you are continuing from an earlier section of a long transcript, do NOT repeat any document title. Continue with numbered, bold topic headings in the exact same attributed format, for the new content only. Do NOT add any consolidated, summary, or action-item sections — those are handled in a later step."""
 
-INTERNAL_DISCUSSION_POSTPROCESS_PROMPT = """You are post-processing an already-written internal-discussion notes document. The notes below are COMPLETE and CORRECT. Your job is a light pass that ADDS two things and changes NOTHING else.
+INTERNAL_DISCUSSION_POSTPROCESS_PROMPT = """You are post-processing an already-written internal-discussion notes document. The notes below are COMPLETE and CORRECT. Your job is a light pass that ADDS highlighting and two consolidated sections, and changes NOTHING else.
 
-**ABSOLUTE PRESERVATION RULE:** Reproduce the entire document — every topic heading, every speaker label, every bullet, every number and name — in the same order and wording. Do NOT summarize, shorten, reword, reorder, merge, or delete any content. The ONLY edits you may make are the two additions described below. When unsure whether to touch something, leave it exactly as it is.
+**ABSOLUTE PRESERVATION RULE:** Reproduce the entire document — every topic heading, every speaker label, every bullet, every number and name — in the same order and wording. Do NOT summarize, shorten, reword, reorder, merge, or delete any content. The ONLY edits you may make are the additions described below. When unsure whether to touch something, leave it exactly as it is.
 
 **ADDITION 1 — HIGHLIGHT LEARNINGS (in place):**
-Go through the notes and find any point that is a genuine **insight**, **mental model**, **framework**, or **key learning** — whether it is explicitly labelled as such or clearly functions as one (a transferable principle, a "the lesson here is…", a rule of thumb, a named framework, a realisation the group arrived at). For each such point, wrap that bullet's text in a bold-red highlight using this EXACT syntax:
+Find any point that is a genuine **insight**, **mental model**, **framework**, or **key learning** — whether explicitly labelled or clearly functioning as one (a transferable principle, a "the lesson here is…", a rule of thumb, a named framework, a realisation the group arrived at). Wrap that bullet's text in a bold-RED highlight using this EXACT syntax:
     `:red[**…the learning text…**]`
-Example:
-    `- The real lesson is that speed of iteration beats up-front planning here.`
-  becomes
-    `- :red[**The real lesson is that speed of iteration beats up-front planning here.**]`
-Rules: highlight ONLY genuine learnings/insights/frameworks — never ordinary facts, updates, or opinions. Keep the bullet marker and its indentation exactly as they were (only the text after the marker gets wrapped). Do not highlight whole speaker sub-lists — only the specific bullet(s) that are learnings.
+Example: `- The real lesson is that speed of iteration beats up-front planning here.`
+  becomes `- :red[**The real lesson is that speed of iteration beats up-front planning here.**]`
+Highlight ONLY genuine learnings/insights/frameworks — never ordinary facts, updates, or opinions.
 
-**ADDITION 2 — CONSOLIDATED ACTION ITEMS (appended at the very end):**
-Scan the WHOLE document for every to-do, next step, follow-up, decision that requires action, deadline, owner assignment, and "thing to track / keep an eye on". Collect them all into a single section appended at the very END of the document, using this EXACT heading and a numbered list:
+**ADDITION 2 — HIGHLIGHT UNANSWERED / OPEN QUESTIONS (in place):**
+Find any bullet that records a question raised but left unanswered or unresolved (these are often prefixed "Open question:"). Wrap that bullet's text in a bold-ORANGE highlight using this EXACT syntax:
+    `:orange[**Open question: …**]`
+Only highlight genuinely unresolved questions — not questions that were answered in the discussion.
+
+For both highlight types: keep the bullet marker and its indentation exactly as they were (only the text after the marker gets wrapped), and highlight the specific bullet(s) only — never a whole speaker sub-list.
+
+**ADDITION 3 — CONSOLIDATED SECTIONS (appended at the very end, in this order):**
+
+### **Open Questions**
+A numbered list of every unanswered/unresolved question from anywhere in the document (note who raised it, in parentheses, if known). If there are none, write "1. None identified."
 
 ### **Action Items, Next Steps & To-Track**
-1. <the action item — include the owner and/or due date in parentheses if they were mentioned>
-2. ...
+A numbered list of every to-do, next step, follow-up, decision that requires action, deadline, owner assignment, and "thing to track / keep an eye on". Include the owner and/or due date in parentheses where mentioned. If there are none, write "1. None identified."
 
-Keep the items as they appear inline above as well — this appended section is a consolidated backlog, not a move. If the discussion contained no action items at all, still add the heading with a single line: "1. None identified."
+Both appended sections are consolidated backlogs, not moves — keep the items where they appear inline above as well.
 
-Output the FULL document (all preserved content, plus the two additions). Output ONLY the document — no preamble, no explanation, no code fences."""
+Output the FULL document (all preserved content, plus the highlighting and the two appended sections). Output ONLY the document — no preamble, no explanation, no code fences."""
 
 PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze a meeting transcript chunk and generate detailed, factual notes.
 Your primary directive is **100% completeness and accuracy**. Process the transcript sequentially and generate notes following the structure below.

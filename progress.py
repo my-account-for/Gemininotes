@@ -176,7 +176,7 @@ def build_processing_plan(
     if with_summary:
         plan.append(("summary", "Generating executive summary", 1.0))
     if with_learning_postprocess:
-        plan.append(("postprocess", "Highlighting learnings & consolidating actions", 2.0))
+        plan.append(("postprocess", "Highlighting learnings/questions & consolidating actions", 2.0))
     plan.append(("save", "Finalizing & saving", 0.3))
     return plan
 
@@ -200,7 +200,7 @@ def build_notes_only_plan(
     if with_summary:
         plan.append(("summary", "Generating executive summary", 1.0))
     if with_learning_postprocess:
-        plan.append(("postprocess", "Highlighting learnings & consolidating actions", 2.0))
+        plan.append(("postprocess", "Highlighting learnings/questions & consolidating actions", 2.0))
     plan.append(("save", "Finalizing & saving", 0.3))
     return plan
 
