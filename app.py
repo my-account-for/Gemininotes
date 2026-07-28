@@ -1863,6 +1863,12 @@ def render_input_and_processing_tab(state: AppState):
     elif state.selected_meeting_type == "Custom":
         state.context_input = st.text_area("Custom Instructions", value=state.context_input, height=120, placeholder="Describe how you want the notes structured...")
 
+    # --- General Context (all non-Custom meeting types) ---
+    if state.selected_meeting_type != "Custom":
+        state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
+        if state.add_context_enabled:
+            state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
+
     # --- Settings & Participants row ---
     col_settings, col_participants = st.columns(2)
     with col_settings:
@@ -1880,9 +1886,6 @@ def render_input_and_processing_tab(state: AppState):
                      "merging similar questions and dropping specifics. Raise it for faster "
                      "runs with fewer API calls; lower it if notes still feel thin.",
             )
-            if state.selected_meeting_type != "Custom":
-                state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
-                if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
 
             st.divider()
             _was_flash_all = state.use_flash_for_all
