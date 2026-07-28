@@ -21,12 +21,66 @@ from enum import Enum
 import re
 import tempfile
 import html as html_module
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import copy
-import streamlit.components.v1 as components
 
 # --- Local Imports ---
 import database
+from chunking import (
+    create_chunks_with_context,
+    estimate_chunk_count,
+    cleanup_stitched_notes,
+    merge_continuation_seams,
+    strip_overlap,
+    strip_asr_meta_markers,
+    merge_learning_doc_sections,
+    split_qa_blocks,
+    flatten_grouping_plan,
+    reorder_qa_blocks,
+)
+from progress import (
+    ProgressTracker,
+    build_processing_plan,
+    build_speaker_id_plan,
+    build_notes_only_plan,
+    parallel_batches,
+)
+# --- Prompt templates live in prompts.py ---
+from prompts import (
+    ASR_CORRECTION_INSTRUCTION,
+    REFINEMENT_COMPLETENESS_INSTRUCTION,
+    EXPERT_MEETING_DETAILED_PROMPT,
+    EXPERT_MEETING_CONCISE_PROMPT,
+    EARNINGS_CALL_PROMPT,
+    MANAGEMENT_MEETING_PROMPT,
+    INTERNAL_DISCUSSION_PROMPT,
+    PROMPT_INITIAL,
+    PROMPT_CONTINUATION,
+    VALIDATION_DETAILED_PROMPT,
+    EXECUTIVE_SUMMARY_PROMPT,
+    QA_MERGE_PROMPT,
+    QA_TOPIC_GROUPING_PROMPT,
+    REFINEMENT_INSTRUCTIONS,
+    SPEAKER_ID_PROMPT_INITIAL,
+    SPEAKER_ID_PROMPT_CONTINUATION,
+    SPEAKER_LEGEND_EXTRACT_PROMPT,
+    SPEAKER_NAME_MAP_PROMPT,
+    OTG_EXTRACT_PROMPT,
+    OTG_CONVERT_PROMPT,
+    OTG_REFINE_CHUNK_PROMPT,
+    IA_MANAGEMENT_KTA_PROMPT,
+    IA_EXPERT_KTA_PROMPT,
+    IA_REFINE_CHUNK_PROMPT,
+    IA_TONE_INSTRUCTIONS,
+    EC_TOPIC_DISCOVERY_PROMPT,
+    EC_MULTI_FILE_NOTES_PROMPT,
+    EC_MULTI_FILE_STITCH_HEADER,
+    RC_DIMENSION_DISCOVERY_PROMPT,
+    RC_PER_REPORT_EXTRACTION_PROMPT,
+    RC_COMPARISON_PROMPT,
+    RC_STITCH_HEADER,
+)
+
 
 # --- App-wide CSS ---
 APP_CSS = """
@@ -176,26 +230,90 @@ except Exception as e:
 
 MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
-CHUNK_WORD_SIZE = 4000
-CHUNK_WORD_OVERLAP = 400
+# --- Transcription hardening (see _load_source_text) ---
+# Audio chunks after the first start this many ms early, so the sentences at
+# each 5-minute boundary appear in two chunks; strip_overlap() removes the
+# duplicated words at join time. A blind cut splits words mid-syllable, which
+# degrades ASR at every seam.
+TRANSCRIBE_OVERLAP_MS = 25 * 1000
+# A "successful" API response is not a successful transcription: on noisy,
+# crosstalk-heavy, or language-mixed chunks the model sometimes stops early or
+# returns nothing, with no error raised. Any chunk that comes back with fewer
+# words than this per minute of audio is treated as a failed attempt and
+# retried. Normal conversation runs 120-160 wpm; 40 is deliberately lax so
+# sparse or slow calls don't trigger false alarms.
+TRANSCRIBE_MIN_WORDS_PER_MINUTE = 40
+TRANSCRIBE_CHUNK_ATTEMPTS = 3
+# Chunks quieter than this are considered silence/hold-music and are exempt
+# from the word-count floor (pure silence legitimately transcribes to nothing).
+SILENT_CHUNK_DBFS = -45.0
+# Whole-file sanity floor: warn when the finished transcript averages fewer
+# words per minute than this — the signature of undetected missing chunks.
+TRANSCRIPT_LOW_DENSITY_WPM = 50
+# Refinement must preserve content (output length ≈ input length). An output
+# below this fraction of the input words means the model compressed or dropped
+# passages; the run falls back to the unrefined text rather than lose content.
+REFINE_MIN_OUTPUT_RATIO = 0.6
+# The Q&A-merge post-processing pass must also preserve content: the only
+# words it may remove are merged-away question headings and exact-duplicate
+# bullets, so an output below this fraction of the input words is flagged in
+# the review UI before the user applies it.
+POSTPROCESS_MIN_WORD_RATIO = 0.9
+# Chunks are non-overlapping and aligned to speaker-turn boundaries (see
+# chunking.py). The trade-off: larger sections mean fewer seams and faster
+# runs, but the model compresses more per call — merging similar questions
+# and dropping specifics. 6k words is the observed sweet spot for detail
+# capture; the user can raise it via the Settings slider for speed.
+CHUNK_WORD_SIZE = 6000  # default; user-adjustable per session in Settings & Models
+CHUNK_SIZE_OPTIONS = [4000, 6000, 8000, 10000, 15000, 20000]
+# Tail of the previous chunk passed to the model as read-only continuity
+# context. It is never processed into notes, so it cannot create duplicates.
+CONTEXT_TAIL_WORDS = 800
+# Rough ratio of generated-notes words to transcript words, used only to
+# estimate within-chunk progress while streaming.
+NOTES_OUTPUT_RATIO = 0.6
+# Completeness floor: notes below this fraction of the source words are
+# treated as a failed generation (model stopped early / over-compressed) and
+# retried, keeping the best attempt. Applied only to completeness-contract
+# meeting types (Expert Meeting, Earnings Call) — condensing formats
+# (learnings docs, decisions-only, custom instructions) legitimately produce
+# far less output than the transcript. Deliberately conservative: it exists
+# to catch catastrophic loss, not to police stylistic brevity.
+NOTES_MIN_OUTPUT_RATIO = 0.1
+# Total attempts per notes call before accepting a short/truncated output
+# and flagging it visibly (mirrors TRANSCRIBE_CHUNK_ATTEMPTS for audio).
+NOTES_GEN_ATTEMPTS = 3
 # High output token ceiling for notes generation.
 # Without this, Gemini defaults to ~8192 output tokens and silently
-# truncates long, detailed notes — especially on later chunks.
+# truncates long, detailed notes — especially on later chunks. Also applied
+# to refinement and speaker tagging, whose outputs are roughly transcript-
+# length and would exceed an 8192-token default at the 10k-word chunk size.
 MAX_OUTPUT_TOKENS = 65536
+GENERATION_CONFIG = {"max_output_tokens": MAX_OUTPUT_TOKENS}
+# Transcript context for "Chat with this Note". Gemini 2.5/3 models take
+# ~1M input tokens, so a generous cap keeps verbatim lookups working on
+# long calls (the old 30k-char cap silently dropped most of them).
+CHAT_TRANSCRIPT_CHAR_LIMIT = 400_000
 
 AVAILABLE_MODELS = {
-    "Gemini 1.5 Flash": "gemini-1.5-flash", "Gemini 1.5 Pro": "gemini-1.5-pro",
-    "Gemini 2.0 Flash": "gemini-2.0-flash-lite", "Gemini 2.5 Flash": "gemini-2.5-flash",
-    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite", "Gemini 2.5 Pro": "gemini-2.5-pro",
-    "Gemini 3.0 Flash": "gemini-3-flash-preview", "Gemini 3.0 Pro": "gemini-3-pro-preview",
-    "Gemini 3 Flash Preview": "gemini-3-flash-preview",
+    "Gemini 2.5 Flash": "gemini-2.5-flash",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
+    "Gemini 3.0 Flash": "gemini-3-flash-preview",
+    "Gemini 3.0 Pro": "gemini-3-pro-preview",
     "Gemini 3 Pro Preview": "gemini-3-pro-preview",
-    "Gemini 3.1 Pro Preview": "gemini-3.1-pro-preview",
-    "Gemini 3.1 Pro Preview (Custom Tools)": "gemini-3.1-pro-preview-customtools",
+    "Gemini 3.5 Flash": "gemini-3.5-flash",
 }
+# Model applied to every pipeline stage when the "use Flash for everything"
+# toggle in Settings & Models is on.
+FLASH_ALL_MODEL = "Gemini 3.5 Flash"
+# AppState fields overridden by that toggle (used to back up / restore the
+# user's per-stage picks when the toggle flips).
+MODEL_STAGE_FIELDS = ("notes_model", "refinement_model", "speaker_id_model", "transcription_model", "chat_model")
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Internal Discussion", "Custom"]
 MAX_TOPIC_DISCOVERY_FILES = 4  # Number of PDFs to scan for topic discovery
-EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
+SPEAKER_ID_FLOW_OPTION = "Option 4: Speaker ID Flow"
+EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary", SPEAKER_ID_FLOW_OPTION]
+SPEAKER_ID_DOWNSTREAM_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
 TONE_OPTIONS = ["As Is", "Very Positive", "Positive", "Neutral", "Negative", "Very Negative"]
@@ -214,742 +332,12 @@ NUMBER_FOCUS_INSTRUCTIONS = {
 }
 
 MEETING_TYPE_HELP = {
-    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations",
+    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations. Option 4 enables a speaker-tagging review step before notes are generated.",
     "Earnings Call": "Financial data, management commentary, guidance, and analyst Q&A",
     "Management Meeting": "Decisions, action items, owners, and key discussion points",
-    "Internal Discussion": "Perspectives, ideas, reasoning, conclusions, and next steps",
+    "Internal Discussion": "Investment-team learnings document: thematic topics with bolded insights and mental models, consolidated mental models, unanswered questions, and follow-ups",
     "Custom": "Provide your own formatting instructions via the context field",
 }
-
-# --- PROMPT CONSTANTS ---
-
-EXPERT_MEETING_DETAILED_PROMPT = """### **PRIMARY DIRECTIVE: MAXIMUM DETAIL & STRICT COMPLETENESS**
-Your goal is to produce the most thorough, granular notes possible. Remove conversational filler ("um," "you know," repetition) but **nothing substantive should be omitted.** Every factual claim, example, explanation, aside, and data point in the transcript must appear in your notes. When in doubt, INCLUDE it. Err heavily on the side of over-inclusion. Longer, more detailed notes are always preferred over concise ones.
-
-### **NOTES STRUCTURE**
-
-**(1.) Opening overview or Expert background (Conditional):**
-- If the transcript chunk begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
-- **DO:** Capture ALL details (names, dates, numbers, titles, affiliations, years of experience, roles). Use simple, direct language.
-- **DO NOT:** Summarize or include introductions about consulting firms.
-- If no intro exists, OMIT this section entirely.
-
-**(2.) Q&A format:**
-Structure the main body STRICTLY in Question/Answer format.
-
-**(2.A) Questions:**
--   Identify the core question being asked and rephrase it clearly in **bold**. Do NOT copy the question verbatim from the transcript — clean up filler, false starts, and rambling phrasing into a clear, well-formed question that preserves the original intent.
--   **NO LABELS:** Do NOT prefix questions with "Q:", "Q.", "Question:", or any similar label. The bold question text stands alone.
--   If the questioner provides context, framing, or a multi-part question, capture the full scope — do not reduce a multi-part question to a single line.
--   **LONG QUESTIONS / PREAMBLE:** Sometimes a question is long because the interviewer provides substantial framing, background, or context before asking — this preamble is part of the question and must be preserved as part of the bold question text. Do NOT treat the preamble as part of the answer.
--   **SPACING:** Leave exactly one blank line between the end of one answer and the start of the next bold question, so each Q&A pair is visually separated.
-
-**(2.B) Answers:**
--   Use bullet points (`-`) directly below the question (no blank line between the bold question and its first bullet).
--   Each bullet point must convey specific factual information in a clear, complete sentence.
--   Use **multiple bullet points** per answer — do NOT collapse a detailed response into a single bullet.
--   **ZERO SKIPPING RULE:** If the expert said it with substance, it must appear in your notes. Do NOT skip examples, anecdotes, specific sentences, or supporting details even if they seem minor or repetitive. Every distinct point gets its own bullet. If an answer contains 8 substantive points, you must produce at least 8 bullets — never condense them into 3-4.
--   **PRIORITY #1: CAPTURE ALL HARD DATA.** This includes all names, examples, monetary values (`$`), percentages (`%`), metrics, specific entities mentioned, time periods, market sizes, growth rates, company names, product names, and geographies.
--   **PRIORITY #2: CAPTURE ALL NUANCE & REASONING.** Do not over-summarize or reduce complex answers to surface-level statements. You must retain the following:
-    -   **Sentiment & Tone:** Note if the expert is confident, uncertain, speculative, cautious, or enthusiastic (e.g., "The expert was highly confident that...," "He cautioned that...").
-    -   **Qualifiers & Conditions:** Preserve modifying words that change meaning (e.g., "usually," "in most cases," "except in," "only when," "roughly," "approximately," "a potential risk is...").
-    -   **Key Examples & Analogies:** If the expert uses a specific example, anecdote, case study, or analogy to illustrate a point, capture it in full, even if it spans multiple sentences — these are often the most valuable parts of an expert call.
-    -   **Cause & Effect:** Retain any reasoning chains provided (e.g., "...because of regulatory changes," "...which led to a 15% decline in...").
-    -   **Comparisons & Contrasts:** If the expert compares companies, products, approaches, or time periods, capture both sides of the comparison with the specific details for each.
-    -   **Tangential but relevant points:** If the expert volunteers additional context, background, or related information beyond the direct question, include it — do NOT discard it as off-topic.
--   **PRIORITY #3: PRESERVE MULTI-STEP EXPLANATIONS.** If an answer involves a sequence of steps, a timeline, or a logical chain, preserve the full sequence rather than summarizing the conclusion only."""
-
-EXPERT_MEETING_CONCISE_PROMPT = """### **PRIMARY DIRECTIVE: EFFICIENT & NUANCED**
-Your goal is to be **efficient**, not just brief. Efficiency means removing conversational filler ("um," "you know," repetition) but **preserving all substantive information**. Your output should be concise yet information-dense.
-
-### **NOTES STRUCTURE**
-
-**(1.) Opening overview or Expert background (Conditional):**
-- If the transcript chunk begins with an overview, agenda, or expert intro, include it FIRST as bullet points.
-- **DO:** Capture ALL details (names, dates, numbers, titles).
-- **DO NOT:** Summarize.
-
-**(2.) Q&A format:**
-Structure the main body in Question/Answer format.
-
-**(2.A) Questions:**
--   Identify the core question being asked and rephrase it clearly in **bold**. Do NOT copy verbatim from the transcript — clean up filler and rambling into a clear, well-formed question.
--   **NO LABELS:** Do NOT prefix questions with "Q:", "Q.", "Question:", or any similar label. The bold question text stands alone.
--   **LONG QUESTIONS / PREAMBLE:** Sometimes a question is long because the interviewer provides substantial framing, background, or context before asking — this preamble is part of the question and must be preserved as part of the bold question text. Do NOT treat the preamble as part of the answer.
--   **SPACING:** Leave exactly one blank line between the end of one answer and the start of the next bold question, so each Q&A pair is visually separated.
-
-**(2.B) Answers:**
--   Use bullet points (`-`) directly below the question (no blank line between the bold question and its first bullet).
--   Each bullet point must convey specific factual information in a clear, complete sentence.
--   **PRIORITY #1: CAPTURE ALL HARD DATA.** This includes all names, examples, monetary values (`$`), percentages (`%`), metrics, and specific entities mentioned.
--   **PRIORITY #2: CAPTURE ALL NUANCE.** Do not over-summarize. You must retain the following:
-    -   **Sentiment & Tone:** Note if the speaker is optimistic, hesitant, confident, or speculative (e.g., "The expert was cautiously optimistic about...", "He speculated that...").
-    -   **Qualifiers:** Preserve modifying words that change meaning (e.g., "usually," "in most cases," "rarely," "a potential risk is...").
-    -   **Key Examples & Analogies:** If the speaker uses a specific example to illustrate a point, capture it, even if it's a few sentences long.
-    -   **Cause & Effect:** Retain any reasoning provided (e.g., "...because of the new regulations," "...which led to a decrease in...")."""
-
-EARNINGS_CALL_PROMPT = """### **NOTES STRUCTURE: EARNINGS CALL**
-
-Generate detailed earnings call notes based on the transcript. Structure your notes under the following topics, using **bold headings** and bullet points for each:
-
-{topic_instructions}
-
-**PRIORITY #1: CAPTURE ALL FINANCIAL DATA.** Revenue, margins, EPS, guidance ranges, growth rates, basis points, dollar amounts — every number matters.
-**PRIORITY #2: CAPTURE FORWARD GUIDANCE.** Any forward-looking statements, guidance ranges, management expectations, or outlook commentary.
-**PRIORITY #3: PRESERVE MANAGEMENT TONE.** Note confidence, caution, hedging language, or changes from prior quarter tone.
-**PRIORITY #4: CAPTURE SEGMENT/VERTICAL DETAIL.** Business segment breakdowns, geographic splits, and vertical-specific commentary."""
-
-MANAGEMENT_MEETING_PROMPT = """### **NOTES STRUCTURE: MANAGEMENT MEETING**
-
-Structure the notes to capture decisions, action items, and key discussion points.
-
-**(1.) Meeting Overview (Conditional):**
-- If the transcript begins with an agenda or introductions, capture attendees, date, and agenda items as bullet points.
-
-**(2.) Discussion Topics:**
-Structure the body by topic/agenda item using **bold headings**.
-
-For each topic:
-- **Key Points:** Bullet-point the main arguments, data, and perspectives shared.
-- **Decisions Made:** Clearly state any decisions reached, who made them, and the rationale.
-- **Action Items:** List each action item with the responsible person and any stated deadline.
-- **Open Questions:** Note unresolved issues or items deferred for follow-up.
-
-**PRIORITY #1: CAPTURE ALL DECISIONS AND ACTION ITEMS.** These are the most critical outputs.
-**PRIORITY #2: CAPTURE ALL DATA.** Names, numbers, dates, metrics, and specific references.
-**PRIORITY #3: PRESERVE CONTEXT.** Include the reasoning behind decisions and any dissenting views."""
-
-INTERNAL_DISCUSSION_PROMPT = """### **NOTES STRUCTURE: INTERNAL DISCUSSION**
-
-Structure the notes to capture the flow of ideas, key arguments, and conclusions.
-
-**(1.) Discussion Context (Conditional):**
-- If the discussion has a stated purpose or background, capture it as bullet points at the top.
-
-**(2.) Discussion Flow:**
-Structure the body by topic or theme using **bold headings**.
-
-For each topic:
-- Capture each participant's key contributions and perspectives as bullet points.
-- Note areas of agreement and disagreement.
-- Highlight any data, examples, or evidence cited.
-- Flag any concerns, risks, or caveats raised.
-
-**(3.) Conclusions & Next Steps:**
-- Summarize any conclusions reached.
-- List follow-up items or next steps with owners if identified.
-
-**PRIORITY #1: CAPTURE ALL PERSPECTIVES.** Include different viewpoints even if they disagree.
-**PRIORITY #2: CAPTURE ALL DATA.** Names, numbers, references, and specific examples.
-**PRIORITY #3: PRESERVE REASONING.** Include the "why" behind opinions and conclusions."""
-
-PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze a meeting transcript chunk and generate detailed, factual notes.
-Your primary directive is **100% completeness and accuracy**. Process the transcript sequentially and generate notes following the structure below.
----
-{base_instructions}
----
-**MEETING TRANSCRIPT CHUNK:**
-{chunk_text}
-"""
-
-PROMPT_CONTINUATION = """You are a High-Fidelity Factual Extraction Engine continuing a note-taking task from a long transcript.
-
-### **CONTEXT FROM PREVIOUS PROCESSING**
-Below is a summary of the notes generated from the previous transcript chunk. Use this to understand the flow of the conversation.
-{context_package}
-
-### **CONTINUATION INSTRUCTIONS**
-1.  **PROCESS THE ENTIRE CHUNK:** Your task is to process the **entire** new transcript chunk provided below. Every substantive point, example, data point, and nuanced opinion in this chunk MUST appear in your output.
-2.  **HANDLE OVERLAP:** The beginning of this new chunk overlaps with the end of the previous one. Process it naturally. Your output will be automatically de-duplicated later.
-3.  **MAINTAIN FORMAT:** Continue to use the exact same formatting as established in the base instructions.
-4.  **NO META-COMMENTARY:** NEVER produce statements about the transcript itself, such as "the transcript does not contain an answer," "no relevant information in this section," "the chunk starts mid-conversation," or similar. If a chunk begins mid-answer, capture that content as a continuation of the relevant section. Always extract and document whatever substantive content exists.
-5.  **MID-CHUNK STARTS:** If the chunk starts in the middle of a response, begin your notes by capturing that content under the most relevant heading from context. Do not skip or discard partial content.
-6.  **MAINTAIN OUTPUT VOLUME:** This chunk contains the same amount of content as the first chunk. Your output for this chunk MUST be equally detailed and equally long. Do NOT produce a shorter or more condensed output just because this is a continuation. If the first chunk produced 30 bullet points, this chunk should produce a similar number. Do NOT taper off, summarize, or become briefer.
-
----
-{base_instructions}
----
-
-**MEETING TRANSCRIPT (NEW CHUNK):**
-{chunk_text}
-"""
-
-VALIDATION_DETAILED_PROMPT = """You are a rigorous Transcript Completeness Auditor performing a fact-by-fact audit of processed meeting notes against the source transcript.
-
-## INPUTS
-
-### FULL PROCESSED NOTES (complete — for reference when checking missing content):
-{full_notes}
-
-### PORTION TO ANNOTATE ({chunk_info}):
-{chunk_to_annotate}
-
-### SOURCE TRANSCRIPT (Ground Truth):
-{transcript}
-
-## CRITICAL UNDERSTANDING
-
-Notes are always paraphrased and restructured versions of the transcript — this is intentional and CORRECT. You must NEVER flag paraphrasing, rephrasing, reorganisation, or compression as errors. The note-taking AI's job is to restructure, not transcribe verbatim.
-
-**Cross-chunk context:** The FULL PROCESSED NOTES above contain all Q&As from this call. When checking for missing content, check the FULL NOTES — if a piece of transcript content is captured *anywhere* in the full notes (even outside the PORTION TO ANNOTATE), do NOT flag it as missing.
-
-## WHAT TO FIND — BE RIGOROUS
-
-**1. MISSING CONTENT** (most important — go fact by fact)
-
-Walk through the TRANSCRIPT systematically, exchange by exchange. For each expert response, check the FULL NOTES for every one of the following:
-
-- **Every specific number, percentage, monetary value, metric, or growth rate** — even a single missing figure is a gap
-- **Every named entity** — companies, people, product names, geographies, regulatory bodies, specific time periods
-- **Every distinct example, anecdote, or case study** the expert used to illustrate a point — these are high-value and frequently dropped
-- **Every qualifier or hedge that changes meaning** — "roughly," "typically," "only in certain cases," "except when," "approximately," "we think," "possibly" — omitting these alters the meaning materially
-- **Every distinct reasoning chain or cause-effect link** — e.g., "because X, Y happened, which led to Z"
-- **Every comparison or contrast** — if the expert compared two companies, sectors, or time periods, check both sides are captured
-- **Every explicitly stated uncertainty or caveat** — if the expert said they were unsure, speculating, or hedging, that tone must be preserved
-
-Only flag as MISSING if the fact, name, number, or nuance genuinely does not appear anywhere in the FULL NOTES.
-
-**2. MISREPRESENTATION** (apply sparingly but precisely)
-
-Content in the PORTION TO ANNOTATE that factually contradicts or distorts the transcript:
-- Wrong number (transcript: 30%, notes: 20%)
-- Wrong direction (transcript: declining, notes: growing)
-- Wrong entity name or wrong speaker attribution
-- Expert expressed uncertainty but notes state it as established fact, or vice versa
-- A "could" or "might" in the transcript rendered as a definitive claim in the notes
-
-**3. REPEATED Q&A** (check the FULL NOTES)
-
-Scan the FULL PROCESSED NOTES for Q&A pairs that cover substantially the same question or repeat the same answer content. This happens when chunked note generation produces near-duplicate sections due to transcript overlap. Flag as repeated if:
-- Two bold questions ask essentially the same thing (even if worded differently)
-- An answer block appears twice with the same or very similar bullet points
-- A topic or data point is covered in near-identical language in two separate Q&A pairs
-
-## WHAT NOT TO FLAG
-
-- Paraphrasing → CORRECT
-- Restructuring or reordering → CORRECT
-- Compression where key facts are still present → CORRECT
-- Filler, false starts, rambling clean-up → CORRECT
-- Minor synonym substitutions that preserve meaning → CORRECT
-- A topic mentioned briefly in one Q&A and fully covered in another → NOT a repeat (only flag true duplicates)
-
-## ANNOTATIONS — THREE TYPES ONLY
-
-Do NOT use any markup other than these three exact formats.
-
-**MISSING CONTENT** — insert immediately after the Q&A pair in the PORTION TO ANNOTATE where the gap is most relevant:
-`<div style="background:#fef9c3;border-left:3px solid #ca8a04;padding:5px 10px;margin:6px 0;font-size:0.88em;color:#78350f">⚠️ <strong>Missing:</strong> [quote or precisely describe the specific fact, number, name, qualifier, or example from the transcript that is absent from the full notes]</div>`
-
-**MISREPRESENTATION** — wrap only the specific wrong text, immediately followed by an inline correction:
-`<del style="color:#dc2626">the wrong text as it appears in the notes</del><span style="color:#16a34a;font-size:0.9em"> → [what the transcript actually says]</span>`
-
-**REPEATED Q&A** — insert immediately before the duplicate bold question in the PORTION TO ANNOTATE:
-`<div style="background:#ede9fe;border-left:3px solid #7c3aed;padding:5px 10px;margin:6px 0;font-size:0.88em;color:#5b21b6">🔁 <strong>Duplicate:</strong> This Q&A substantially repeats [describe which earlier Q&A it duplicates and what the overlapping content is]</div>`
-
-**Correct content** — leave exactly as-is. No annotation whatsoever.
-
-## OUTPUT
-
-Output ONLY the annotated PORTION TO ANNOTATE, preserving its exact structure (bold questions, bullet points, spacing). Do NOT output the full notes section, and do NOT add any summary, preamble, footer, or meta-commentary of any kind."""
-
-def cleanup_stitched_notes(notes_text: str) -> str:
-    """Deterministic cleanup of stitched notes — no LLM call, zero risk of content loss.
-
-    Handles:
-    1. Remove meta-commentary / processing artifacts from chunked generation
-    2. Collapse duplicate consecutive headings from overlap regions
-    3. Fix formatting: excessive blank lines, trailing whitespace
-    """
-    if not notes_text or not notes_text.strip():
-        return notes_text
-
-    # --- 1. Remove known meta-commentary artifacts ---
-    artifact_patterns = [
-        r'^[\-\*]*\s*(?:Note:|Disclaimer:)?\s*(?:The|This)\s+(?:transcript|section|chunk|portion|segment)\s+(?:does not|doesn\'t|appears to)\s+.*$',
-        r'^[\-\*]*\s*(?:No relevant|No additional|No further|No substantive)\s+(?:information|content|data|details).*$',
-        r'^[\-\*]*\s*(?:This section (?:appears|seems|is) (?:incomplete|empty|blank)).*$',
-        r'^[\-\*]*\s*\[(?:No content|Empty|Continues|Continuation)\].*$',
-    ]
-    lines = notes_text.split('\n')
-    cleaned_lines = []
-    for line in lines:
-        stripped = line.strip()
-        is_artifact = any(re.match(p, stripped, re.IGNORECASE) for p in artifact_patterns)
-        if not is_artifact:
-            cleaned_lines.append(line)
-
-    # --- 2. Collapse duplicate consecutive bold headings (from overlap stitching) ---
-    # Pattern: **Heading** appears twice in a row (possibly separated by blank lines)
-    result_lines = []
-    last_heading = None
-    for line in cleaned_lines:
-        stripped = line.strip()
-        heading_match = re.match(r'^(\*\*.+?\*\*)\s*$', stripped)
-        if heading_match:
-            current_heading = heading_match.group(1).strip()
-            if current_heading == last_heading:
-                # Skip duplicate heading — keep first occurrence
-                continue
-            last_heading = current_heading
-        elif stripped:  # Non-empty, non-heading line resets heading tracker
-            last_heading = None
-        result_lines.append(line)
-
-    text = '\n'.join(result_lines)
-
-    # --- 3. Collapse 3+ consecutive blank lines to 2 ---
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    # --- 4. Strip trailing whitespace from each line ---
-    text = '\n'.join(line.rstrip() for line in text.split('\n'))
-
-    return text.strip()
-
-EXECUTIVE_SUMMARY_PROMPT = """Generate a structured executive summary from the following meeting notes.
-
-### STRUCTURE:
-1. **Key Takeaways** (3-5 bullet points): The most important findings, decisions, or insights from the meeting.
-2. **Critical Data Points**: All significant numbers, metrics, percentages, and financial figures mentioned.
-3. **Notable Quotes/Positions**: Any strong opinions, definitive statements, or notable positions taken by participants.
-4. **Risks & Concerns**: Any risks, challenges, or concerns raised during the meeting.
-5. **Action Items / Next Steps**: Any follow-ups, commitments, or next steps identified.
-
-### RULES:
-- Be specific — include actual numbers, names, and dates rather than vague references.
-- Keep each section concise but complete.
-- Do not introduce information not present in the notes.
-
----
-**MEETING NOTES:**
-{notes}
-"""
-
-REFINEMENT_INSTRUCTIONS = {
-    "Expert Meeting": "Pay special attention to industry jargon, technical terms, company names, and domain-specific terminology. Preserve all proper nouns exactly.",
-    "Earnings Call": "Pay special attention to financial terminology (EPS, EBITDA, basis points, margin, guidance, revenue, etc.), company names, ticker symbols, analyst names, and numerical data. Preserve all figures exactly as spoken.",
-    "Management Meeting": "Pay special attention to names of attendees, action item owners, project names, deadlines, and organizational terminology.",
-    "Internal Discussion": "Pay special attention to participant names, project/product names, technical terms, and any referenced documents or systems.",
-}
-
-# --- OTG NOTES PROMPTS ---
-
-OTG_EXTRACT_PROMPT = """Analyze the following meeting notes and extract structured metadata. Return ONLY valid JSON with no other text.
-
-{{
-  "entities": ["list of company names, product names, and proper nouns mentioned"],
-  "people": ["list of people mentioned by name or role"],
-  "sector": "the industry sector these notes relate to (e.g., Quick Commerce, Fintech, SaaS, Healthcare, etc.)",
-  "topics": ["list of 5-12 distinct topics/themes discussed in the notes, each as a short phrase"]
-}}
-
----
-**NOTES:**
-{notes}
-"""
-
-OTG_CONVERT_PROMPT = """You are writing informal channel check notes — the kind an equity research analyst sends to their team after speaking with industry contacts.
-
-### TASK:
-Convert the detailed meeting notes below into a short, plain-text research note.
-
-### STYLE (follow exactly):
-
-1. TITLE: A short, natural title on the first line. Examples: "Channel checks on Quick commerce", "Checks on Hero Motocorp", "Hero demand checks". Keep it simple — no formatting, no colons.
-
-2. INTRO: One sentence starting with "We spoke with..." describing who you spoke with (role/expertise, NOT their name) and what you wanted to understand. Then on the same line or next: "Following were the KTAs:"
-
-3. BODY: Write 4-7 short paragraphs of plain flowing text. Each paragraph makes one clear point.
-   - ABSOLUTELY NO markdown formatting. No bold (**), no bullets (-), no numbered lists, no headers (#). Just plain text paragraphs.
-   - Use simple, direct language. Write like you're sending a quick note to your team, not writing a formal report.
-   - Attribute findings to the source naturally: "The expert estimates...", "She didn't share...", "Dealers felt...", "Managers mentioned...", "Our checks highlight...", "He pointed out..."
-   - Weave in your own analyst commentary where relevant: "We will need to monitor...", "This makes it tricky because...", "We have observed earlier that..."
-
-4. TONE: {tone}
-   - As Is: Present findings exactly as stated in the notes. Do not add any positive or negative framing — reproduce the sentiment already present in the source material.
-   - Very Positive: Frame findings constructively. Strengths, growth, advantages. Challenges are temporary.
-   - Positive: Generally constructive. Risks acknowledged but opportunities emphasized.
-   - Neutral: Balanced. Facts presented objectively.
-   - Negative: Risks and structural problems emphasized. Positive developments are insufficient.
-   - Very Negative: Fundamental weaknesses, unsustainable practices. Deeply problematic framing.
-
-5. DATA: {number_focus_instruction}
-
-6. LENGTH: {length_instruction}
-
-7. FOCUS ENTITIES: Center the note around: {entities}. Other entities can appear for context.
-
-8. FOCUS TOPICS: Focus on: {topics}
-
-{custom_instructions_block}
-
-### OUTPUT:
-Return ONLY the plain-text note. No preamble, no commentary, no markdown formatting whatsoever.
-
----
-SOURCE NOTES:
-{notes}
-"""
-
-OTG_REFINE_CHUNK_PROMPT = """You are a research analyst extracting structured Q&A notes from a segment of meeting notes.
-
-Your task: Identify all questions asked and their corresponding responses. Structure them clearly so key information is easy to find.
-
-Rules:
-- Restate each question clearly in **bold** on its own line — no "Q:" prefix, no label.
-- Use bullet points (-) immediately below for each distinct answer point.
-- ONLY capture content from responses/answers. Do NOT transcribe question text as note content.
-- Preserve every specific detail: numbers (%, ₹, $, volumes, timelines), names, company mentions, data points.
-- If a passage has no clear Q&A structure, organise it by **bold topic header** with bullet points.
-- Be comprehensive — every substantive point in the answer gets its own bullet.
-- Raw and unpolished is fine. Abbreviate freely (Rev, Vol, GM, EBITDA, QoQ, YoY, etc.).
-
----
-NOTES SEGMENT {chunk_num} of {total_chunks}:
-{chunk}"""
-
-
-# --- INVESTMENT ANALYST PROCESSING PROMPTS ---
-
-IA_MANAGEMENT_KTA_PROMPT = """You are a senior equity research analyst processing a Company Management Meeting transcript.
-
-Generate exactly two sections in this order. You MUST use the exact section headers shown below — do not rename, reformat, or omit them:
-
-KEY TAKEAWAYS
-
-- Map findings to the framework below. Only include sections the meeting covered meaningfully.
-- 5–6 bullets in total across all sections. Each bullet is one short, punchy sentence — no padding.
-- Do NOT start a bullet with a label or category prefix (e.g., do NOT write "Revenue: ..." or "Execution: ...").
-- Include numbers stated (%, bps, ₹, $, multiples, timelines). State direction where clear.
-- If management was vague, say so in one brief phrase. No interpretation beyond what was stated.
-
-Framework (in order): Strategy → Industry → Thematic → Org/Structure → Execution → Revenue → Margins → Capital Alloc. → Mgmt Culture
-
-Format — No bold section header, then bullet(s):
-- Volume-led growth expected in H2; no price increase guidance.
-- EBITDA margin expansion of 20–30 bps expected over the next 2–3 quarters.
-- Net debt declining; net-cash target by FY26 — capex quantum not shared.
-- Supply chain on track; vague on exact timeline.
-
----
-
-ROUGH NOTES
-
-IMPORTANT: The text "ROUGH NOTES" above is your required section header. Output it exactly as shown — plain text, on its own line, preceded by "---". Do not use markdown formatting (no ##, no bold) for this header.
-
-- Capture ALL substantive points — comprehensive, not selective.
-- Neutral meeting notes. State what was said. No spin.
-- Organise by topic with bold headers. Fewer, denser bullets — aim for ~25% of the bullet count you would otherwise use by consolidating related points into a single longer sentence.
-- Each bullet should be a complete sentence that bundles multiple related details together (numbers, direction, caveats, qualitative colour) rather than splitting them across separate lines.
-- Abbreviations: Mgmt, Rev, Vol, ASP, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, capex, opex, D/E, WC, etc.
-- Include qualitative context alongside numbers — what was stressed, what was avoided.
-- No positive/negative spin.
-- If unclear or unquantified → note it inline within the sentence.
-- In Q&A-style transcripts: capture ONLY management's responses. Use the question only to identify the topic heading.
-
-Format: Bold topic headers, dashes (-) under each.
-Use sentence case for all headings—capitalize only the first word and proper nouns; do not use title case.
-
----
-TRANSCRIPT:
-{transcript}
-"""
-
-IA_EXPERT_KTA_PROMPT = """You are a senior equity research analyst processing an Expert / Industry Expert / Channel Check Meeting transcript.
-
-Generate exactly two sections in this order. You MUST use the exact section headers shown below — do not rename, reformat, or omit them:
-
-KEY TAKEAWAYS
-
-- Map findings to the framework below. Only include sections the meeting covered meaningfully.
-- 5–6 bullets in total across all sections. Each bullet is one short, punchy sentence — no padding.
-- Do NOT start a bullet with a label or category prefix (e.g., do NOT write "Inventory: ..." or "Demand: ...").
-- Include numbers stated (%, bps, ₹, $, multiples, timelines, volumes). State direction where clear.
-- Tag the source type naturally within the sentence — weave in [Expert view], [Channel check], or [Industry data] where relevant.
-- If the expert was vague, say so briefly. No interpretation beyond what was stated.
-
-Framework (in order): Industry → Demand → Channel/Trade → Inventory → Pricing → Margins → Competition → Regulatory/Macro → Outlook
-
-Format:
-- [Channel check] Dealer inventory at 45–60 days vs. norm of 30 — destocking ongoing.
-- [Expert view] Demand weakening in Tier-2 cities; discretionary most hit.
-- [Industry data] Organised players gaining ~200 bps share annually from unorganised.
-- Expert unclear on recovery timeline; cautious on H1.
-
----
-
-ROUGH NOTES
-
-IMPORTANT: The text "ROUGH NOTES" above is your required section header. Output it exactly as shown — plain text, on its own line, preceded by "---". Do not use markdown formatting (no ##, no bold) for this header.
-
-- Capture ALL substantive points — comprehensive, not selective.
-- Neutral meeting notes. State what was said. No spin.
-- Organise by topic with bold headers. Fewer, denser bullets — aim for ~25% of the bullet count you would otherwise use by consolidating related points into a single longer sentence.
-- Each bullet should be a complete sentence that bundles multiple related details together (numbers, direction, caveats, qualitative colour) rather than splitting them across separate lines.
-- Abbreviations: Expert, Ch-check, Rev, GM, EBITDA, QoQ, YoY, H1, H2, FY, bps, T2, T3, ASP, inv, dist, etc.
-- Include qualitative context alongside numbers — what was stressed, what was avoided, any caveats.
-- No positive/negative spin.
-- If unclear or unquantified → note it inline within the sentence.
-- In Q&A-style transcripts: capture ONLY the expert's responses. Use the question only to identify the topic heading.
-
-Format: Bold topic headers, dashes (-) under each.
-Format headings in sentence case. Only capitalize the first word and proper nouns. Do not capitalize every word.
----
-TRANSCRIPT:
-{transcript}
-"""
-
-IA_REFINE_CHUNK_PROMPT = """You are a research analyst cleaning up a segment of a meeting transcript.
-
-Your task: Identify all questions asked and the corresponding management/expert responses. Restructure them clearly.
-
-Rules:
-- Restate each question clearly in **bold** on its own line — no "Q:" prefix, no label.
-- Use bullet points (-) immediately below for each distinct point made in the response.
-- ONLY capture content from responses/answers. Do NOT include question text as note content.
-- Preserve every specific detail: numbers (%, bps, ₹, $, timelines), names, entities, data points, qualifiers.
-- Preserve the speaker's tone and caveats (confident, cautious, vague, speculative).
-- If a passage is not Q&A (e.g., opening remarks), organise it under a **bold topic header** with bullets.
-- Be comprehensive — every substantive point in the answer gets its own bullet.
-- Raw and unpolished is fine. Abbreviate freely.
-
----
-TRANSCRIPT SEGMENT {chunk_num} of {total_chunks}:
-{chunk}"""
-
-IA_TONE_INSTRUCTIONS = {
-    "Very Positive": "Frame Output 1 findings in the most constructive investment light. Lead with strengths, growth, and opportunity. Challenges are acknowledged only as temporary or manageable context.",
-    "Positive": "Frame Output 1 findings constructively. Opportunities lead. Risks acknowledged but not alarming. Overall tone is favourable.",
-    "Neutral": "Frame Output 1 findings objectively. Present facts as stated. Balanced where evidence is mixed. No tilting positive or negative.",
-    "Negative": "Frame Output 1 findings with risks and headwinds leading. Positives are noted but insufficient to offset structural concerns.",
-    "Very Negative": "Frame Output 1 findings around structural problems, execution gaps, and risks. Even positives are presented as temporary or inadequate.",
-}
-
-# --- EARNINGS CALL MULTI-FILE ANALYSIS PROMPTS ---
-
-EC_TOPIC_DISCOVERY_PROMPT = """You are an expert equity research analyst. Analyze the following earnings call transcripts and identify the key topics discussed.
-
-### TASK:
-From the transcripts below, extract a structured topic hierarchy. The topics should reflect the actual business structure and discussion themes of this company/group.
-
-### OUTPUT FORMAT:
-Return ONLY valid JSON with no other text, using this exact structure:
-{{
-  "company_name": "The company or group name",
-  "primary_topics": [
-    {{
-      "name": "Primary Topic Name (e.g., brand name, business segment, division)",
-      "description": "Brief description of what this covers",
-      "sub_topics": [
-        "Sub-topic 1 (e.g., menu innovation, unit economics, store expansion)",
-        "Sub-topic 2",
-        "Sub-topic 3"
-      ]
-    }}
-  ],
-  "cross_cutting_topics": [
-    {{
-      "name": "Cross-cutting Topic Name (e.g., Capital Allocation, Management Changes, Macro Environment)",
-      "description": "Brief description"
-    }}
-  ]
-}}
-
-### GUIDELINES:
-1. **Primary topics** are business segments, brands, divisions, or major product lines (e.g., for Jubilant FoodWorks: "Dominos India", "Popeyes", "Dunkin Donuts", "Hong's Kitchen")
-2. **Sub-topics** under each primary topic are recurring themes like: strategy, menu innovation, store expansion, unit economics, competitive positioning, pricing, customer acquisition, operational efficiency, supply chain, marketing, org structure changes, incentive changes, etc.
-3. **Cross-cutting topics** span the entire company: capital allocation, management commentary, guidance, macro environment, regulatory, ESG, etc.
-4. Be SPECIFIC to this business — don't use generic templates. The topics should reflect what is ACTUALLY discussed in these transcripts.
-5. Include 3-8 primary topics and 3-10 sub-topics per primary topic, based on what the transcripts actually cover.
-
----
-**TRANSCRIPTS:**
-
-{transcripts}
-"""
-
-EC_MULTI_FILE_NOTES_PROMPT = """### **EARNINGS CALL NOTES — STRUCTURED BY TOPICS**
-
-You are generating detailed earnings call notes from the transcript below. Structure your notes STRICTLY under the provided topic hierarchy.
-
-### TOPIC STRUCTURE TO FOLLOW:
-{topic_structure}
-
-### RULES:
-1. For each topic and sub-topic, extract ALL relevant information from the transcript.
-2. If a topic/sub-topic has no relevant information in this transcript, write "No specific commentary in this quarter." under it — do NOT skip the heading.
-3. Use **bold headings** for primary topics and sub-topics. Use bullet points for details.
-4. **PRIORITY #1: CAPTURE ALL FINANCIAL DATA.** Revenue, margins, EPS, guidance ranges, growth rates, basis points, dollar amounts — every number matters.
-5. **PRIORITY #2: CAPTURE FORWARD GUIDANCE.** Any forward-looking statements, guidance ranges, management expectations, or outlook commentary.
-6. **PRIORITY #3: PRESERVE MANAGEMENT TONE.** Note confidence, caution, hedging language, or changes from prior quarter tone.
-7. **PRIORITY #4: CAPTURE SEGMENT/VERTICAL DETAIL.** Business segment breakdowns, geographic splits, and vertical-specific commentary.
-8. Include the quarter/period identifier at the top of your notes if mentioned in the transcript.
-
-### FORMAT EXAMPLE:
-**[Primary Topic: Brand/Segment Name]**
-
-**[Sub-topic: Strategy]**
-- Bullet point with detail...
-- Another bullet point...
-
-**[Sub-topic: Unit Economics]**
-- Bullet point with detail...
-
----
-**TRANSCRIPT ({file_label}):**
-{transcript}
-"""
-
-EC_MULTI_FILE_STITCH_HEADER = """# Earnings Call Topic Analysis — {company_name}
-*Generated on {date}*
-*Files analyzed: {file_count}*
-
----
-
-"""
-
-# --- REPORT COMPARISON PROMPT CONSTANTS ---
-
-RC_DIMENSION_DISCOVERY_PROMPT = """You are an expert equity research analyst specializing in annual report analysis. Analyze the following annual reports and identify the key QUALITATIVE dimensions that can be meaningfully compared across years.
-
-### TASK:
-From the reports below, extract a structured set of comparison dimensions. Focus ONLY on qualitative and strategic aspects — NOT financial numbers (those will differ year to year and are not the focus).
-
-### OUTPUT FORMAT:
-Return ONLY valid JSON with no other text, using this exact structure:
-{{
-  "company_name": "The company or group name",
-  "report_years": ["Year 1", "Year 2", ...],
-  "comparison_dimensions": [
-    {{
-      "name": "Dimension Name",
-      "description": "Brief description of what this covers",
-      "sub_dimensions": [
-        "Sub-dimension 1",
-        "Sub-dimension 2"
-      ]
-    }}
-  ]
-}}
-
-### FOCUS AREAS (use these as guidance, but be specific to what is actually in the reports):
-1. **Management Commentary & Tone** — How does the CEO/Chairman letter read? What is the tone — optimistic, cautious, defensive? What themes are emphasized?
-2. **Strategic Direction & Priorities** — What strategic pillars are highlighted? How have priorities shifted? New initiatives vs. continued focus areas?
-3. **Business Structure & Organization** — How is the business organized (segments, divisions, subsidiaries)? Any restructuring, new segments, or organizational changes?
-4. **Leadership & Governance** — Board composition changes, key management changes, succession planning, governance structure evolution?
-5. **Incentive Structures & Compensation** — How are executives compensated? What metrics drive bonuses/ESOPs? Any changes in incentive design?
-6. **Risk Factors & Mitigation** — What risks are highlighted? How has the risk landscape changed? New risks vs. dropped risks?
-7. **Capital Allocation Philosophy** — How does management talk about deploying capital? Dividends vs. buybacks vs. reinvestment priorities?
-8. **ESG / Sustainability** — Environmental, social, governance initiatives. How prominent is ESG in the narrative? Any new commitments?
-9. **Market & Competitive Positioning** — How does the company describe its competitive position? Market share commentary, moats, differentiation?
-10. **Growth Levers & Outlook** — What growth avenues are highlighted? Organic vs. inorganic? Geographic vs. product expansion?
-11. **Culture & People** — Employee-related commentary, talent strategy, culture statements, DEI initiatives?
-12. **Technology & Digital** — Digital transformation initiatives, technology investments, IT strategy evolution?
-
-### GUIDELINES:
-- Be SPECIFIC to this company — identify dimensions that are actually discussed in these reports.
-- Include 5-12 dimensions with 2-6 sub-dimensions each, based on what the reports actually cover.
-- The dimensions should enable meaningful year-over-year comparison of QUALITATIVE changes.
-- Do NOT include dimensions focused on specific numbers or financial metrics.
-
----
-**ANNUAL REPORTS:**
-
-{reports}
-"""
-
-RC_PER_REPORT_EXTRACTION_PROMPT = """### **ANNUAL REPORT ANALYSIS — QUALITATIVE EXTRACTION**
-
-You are extracting qualitative information from an annual report for a specific set of comparison dimensions. Focus on WHAT management says, HOW they say it, and WHAT has changed — NOT on specific numbers.
-
-### DIMENSIONS TO EXTRACT:
-{dimension_structure}
-
-### RULES:
-1. For each dimension and sub-dimension, extract ALL relevant qualitative information from this report.
-2. If a dimension/sub-dimension has no relevant information in this report, write "Not addressed in this report." — do NOT skip the heading.
-3. Use **bold headings** for dimensions and sub-dimensions. Use bullet points for details.
-4. **FOCUS ON:**
-   - Management's language, tone, and emphasis
-   - Strategic statements and directional commentary
-   - Organizational descriptions and structural details
-   - Policy descriptions (compensation, governance, risk)
-   - Qualitative characterizations ("strong growth", "challenging environment", "transformational year")
-   - Changes in emphasis or new themes compared to what might be typical
-5. **AVOID:**
-   - Specific revenue/profit/margin numbers (unless they illustrate a qualitative point about strategy)
-   - Detailed financial tables or ratios
-   - Restating numbers that will obviously differ between years
-6. Capture DIRECT QUOTES from management where they are particularly revealing of tone or strategic intent.
-7. Note the year/period this report covers at the top.
-
-### FORMAT:
-**[Dimension: Name]**
-
-**[Sub-dimension: Name]**
-- Bullet point with qualitative detail...
-- Another bullet point...
-
----
-**ANNUAL REPORT ({file_label}):**
-{report_text}
-"""
-
-RC_COMPARISON_PROMPT = """### **ANNUAL REPORT COMPARISON — YEAR-OVER-YEAR QUALITATIVE ANALYSIS**
-
-You are an expert analyst comparing annual reports from different years for the same company. Below are the qualitative extractions from each year's report. Your task is to produce a structured comparison highlighting what has CHANGED, what has STAYED THE SAME, and what is NEW or DROPPED.
-
-### COMPANY: {company_name}
-### REPORTS COMPARED: {report_labels}
-
-### COMPARISON DIMENSIONS:
-{dimension_structure}
-
-### EXTRACTED DATA FROM EACH REPORT:
-{per_report_extractions}
-
-### YOUR TASK:
-For each dimension and sub-dimension, produce a comparison that answers:
-1. **What changed?** — Shifts in tone, emphasis, strategy, structure, or policy between years.
-2. **What remained consistent?** — Themes or approaches that persisted across years.
-3. **What is new?** — Themes, initiatives, or structural elements that appear in later reports but not earlier ones.
-4. **What was dropped?** — Items emphasized in earlier reports but absent or de-emphasized in later ones.
-
-### FORMAT:
-For each dimension, structure your output as:
-
-## [Dimension Name]
-
-### [Sub-dimension Name]
-
-**Evolution across years:**
-- [Year-over-year comparison points as bullets]
-
-**Key shifts:**
-- [Most significant changes highlighted]
-
-**Consistency:**
-- [What stayed the same]
-
-### RULES:
-1. Be SPECIFIC — cite which year said what. Use phrases like "In FY2022, management emphasized X, while in FY2024, the focus shifted to Y."
-2. Include direct management quotes where they illustrate a meaningful shift.
-3. Do NOT simply list what each year said — actually COMPARE and CONTRAST.
-4. Highlight the most SIGNIFICANT shifts prominently. Minor changes can be noted briefly.
-5. If a dimension shows no meaningful change across years, say so explicitly — consistency is also a finding.
-6. Order the comparison chronologically (earliest to latest year).
-7. At the end, include a section called "## Key Takeaways" with 5-10 bullet points summarizing the most important qualitative shifts across all dimensions.
-
----
-"""
-
-RC_STITCH_HEADER = """# Annual Report Comparison — {company_name}
-*Generated on {date}*
-*Reports compared: {report_labels}*
-
----
-
-"""
 
 # --- 3. STATE & DATA MODELS ---
 @dataclass
@@ -960,12 +348,20 @@ class AppState:
     earnings_call_mode: str = "Generate New Notes"
     selected_sector: str = "IT Services"
     notes_model: str = "Gemini 2.5 Pro"
-    refinement_model: str =  "Gemini 2.5 Flash Lite"
+    refinement_model: str =  "Gemini 2.5 Flash"
+    speaker_id_model: str = "Gemini 3 Pro Preview"
     transcription_model: str =  "Gemini 3.0 Flash"
     chat_model: str = "Gemini 2.5 Pro"
+    use_flash_for_all: bool = False
     refinement_enabled: bool = True
-    add_context_enabled: bool = False
+    chunk_word_size: int = CHUNK_WORD_SIZE
+    add_context_enabled: bool = True
     context_input: str = ""
+    # Optional General Context voice note: captured in the UI, transcribed at
+    # generate time into context_audio_text and combined with context_input.
+    context_audio_file: Optional[Any] = None
+    context_audio_recording: Optional[Any] = None
+    context_audio_text: str = ""
     speakers: str = ""
     earnings_call_topics: str = ""
     existing_notes_input: str = ""
@@ -1003,6 +399,40 @@ def safe_get_token_count(response):
         pass
     return 0
 
+def _extract_response_text(response) -> str:
+    """Text from a non-streaming response, or "" when it has no usable parts.
+
+    The `response.text` quick accessor raises on safety blocks and empty
+    candidates, which aborts an entire multi-chunk run over one bad chunk.
+    Callers that want to detect-and-retry (or fall back) use this instead and
+    treat "" as a failed generation."""
+    try:
+        for cand in (getattr(response, "candidates", None) or []):
+            parts = getattr(getattr(cand, "content", None), "parts", None) or []
+            text = "".join(getattr(p, "text", "") or "" for p in parts)
+            if text.strip():
+                return text
+    except Exception:
+        pass
+    return ""
+
+# Finish reasons that mean the model completed normally. Anything else —
+# MAX_TOKENS (output truncated, or a thinking model spent the whole budget on
+# reasoning), SAFETY, RECITATION — marks the attempt as failed.
+_OK_FINISH_REASONS = {"", "STOP", "FINISH_REASON_STOP", "1"}
+
+def _finish_reason_name(response) -> str:
+    """Finish reason of the first candidate as a string ("" if unavailable)."""
+    try:
+        cands = getattr(response, "candidates", None) or []
+        if cands:
+            fr = getattr(cands[0], "finish_reason", None)
+            if fr is not None:
+                return getattr(fr, "name", None) or str(fr)
+    except Exception:
+        pass
+    return ""
+
 def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False, generation_config=None):
     """Wrapper around generate_content with exponential backoff for transient API failures."""
     kwargs = {"stream": stream}
@@ -1021,8 +451,15 @@ def generate_with_retry(model, prompt_or_contents, max_retries=3, stream=False, 
                 continue
             raise
 
-def stream_and_collect(response, placeholder=None):
-    """Consume a streaming response, optionally displaying progress. Returns (full_text, token_count)."""
+def stream_and_collect(response, placeholder=None, on_progress=None, live_preview=None):
+    """Consume a streaming response, optionally displaying progress.
+
+    `on_progress(word_count)` is called as text streams in, so callers can
+    drive a real progress bar instead of a detached word counter.
+    `live_preview` is an st.empty() (ideally inside an autoscroll container)
+    that gets the accumulated markdown as it streams.
+    Returns (full_text, token_count).
+    """
     full_text = ""
     update_counter = 0
     for chunk in response:
@@ -1030,11 +467,18 @@ def stream_and_collect(response, placeholder=None):
             full_text += chunk.text
             update_counter += 1
             # Throttle UI updates to every 5 chunks to reduce flickering
-            if placeholder and update_counter % 5 == 0:
+            if update_counter % 5 == 0:
                 word_count = len(full_text.split())
-                placeholder.caption(f"Streaming... {word_count:,} words generated")
+                if on_progress:
+                    on_progress(word_count)
+                if placeholder:
+                    placeholder.caption(f"Streaming... {word_count:,} words generated")
+                if live_preview is not None:
+                    live_preview.markdown(full_text)
     if placeholder:
         placeholder.empty()
+    if live_preview is not None:
+        live_preview.markdown(full_text)
     token_count = safe_get_token_count(response)
     return full_text, token_count
 
@@ -1048,7 +492,7 @@ def copy_to_clipboard_button(text: str, button_label: str = "Copy Notes"):
     # Use JSON encoding to safely embed arbitrary text in a JS string literal
     json_encoded = json.dumps(text)
     safe_label = html_module.escape(button_label)
-    components.html(
+    st.iframe(
         f"""
         <button onclick="copyText()" aria-label="{safe_label}" role="button" tabindex="0"
             onkeydown="if(event.key==='Enter'||event.key===' '){{event.preventDefault();copyText();}}"
@@ -1121,65 +565,458 @@ def get_file_content(uploaded_file, audio_recording=None) -> Tuple[Optional[str]
 def db_get_sectors() -> dict:
     return database.get_sectors()
 
-def create_chunks_with_overlap(text: str, chunk_size: int, overlap: int) -> List[str]:
-    """Creates overlapping chunks of text, ensuring the final fragment is always included."""
+SKIP_TAG = "Skip"
+
+
+def _parse_tagged_transcript(text: str) -> List[Dict[str, str]]:
+    """Parse a transcript with `**Speaker N:**` or `**Skip:**` prefixes into segments.
+
+    Returns a list of {"speaker": "Speaker N" | "Skip", "text": "..."} dicts.
+    Tolerant of the marker appearing inline or on its own line.
+    """
     if not text:
         return []
+    pattern = re.compile(r"\*\*\s*(Speaker\s*\d+|Skip)\s*:\s*\*\*\s*", re.IGNORECASE)
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return []
+    segments: List[Dict[str, str]] = []
+    # Text before the first speaker marker used to be dropped silently. A
+    # short preamble is model meta-text ("Here is the tagged transcript:")
+    # and is still discarded, but anything longer is real content the model
+    # failed to tag — keep it as a Skip segment so it stays visible in the
+    # review panel, where the user can reassign it to a real speaker.
+    preamble = text[: matches[0].start()].strip()
+    if preamble and len(preamble.split()) > 25:
+        segments.append({"speaker": SKIP_TAG, "text": preamble})
+    for i, m in enumerate(matches):
+        raw = m.group(1).strip()
+        if raw.lower().startswith("skip"):
+            speaker = SKIP_TAG
+        else:
+            digit = re.search(r"\d+", raw).group(0)
+            speaker = f"Speaker {digit}"
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        seg_text = text[start:end].strip()
+        if seg_text:
+            segments.append({"speaker": speaker, "text": seg_text})
+    return segments
 
-    words = text.split()
-    if len(words) <= chunk_size:
-        return [text]
 
-    if chunk_size <= overlap:
-        raise ValueError("Chunk size must be greater than overlap.")
+def _serialize_tagged_segments(
+    segments: List[Dict[str, str]],
+    display_names: Optional[Dict[str, str]] = None,
+    exclude_tags: Optional[List[str]] = None,
+) -> str:
+    """Serialize segments back to tagged transcript text.
 
-    chunks = []
-    step = chunk_size - overlap
-
-    for i in range(0, len(words), step):
-        chunk = words[i : i + chunk_size]
-        chunks.append(" ".join(chunk))
-        if (i + chunk_size) >= len(words):
-            break
-
-    return chunks
-
-
-def _create_enhanced_context_from_notes(notes_text, chunk_number=0):
-    """Create richer context from previous notes"""
-    if not notes_text or not notes_text.strip():
+    If `display_names` is provided, replaces the generic "Speaker N" label with
+    the user-supplied display name (e.g. "Jane Doe (CEO)") in the output.
+    If `exclude_tags` is provided, segments whose speaker is in that list are
+    dropped — used to filter out `Skip` (logistics) segments before notes gen.
+    """
+    if not segments:
         return ""
+    excluded = set(exclude_tags or [])
+    lines: List[str] = []
+    for seg in segments:
+        if seg["speaker"] in excluded:
+            continue
+        tag = seg["speaker"]
+        if display_names and display_names.get(tag):
+            tag = display_names[tag]
+        lines.append(f"**{tag}:**\n{seg['text']}")
+    return "\n\n".join(lines)
 
-    headings = re.findall(r"(\*\*.*?\*\*)", notes_text)
 
-    if not headings:
+def _merge_consecutive_segments(segments: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Merge consecutive segments with the same speaker into one block.
+
+    The model is told to merge these itself, but chunk boundaries and long
+    answers still produce split turns. Merging deterministically here means
+    fewer segments for the human to review and reassign."""
+    merged: List[Dict[str, str]] = []
+    for seg in segments:
+        if merged and merged[-1]["speaker"] == seg["speaker"]:
+            merged[-1]["text"] += "\n\n" + seg["text"]
+        else:
+            merged.append(dict(seg))
+    return merged
+
+
+def _infer_speaker_names(sid_model, tagged_transcript: str, participants: str) -> Tuple[Dict[str, str], int]:
+    """Map generic Speaker N labels to the user-provided participant names so
+    the rename fields come pre-filled. Best-effort: returns ({}, tokens) on
+    any failure — the user can always rename manually."""
+    try:
+        prompt = SPEAKER_NAME_MAP_PROMPT.format(
+            participants=participants,
+            transcript_sample=tagged_transcript[:12000],
+        )
+        response = generate_with_retry(sid_model, prompt)
+        raw_json = response.text.strip()
+        if raw_json.startswith("```"):
+            lines = raw_json.split("\n")[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw_json = "\n".join(lines).strip()
+        json_match = re.search(r'\{[\s\S]*\}', raw_json)
+        if json_match:
+            raw_json = json_match.group(0)
+        parsed = json.loads(raw_json)
+        names = {
+            k: v.strip()
+            for k, v in parsed.items()
+            if isinstance(k, str) and k.startswith("Speaker") and isinstance(v, str) and v.strip()
+        }
+        return names, safe_get_token_count(response)
+    except Exception:
+        return {}, 0
+
+
+def _build_speaker_legend(model, raw_transcript: str, user_speakers: str) -> Tuple[str, int]:
+    """Return (legend, tokens): a canonical list of speaker names/roles.
+
+    The legend is injected into EVERY refinement and notes chunk prompt so
+    that parallel chunks share one speaker map — without it, later chunks
+    (which never saw the introductions) drift to generic 'Speaker N' labels
+    and name spellings diverge between chunks. Prefers the user-provided
+    participants list; otherwise extracts names from the transcript opening
+    (best-effort: returns "" on failure)."""
+    if user_speakers:
+        return user_speakers, 0
+    try:
+        sample = " ".join(raw_transcript.split()[:3000])
+        response = generate_with_retry(model, SPEAKER_LEGEND_EXTRACT_PROMPT.format(transcript_sample=sample))
+        raw_json = response.text.strip()
+        if raw_json.startswith("```"):
+            lines = raw_json.split("\n")[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw_json = "\n".join(lines).strip()
+        json_match = re.search(r'\{[\s\S]*\}', raw_json)
+        if json_match:
+            raw_json = json_match.group(0)
+        parsed = json.loads(raw_json)
+        names = [str(s).strip() for s in parsed.get("speakers", []) if str(s).strip()]
+        return ", ".join(names[:8]), safe_get_token_count(response)
+    except Exception:
+        return "", 0
+
+
+def _speaker_legend_block(legend: str) -> str:
+    """Prompt block prepended to notes instructions when a legend exists."""
+    if not legend:
         return ""
-
-    context_headings = headings[-3:] if len(headings) >= 3 else headings
-
-    context_parts = [
-        f"**Chunk #{chunk_number} Context Summary:**",
-        f"- Total sections processed so far: {len(headings)}",
-        f"- Recent topics: {', '.join(q.strip('*') for q in context_headings[-2:])}",
-        f"- Last section processed: {headings[-1]}"
-    ]
-
-    last_heading = headings[-1]
-    answer_match = re.search(
-        re.escape(last_heading) + r"(.*?)(?=\*\*|$)",
-        notes_text,
-        re.DOTALL
+    return (
+        "### **SPEAKERS IN THIS MEETING**\n"
+        f"{legend}\n"
+        "Use these exact names (spelling included) when attributing questions and answers. "
+        "Do NOT use generic labels like 'Speaker 1' for anyone listed above.\n\n"
     )
-    if answer_match:
-        last_content = answer_match.group(1).strip()
-        context_parts.append(f"- Last section content:\n{last_content[:300]}...")
 
-    return "\n".join(context_parts)
+
+def _detect_speakers_in_segments(segments: List[Dict[str, str]]) -> List[str]:
+    """Return ordered, deduplicated list of speaker labels found in segments."""
+    seen: List[str] = []
+    for seg in segments:
+        if seg["speaker"] not in seen:
+            seen.append(seg["speaker"])
+    return seen
+
+
+def _refine_with_guard(model, prompt: str, source_words: int, attempts: int = 2) -> Tuple[Optional[str], int]:
+    """Run a refinement prompt and validate the output length against the
+    source. Refinement must preserve content (output ≈ input length), so an
+    output below REFINE_MIN_OUTPUT_RATIO of the input words means the model
+    compressed or dropped passages — retry, then return None so the caller
+    falls back to the unrefined text instead of silently losing content.
+
+    Returns (refined_text_or_None, tokens_used)."""
+    tokens = 0
+    floor = max(1, int(source_words * REFINE_MIN_OUTPUT_RATIO))
+    for _ in range(attempts):
+        response = generate_with_retry(model, prompt, generation_config=GENERATION_CONFIG)
+        tokens += safe_get_token_count(response)
+        text = _extract_response_text(response)
+        if len(text.split()) >= floor:
+            return text, tokens
+    return None, tokens
+
+
+def _notes_floor_words(state: AppState, source_words: int) -> int:
+    """Minimum plausible notes length (in words) for a transcript portion of
+    ``source_words``, below which the generation is treated as incomplete.
+    Returns 0 — no floor — for formats that legitimately condense (learnings
+    docs, decisions-only meeting notes, custom instructions, enrichment of
+    existing notes)."""
+    mt = state.selected_meeting_type
+    if mt not in ("Expert Meeting", "Earnings Call"):
+        return 0
+    if mt == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes":
+        return 0
+    return int(source_words * NOTES_MIN_OUTPUT_RATIO)
+
+
+def _notes_length_anchor(state: AppState, source_words: int) -> str:
+    """One prompt paragraph anchoring the expected notes volume, or "".
+
+    The model's strongest failure mode on large transcript portions —
+    especially when several sections generate in parallel with no view of
+    each other — is silent over-compression: notes that touch every topic
+    but shed half the bullets, with a normal STOP finish. An explicit
+    numeric volume expectation is the most effective counter. Only
+    completeness-contract styles get an anchor; condensing formats
+    legitimately compress and get none."""
+    mt = state.selected_meeting_type
+    if mt == "Expert Meeting":
+        ratio = 0.45 if state.selected_note_style == "Option 1: Detailed & Strict" else 0.3
+    elif mt == "Earnings Call" and state.earnings_call_mode != "Enrich Existing Notes":
+        ratio = 0.35
+    else:
+        return ""
+    expected = int(source_words * ratio)
+    if expected < 150:
+        return ""
+    return (
+        f"**EXPECTED VOLUME:** This transcript portion is ~{source_words:,} words. Complete notes for it "
+        f"typically run AT LEAST {expected:,} words. If your notes are coming out much shorter than that, "
+        f"you are over-compressing — go back and capture more bullets per answer, not fewer."
+    )
+
+
+def _retry_incomplete_notes(notes_model, prompt, text, finish, floor_words, progress, label):
+    """Retry a suspect notes generation — empty output, implausibly few words
+    for its source, or a finish reason other than STOP (thinking-budget
+    exhaustion, safety block, truncation) — keeping the best attempt by word
+    count. Mirrors the plausibility-check-and-retry the transcription and
+    refinement stages already have. Returns (text, finish, extra_tokens)."""
+    extra_tokens = 0
+    attempt = 1
+    while (
+        not text.strip() or len(text.split()) < floor_words or finish not in _OK_FINISH_REASONS
+    ) and attempt < NOTES_GEN_ATTEMPTS:
+        attempt += 1
+        progress.update(
+            "generate", 0.97,
+            f"{label} looked incomplete — regenerating (attempt {attempt}/{NOTES_GEN_ATTEMPTS})",
+        )
+        try:
+            response = generate_with_retry(notes_model, prompt, generation_config=GENERATION_CONFIG)
+            retry_text = _extract_response_text(response)
+            extra_tokens += safe_get_token_count(response)
+            if len(retry_text.split()) > len(text.split()):
+                text, finish = retry_text, _finish_reason_name(response)
+        except Exception:
+            pass
+    return text, finish, extra_tokens
+
+
+def _incomplete_notes_reason(text: str, finish: str, source_words: int) -> str:
+    """Human-readable reason a kept-but-suspect notes output was flagged."""
+    if finish not in _OK_FINISH_REASONS:
+        return f"the model stopped early (finish reason: {finish})"
+    return f"only {len(text.split()):,} notes words were generated for ~{source_words:,} transcript words"
+
+
+def generate_notes_from_transcript(
+    state: AppState,
+    final_transcript: str,
+    notes_model,
+    progress,
+    *,
+    skip_chunking: bool = False,
+    speaker_legend: str = "",
+) -> Tuple[str, int]:
+    """Generate notes for a (possibly long) transcript. Returns (notes, tokens).
+
+    Long transcripts are split into NON-overlapping, speaker-turn-aligned
+    chunks (see chunking.py). Each continuation prompt embeds the tail of the
+    previous chunk's *transcript* as read-only context, so chunk outputs never
+    overlap and are simply concatenated — no stitching or de-duplication step.
+    Because every prompt is known upfront, chunks are generated in parallel.
+    """
+    words = final_transcript.split()
+    chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
+
+    # --- Single-shot path (short transcript, or chunking disabled) ---
+    if skip_chunking or len(words) <= chunk_size:
+        progress.update("generate", 0, f"{len(words):,} words, single pass")
+        prompt = get_dynamic_prompt(state, final_transcript, speaker_legend)
+        # Live preview of the notes as they stream — the most honest progress
+        # indicator there is. Autoscroll keeps the latest text in view.
+        with st.container(height=240, border=True, autoscroll=True):
+            live_preview = st.empty()
+        response = generate_with_retry(notes_model, prompt, stream=True, generation_config=GENERATION_CONFIG)
+        expected_words = max(200, int(len(words) * NOTES_OUTPUT_RATIO))
+
+        def _on_stream(words_so_far):
+            progress.update(
+                "generate",
+                min(words_so_far / expected_words, 0.95),
+                f"{words_so_far:,} words generated",
+            )
+
+        notes, tokens = stream_and_collect(response, on_progress=_on_stream, live_preview=live_preview)
+        floor_words = _notes_floor_words(state, len(words))
+        notes, finish, extra_tokens = _retry_incomplete_notes(
+            notes_model, prompt, notes, _finish_reason_name(response), floor_words,
+            progress, "Notes output",
+        )
+        tokens += extra_tokens
+        if notes.strip() and (len(notes.split()) < floor_words or finish not in _OK_FINISH_REASONS):
+            reason = _incomplete_notes_reason(notes, finish, len(words))
+            notes += (
+                f"\n\n**[POSSIBLY INCOMPLETE NOTES]** — {reason} after {NOTES_GEN_ATTEMPTS} attempts. "
+                "Some content may be missing — re-run the notes or use the validation pass on the Output page."
+            )
+            st.warning(f"⚠️ The notes may be incomplete: {reason}.")
+        return notes, tokens
+
+    # --- Chunked path ---
+    chunks = create_chunks_with_context(final_transcript, chunk_size, CONTEXT_TAIL_WORDS)
+    n = len(chunks)
+    progress.set_units("generate", parallel_batches(n) * 5.0)
+    progress.update("generate", 0, f"{len(words):,} words, {n} sections in parallel")
+
+    prompt_base = _speaker_legend_block(speaker_legend) + _get_base_prompt_for_type(state)
+    prompts = []
+    for i, chunk in enumerate(chunks):
+        anchor = _notes_length_anchor(state, len(chunk["text"].split()))
+        if i == 0:
+            prompts.append(PROMPT_INITIAL.format(
+                base_instructions=prompt_base,
+                length_anchor=anchor,
+                chunk_text=chunk["text"],
+            ))
+        else:
+            prompts.append(PROMPT_CONTINUATION.format(
+                base_instructions=prompt_base,
+                length_anchor=anchor,
+                context_tail=chunk["context"],
+                chunk_text=chunk["text"],
+            ))
+
+    expected_words = [max(200, int(len(c["text"].split()) * NOTES_OUTPUT_RATIO)) for c in chunks]
+    # Shared per-chunk word counters; single-item assignments are GIL-atomic.
+    # Worker threads must not touch st.* — all UI updates happen on the main
+    # thread in the polling loop below.
+    words_generated = [0] * n
+    results: List[Optional[str]] = [None] * n
+    errors: List[Optional[Exception]] = [None] * n
+    chunk_tokens = [0] * n
+    finishes = [""] * n
+
+    def _generate_chunk(idx: int, prompt: str):
+        response = generate_with_retry(notes_model, prompt, stream=True, generation_config=GENERATION_CONFIG)
+        text = ""
+        for part in response:
+            if part.parts:
+                text += part.text
+                words_generated[idx] = len(text.split())
+        return idx, text, safe_get_token_count(response), _finish_reason_name(response)
+
+    executor = ThreadPoolExecutor(max_workers=min(3, n))
+    try:
+        futures = {executor.submit(_generate_chunk, i, p): i for i, p in enumerate(prompts)}
+        pending = set(futures)
+        while pending:
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in done:
+                idx = futures[future]
+                # One failed section must not abort the other sections'
+                # completed work; it gets a synchronous retry below.
+                try:
+                    _, text, tokens, finish = future.result()
+                except Exception as e:
+                    errors[idx] = e
+                    text, tokens, finish = "", 0, ""
+                results[idx] = text
+                chunk_tokens[idx] = tokens
+                finishes[idx] = finish
+                words_generated[idx] = len(text.split())
+            done_count = sum(1 for r in results if r is not None)
+            frac = sum(
+                1.0 if results[i] is not None else min(words_generated[i] / expected_words[i], 0.95)
+                for i in range(n)
+            ) / n
+            # Per-section live status — sections run in parallel, so without
+            # this the user never sees section 2+ being worked on.
+            if n <= 8:
+                detail = " · ".join(
+                    f"S{i + 1} {'✅' if results[i] is not None else '⏳'} {words_generated[i]:,}w"
+                    for i in range(n)
+                )
+            else:
+                detail = f"{done_count}/{n} sections · {sum(words_generated):,} words generated"
+            progress.update("generate", frac, detail)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    if not any(r and r.strip() for r in results):
+        # Everything failed — likely a config/model problem, so surface the
+        # real error when there is one.
+        first_error = next((e for e in errors if e is not None), None)
+        if first_error is not None:
+            raise first_error
+        raise ValueError("Failed to generate notes from any section. Please try again or use a different model.")
+
+    # Per-section completeness recovery: a section that failed, streamed back
+    # empty, or looks incomplete — implausibly few words for its source, or a
+    # finish reason other than STOP (thinking-budget exhaustion, safety
+    # block, truncation) — used to be accepted silently, so the stitched
+    # notes simply lacked that content with no trace. Retry keeping the best
+    # attempt; if it still looks incomplete, keep it but flag it VISIBLY.
+    for i in range(n):
+        source_words = len(chunks[i]["text"].split())
+        floor_words = _notes_floor_words(state, source_words)
+        text, finish, extra_tokens = _retry_incomplete_notes(
+            notes_model, prompts[i], results[i] or "", finishes[i], floor_words,
+            progress, f"Section {i + 1} of {n}",
+        )
+        chunk_tokens[i] += extra_tokens
+        if not text.strip():
+            text = (
+                f"**[MISSING SECTION {i + 1} of {n}]** — no notes could be generated for this "
+                f"portion of the transcript (~{source_words:,} source words). "
+                f"Re-run the notes or try a different model to fill this gap."
+            )
+            st.warning(f"⚠️ Notes generation failed for section {i + 1} of {n}; a placeholder marker was inserted.")
+        elif len(text.split()) < floor_words or finish not in _OK_FINISH_REASONS:
+            reason = _incomplete_notes_reason(text, finish, source_words)
+            text += (
+                f"\n\n**[POSSIBLY INCOMPLETE SECTION {i + 1} of {n}]** — {reason} after "
+                f"{NOTES_GEN_ATTEMPTS} attempts. Content from this portion of the transcript may be "
+                "missing; re-run the notes to regenerate it."
+            )
+            st.warning(f"⚠️ Section {i + 1} of {n} may be incomplete: {reason}.")
+        results[i] = text
+
+    if state.selected_meeting_type == "Internal Discussion":
+        # Learnings-doc sections each end with their own Consolidated Mental
+        # Models / Unanswered Questions / Follow-Ups blocks, which
+        # merge_learning_doc_sections reorganizes later — attaching a
+        # continued topic's bullets to the previous section's tail would put
+        # them inside the wrong block, so sections are joined verbatim.
+        final_notes = "\n\n".join(r.strip() for r in results if r and r.strip())
+    else:
+        # A section that starts mid-answer re-states the question as a
+        # "(contd.)"-marked heading; fold those bullets back into the block
+        # they continue instead of emitting a duplicate question.
+        final_notes = merge_continuation_seams(results)
+    return final_notes, sum(chunk_tokens)
+
 
 def _get_base_prompt_for_type(state):
     """Returns the base prompt instructions for the selected meeting type."""
     mt = state.selected_meeting_type
     if mt == "Expert Meeting":
+        # Speaker ID Flow uses a downstream Option 1/2/3 picker inside the
+        # speaker review panel. When the user clicks "Generate Notes" there we
+        # temporarily override selected_note_style to that downstream pick.
+        # If something invokes this with the raw Option 4 selected, fall back
+        # to the concise prompt — same default as Option 2.
         if state.selected_note_style == "Option 1: Detailed & Strict":
             return EXPERT_MEETING_DETAILED_PROMPT
         else:
@@ -1198,15 +1035,26 @@ def _get_base_prompt_for_type(state):
         return "Generate comprehensive meeting notes capturing all key points, decisions, data, and action items. Use **bold headings** to organize by topic and bullet points for details."
     return ""
 
-def get_dynamic_prompt(state: AppState, transcript_chunk: str) -> str:
-    base = _get_base_prompt_for_type(state)
+def get_dynamic_prompt(state: AppState, transcript_chunk: str, speaker_legend: str = "") -> str:
+    base = _speaker_legend_block(speaker_legend) + _get_base_prompt_for_type(state)
+    # Context can come from the typed field and/or a transcribed voice note;
+    # both are combined into one ADDITIONAL CONTEXT block.
     sanitized_context = sanitize_input(state.context_input)
-    context_section = f"**ADDITIONAL CONTEXT:**\n{sanitized_context}" if state.add_context_enabled and sanitized_context else ""
+    audio_context = sanitize_input(getattr(state, "context_audio_text", "") or "")
+    combined_context = "\n\n".join(part for part in (sanitized_context, audio_context) if part)
+    context_section = f"**ADDITIONAL CONTEXT:**\n{combined_context}" if state.add_context_enabled and combined_context else ""
 
     if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes":
         return f"Enrich the following existing notes based on the new transcript. Maintain the same structure and format.\n\n{base}\n\n**EXISTING NOTES:**\n{state.existing_notes_input}\n\n**NEW TRANSCRIPT:**\n{transcript_chunk}"
 
-    return f"{base}\n\n{context_section}\n\n**MEETING TRANSCRIPT:**\n{transcript_chunk}"
+    anchor = _notes_length_anchor(state, len(transcript_chunk.split()))
+    parts = [base]
+    if anchor:
+        parts.append(anchor)
+    if context_section:
+        parts.append(context_section)
+    parts.append(f"**MEETING TRANSCRIPT:**\n{transcript_chunk}")
+    return "\n\n".join(parts)
 
 def validate_inputs(state: AppState) -> Optional[str]:
     if state.input_method == "Paste Text" and not state.text_input.strip():
@@ -1247,70 +1095,27 @@ def is_mobile_device() -> bool:
     # We'll use a session state flag that can be set via JS, defaulting to False.
     return st.session_state.get("_is_mobile", False)
 
-class ProgressTracker:
-    """Manages progress bar and status updates during processing."""
+AUDIO_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.ogg', '.flac']
 
-    # Define the processing steps and their approximate weights (totaling 100)
-    STEPS = {
-        "prepare": {"weight": 5, "label": "Preparing Source Content"},
-        "transcribe": {"weight": 15, "label": "Transcribing Audio"},
-        "refine": {"weight": 25, "label": "Refining Transcript"},
-        "generate": {"weight": 47, "label": "Generating Notes"},
-        "cleanup": {"weight": 3, "label": "Cleaning Up Notes"},
-        "save": {"weight": 5, "label": "Saving to Database"},
-    }
-
-    def __init__(self, status_container):
-        self.status = status_container
-        self.progress_bar = st.progress(0)
-        self.status_text = st.empty()
-        self.current_progress = 0
-        self.completed_steps = set()
-
-    def update(self, step: str, sub_progress: float = 0, detail: str = ""):
-        """
-        Update progress bar and status.
-        step: one of the STEPS keys
-        sub_progress: 0-1 progress within the current step
-        detail: additional detail text
-        """
-        # Calculate base progress from completed steps
-        base = sum(self.STEPS[s]["weight"] for s in self.completed_steps)
-
-        # Add current step's partial progress
-        if step in self.STEPS:
-            step_weight = self.STEPS[step]["weight"]
-            current = base + (step_weight * sub_progress)
-        else:
-            current = base
-
-        self.current_progress = min(current / 100, 1.0)
-        self.progress_bar.progress(self.current_progress)
-
-        # Update status text
-        label = self.STEPS.get(step, {}).get("label", step)
-        pct = int(self.current_progress * 100)
-        status_msg = f"**{pct}%** - {label}"
-        if detail:
-            status_msg += f" ({detail})"
-        self.status_text.markdown(status_msg)
-
-    def complete_step(self, step: str):
-        """Mark a step as completed."""
-        self.completed_steps.add(step)
-        self.update(step, 1.0)
-
-    def finish(self):
-        """Mark all progress complete."""
-        self.progress_bar.progress(1.0)
-        self.status_text.markdown("**100%** - Complete!")
+def _input_is_audio(state: AppState) -> bool:
+    """Whether the configured input will require audio transcription.
+    Used to decide if the progress plan includes a transcription step —
+    must mirror the audio detection in get_file_content/_load_source_text."""
+    if state.input_method != "Upload / Record":
+        return False
+    if state.audio_recording is not None:
+        return True
+    if state.uploaded_file is not None:
+        ext = os.path.splitext(state.uploaded_file.name)[1].lower()
+        return ext in AUDIO_EXTENSIONS
+    return False
 
 def send_browser_notification(title: str, body: str):
     """Send a browser notification using the Notifications API."""
     safe_title = json.dumps(title)
     safe_body = json.dumps(body)
 
-    components.html(
+    st.iframe(
         f"""
         <script>
         (function() {{
@@ -1326,20 +1131,187 @@ def send_browser_notification(title: str, body: str):
         }})();
         </script>
         """,
-        height=0,
+        height=1,  # st.iframe requires a positive height; 1px keeps it invisible
     )
 
-def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker):
-    start_time = time.time()
-    notes_model = _get_cached_model(state.notes_model)
-    refinement_model = _get_cached_model(state.refinement_model)
-    transcription_model = _get_cached_model(state.transcription_model)
+def _fmt_audio_ts(ms: int) -> str:
+    """Format a millisecond offset as MM:SS (or H:MM:SS past the hour)."""
+    total_s = int(ms // 1000)
+    h, rem = divmod(total_s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
+
+def _transcribe_audio_bytes(
+    audio_bytes: bytes,
+    transcription_model,
+    speakers_hint: str = "",
+    progress_cb=None,
+    checkpoint: bool = False,
+) -> Tuple[str, List[str], List[str]]:
+    """Chunk-transcribe raw audio bytes with Gemini into a plain transcript.
+
+    Shared by the main generate pipeline (via _load_source_text) and the
+    general-context voice-note feature, so both transcribe audio identically:
+    5-minute overlapping chunks, per-chunk plausibility retries, seam dedup.
+
+    Returns (raw_transcript, suspect_ranges, warnings):
+      - progress_cb(done:int, total:int, message:str) — optional UI hook,
+        called at the START of each chunk (done is the 0-based chunk index).
+      - checkpoint — when True, mirror per-chunk results into session_state so
+        a reload can diagnose a partial run (used by the main pipeline only).
+      - warnings — fully-formatted strings the caller should surface via
+        st.warning (incomplete ranges, low word-per-minute density).
+    """
+    # Proper nouns are where ASR fails; prime it with what we know. The
+    # full-coverage contract matters just as much: on noisy or language-mixed
+    # chunks the model's failure mode is stopping early, not erroring.
+    transcribe_instruction = (
+        "Transcribe this audio recording verbatim, from the very beginning "
+        "to the very end. Do NOT stop early, skip, or summarize any section — "
+        "if a passage is hard to hear, transcribe your best guess and mark it "
+        "[inaudible] rather than omitting it. Output ONLY the transcribed speech — "
+        "no openings, closings, or markers of your own such as [END OF RECORDING]. "
+        "Pay special attention to "
+        "proper nouns — names of people, companies, products, and websites — "
+        "and transcribe them as accurately as possible."
+    )
+    if speakers_hint:
+        transcribe_instruction += f" Participants and entities likely mentioned: {speakers_hint}."
+
+    try:
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    except Exception as audio_err:
+        raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
+
+    chunk_length_ms = 5 * 60 * 1000
+    # Chunks after the first start TRANSCRIBE_OVERLAP_MS early so the sentences
+    # at each boundary appear in two chunks; strip_overlap() removes the
+    # duplicated words at join time.
+    audio_chunks = []
+    for start in range(0, len(audio), chunk_length_ms):
+        chunk_start = max(0, start - TRANSCRIBE_OVERLAP_MS) if start else 0
+        chunk_end = min(start + chunk_length_ms, len(audio))
+        audio_chunks.append((chunk_start, chunk_end, audio[chunk_start:chunk_end]))
+
+    all_transcripts, suspect_ranges, cloud_files, local_files = [], [], [], []
+    warnings: List[str] = []
+    # Per-chunk checkpoint: lets a partial/failed run be diagnosed (which
+    # chunk, which time range) instead of leaving one opaque joined string.
+    if checkpoint:
+        st.session_state["_checkpoint_transcript_chunks"] = []
+    try:
+        for i, (chunk_start, chunk_end, chunk) in enumerate(audio_chunks):
+            try:
+                if progress_cb:
+                    progress_cb(i, len(audio_chunks), f"Chunk {i+1}/{len(audio_chunks)}")
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
+                    chunk.export(temp_f.name, format="wav")
+                    local_files.append(temp_f.name)
+                    cloud_ref = genai.upload_file(path=temp_f.name)
+                    cloud_files.append(cloud_ref.name)
+                    while cloud_ref.state.name == "PROCESSING":
+                        time.sleep(2)
+                        cloud_ref = genai.get_file(cloud_ref.name)
+                    if cloud_ref.state.name != "ACTIVE":
+                        raise Exception(f"Audio chunk {i+1} cloud processing failed.")
+
+                    # A "successful" response is not a successful transcription:
+                    # the model can stop early or return nothing on hard chunks,
+                    # with no error raised. Validate word count against duration
+                    # and retry; exempt near-silent chunks, where a short (or
+                    # empty) transcript is the correct answer.
+                    duration_min = (chunk_end - chunk_start) / 60000.0
+                    near_silent = chunk.dBFS < SILENT_CHUNK_DBFS
+                    min_words = 0 if near_silent or duration_min < 0.5 else int(duration_min * TRANSCRIBE_MIN_WORDS_PER_MINUTE)
+                    text = ""
+                    for attempt in range(TRANSCRIBE_CHUNK_ATTEMPTS):
+                        response = generate_with_retry(
+                            transcription_model,
+                            [transcribe_instruction, cloud_ref],
+                            generation_config=GENERATION_CONFIG,
+                        )
+                        attempt_text = _extract_response_text(response)
+                        if len(attempt_text.split()) > len(text.split()):
+                            text = attempt_text  # keep the best attempt
+                        if len(text.split()) >= min_words and _finish_reason_name(response) in _OK_FINISH_REASONS:
+                            break
+                        time.sleep(2)
+
+                    # Drop model-added framing like "[END OF RECORDING]" —
+                    # mid-file it reads as a false ending, and trailing meta-text
+                    # breaks the seam dedup's tail anchoring.
+                    text = strip_asr_meta_markers(text)
+                    time_range = f"{_fmt_audio_ts(chunk_start)}-{_fmt_audio_ts(chunk_end)}"
+                    if len(text.split()) < min_words:
+                        # Still implausibly short after retries: keep whatever
+                        # came back, but leave a VISIBLE marker instead of an
+                        # invisible seam.
+                        suspect_ranges.append(time_range)
+                        if text.strip():
+                            text += (
+                                f"\n\n[POSSIBLE MISSING CONTENT: transcription of audio {time_range} "
+                                f"returned only {len(text.split())} words and may be incomplete.]"
+                            )
+                        else:
+                            text = (
+                                f"[TRANSCRIPTION GAP: audio from {time_range} could not be "
+                                f"transcribed after {TRANSCRIBE_CHUNK_ATTEMPTS} attempts.]"
+                            )
+                    all_transcripts.append(text)
+                    if checkpoint:
+                        st.session_state["_checkpoint_transcript_chunks"].append(
+                            {"index": i, "range": time_range, "words": len(text.split()), "text": text}
+                        )
+            except Exception as e:
+                raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
+
+        merged_transcripts: List[str] = []
+        for i, t in enumerate(all_transcripts):
+            if i and merged_transcripts and t.strip():
+                t = strip_overlap(merged_transcripts[-1], t)
+            if t.strip():
+                merged_transcripts.append(t.strip())
+        raw_transcript = "\n\n".join(merged_transcripts).strip()
+
+        if suspect_ranges:
+            warnings.append(
+                f"⚠️ Transcription may be incomplete for audio range(s): {', '.join(suspect_ranges)}. "
+                "Markers were inserted in the transcript at the affected points — consider re-running."
+            )
+        total_minutes = len(audio) / 60000.0
+        if total_minutes >= 1:
+            wpm = len(raw_transcript.split()) / total_minutes
+            if wpm < TRANSCRIPT_LOW_DENSITY_WPM:
+                warnings.append(
+                    f"⚠️ The transcript averages only {wpm:.0f} words per minute of audio "
+                    f"(normal conversation is 120-160). Parts of the recording may not have "
+                    f"been transcribed — review the transcript before trusting it."
+                )
+        return raw_transcript, suspect_ranges, warnings
+    finally:
+        for path in local_files:
+            try: os.remove(path)
+            except Exception: pass
+        for cloud_name in cloud_files:
+            try: genai.delete_file(cloud_name)
+            except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
+
+
+def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> Tuple[str, str, Optional[bytes]]:
+    """Load raw transcript from the configured input source (text/upload/recording).
+
+    Performs audio transcription when the input is audio. Returns
+    (raw_transcript, file_name, pdf_bytes). Mirrors the logic at the top of
+    process_and_save_task so the speaker-ID flow can reuse it without
+    duplicating subtle behaviour (whitespace normalisation, cloud cleanup, etc.).
+    """
+    transcription_model = _get_cached_model(state.transcription_model)
     progress.update("prepare", 0, "Loading input...")
+
     raw_transcript, file_name = "", "Pasted Text"
     pdf_bytes_data = None
 
-    # Handle input (File, Recording, or Text)
     if state.input_method == "Upload / Record":
         file_type, name, pdf_bytes = get_file_content(state.uploaded_file, state.audio_recording)
         file_name = name
@@ -1347,46 +1319,27 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
 
         if file_type == "audio_file":
             progress.update("transcribe", 0, "Processing audio file...")
+            known_speakers = sanitize_input(state.speakers)
+            audio_bytes = state.audio_recording.getvalue() if state.audio_recording else state.uploaded_file.getvalue()
 
-            if state.audio_recording:
-                audio_bytes = state.audio_recording.getvalue()
-            else:
-                audio_bytes = state.uploaded_file.getvalue()
+            def _transcribe_progress(done, total, message):
+                if done == 0:
+                    # Re-scale the transcription step now that the real workload is known.
+                    progress.set_units("transcribe", max(2.0, total * 2.0))
+                progress.update("transcribe", done / total if total else 0.0, message)
 
-            try:
-                audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-            except Exception as audio_err:
-                raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
+            raw_transcript, _suspect_ranges, _warnings = _transcribe_audio_bytes(
+                audio_bytes,
+                transcription_model,
+                speakers_hint=known_speakers,
+                progress_cb=_transcribe_progress,
+                checkpoint=True,
+            )
+            for _w in _warnings:
+                st.warning(_w)
+            progress.complete_step("transcribe")
 
-            chunk_length_ms = 5 * 60 * 1000
-            audio_chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
-
-            all_transcripts, cloud_files, local_files = [], [], []
-            try:
-                for i, chunk in enumerate(audio_chunks):
-                    try:
-                        progress.update("transcribe", i / len(audio_chunks), f"Chunk {i+1}/{len(audio_chunks)}")
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
-                            chunk.export(temp_f.name, format="wav")
-                            local_files.append(temp_f.name)
-                            cloud_ref = genai.upload_file(path=temp_f.name)
-                            cloud_files.append(cloud_ref.name)
-                            while cloud_ref.state.name == "PROCESSING": time.sleep(2); cloud_ref = genai.get_file(cloud_ref.name)
-                            if cloud_ref.state.name != "ACTIVE": raise Exception(f"Audio chunk {i+1} cloud processing failed.")
-                            response = generate_with_retry(transcription_model, ["Transcribe this audio.", cloud_ref])
-                            all_transcripts.append(response.text)
-                    except Exception as e:
-                        raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
-
-                raw_transcript = "\n\n".join(all_transcripts).strip()
-                progress.complete_step("transcribe")
-            finally:
-                for path in local_files: os.remove(path)
-                for cloud_name in cloud_files:
-                    try: genai.delete_file(cloud_name)
-                    except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
-
-        elif file_type is None or file_type.startswith("Error:"):
+        elif file_type is None or (isinstance(file_type, str) and file_type.startswith("Error:")):
             raise ValueError(file_type or "Failed to read file content.")
         else:
             raw_transcript = file_type
@@ -1396,18 +1349,292 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
     if not raw_transcript or not raw_transcript.strip():
         raise ValueError("Source content is empty or contains only whitespace.")
 
-    # Normalize whitespace and remove excessive blank lines
     raw_transcript = re.sub(r'\n{3,}', '\n\n', raw_transcript.strip())
+    return raw_transcript, file_name, pdf_bytes_data
+
+
+def run_speaker_identification_task(state: AppState, status_ui, progress: ProgressTracker) -> Dict[str, Any]:
+    """Refine transcript AND tag speakers (2 or 3, auto-detected).
+
+    Returns a dict with: raw_transcript, file_name, pdf_bytes, tagged_transcript,
+    segments, speakers, token_usage. The result is stored in session_state so
+    the user can edit speaker tags before generating notes.
+    """
+    start_time = time.time()
+    # Speaker ID uses its own model (defaults to a stronger one than refinement)
+    # because distinguishing voices across a long transcript benefits from the
+    # bigger context model. Fall back to refinement_model if unset.
+    sid_model_name = getattr(state, "speaker_id_model", None) or state.refinement_model
+    sid_model = _get_cached_model(sid_model_name)
+
+    raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
+
+    # Save checkpoints in case the user reloads
+    st.session_state["_checkpoint_raw_transcript"] = raw_transcript
+    st.session_state["_checkpoint_file_name"] = file_name
+
+    progress.complete_step("prepare")
+
+    speakers = sanitize_input(state.speakers)
+    speaker_info = f"Known participants (use as hint only, but still tag as Speaker 1/2/3): {speakers}." if speakers else ""
+    refinement_extra = REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "") + "\n" + ASR_CORRECTION_INSTRUCTION
+
+    progress.update("refine", 0, "Refining and tagging speakers...")
+    words = raw_transcript.split()
+    chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
+    total_tokens = 0
+    tagged_chunks: List[str] = []
+
+    if len(words) <= chunk_size:
+        prompt = SPEAKER_ID_PROMPT_INITIAL.format(
+            speaker_info=speaker_info,
+            refinement_extra=refinement_extra,
+            transcript=raw_transcript,
+        )
+        response = generate_with_retry(sid_model, prompt, generation_config=GENERATION_CONFIG)
+        tagged_chunks.append(_extract_response_text(response))
+        total_tokens += safe_get_token_count(response)
+        progress.update("refine", 1.0, "Done")
+    else:
+        # Non-overlapping, turn-aligned chunks: each transcript region is
+        # tagged exactly once, so the joined tagged output has no duplicated
+        # turns. Speaker continuity comes from prev_tagged_tail below, which
+        # carries the previous chunk's *tagged output* across the boundary.
+        chunks = [c["text"] for c in create_chunks_with_context(raw_transcript, chunk_size, 0)]
+        speakers_seen: List[str] = []
+        prev_tagged_tail = ""  # last few tagged segments from previous chunk
+        for i, chunk in enumerate(chunks):
+            progress.update("refine", i / len(chunks), f"Section {i+1}/{len(chunks)}")
+            if i == 0:
+                prompt = SPEAKER_ID_PROMPT_INITIAL.format(
+                    speaker_info=speaker_info,
+                    refinement_extra=refinement_extra,
+                    transcript=chunk,
+                )
+            else:
+                # Pass the last 2 tagged segments from the previous chunk's
+                # output (not raw words) so the model sees who Speaker 1 vs
+                # Speaker 2 actually is and keeps the mapping stable.
+                speakers_label = ", ".join(s for s in speakers_seen if s != SKIP_TAG) or "Speaker 1, Speaker 2"
+                prompt = SPEAKER_ID_PROMPT_CONTINUATION.format(
+                    speakers_so_far=speakers_label,
+                    context=prev_tagged_tail or "(no prior tagged context)",
+                    speaker_info=speaker_info,
+                    refinement_extra=refinement_extra,
+                    chunk=chunk,
+                )
+            response = generate_with_retry(sid_model, prompt, generation_config=GENERATION_CONFIG)
+            chunk_tagged = _extract_response_text(response)
+            if not chunk_tagged.strip():
+                # A blocked/empty response for one section must not leave a
+                # hole in the transcript. Keep the raw text untagged — when
+                # the joined output is parsed it attaches to the previous
+                # speaker's segment, where the user can see and reassign it.
+                st.warning(
+                    f"⚠️ Speaker tagging returned nothing for section {i+1} of {len(chunks)}; "
+                    "keeping that section's original text untagged so no content is lost."
+                )
+                chunk_tagged = chunk
+            tagged_chunks.append(chunk_tagged)
+            total_tokens += safe_get_token_count(response)
+
+            # Track speakers observed so far and remember the tail for next chunk.
+            # Four segments of tagged context (vs the old two) give the model a
+            # clearer picture of the established voice-to-label mapping, which
+            # is the main defence against labels flipping at chunk boundaries.
+            chunk_segments = _parse_tagged_transcript(chunk_tagged)
+            for seg in chunk_segments:
+                if seg["speaker"] not in speakers_seen:
+                    speakers_seen.append(seg["speaker"])
+            prev_tagged_tail = _serialize_tagged_segments(chunk_segments[-4:]) if chunk_segments else ""
+
+    tagged_transcript = "\n\n".join(c.strip() for c in tagged_chunks if c and c.strip())
+    segments = _parse_tagged_transcript(tagged_transcript)
+    if not segments:
+        raise ValueError("Speaker identification did not return any tagged segments. Try re-running, or switch to Option 1/2/3.")
+
+    # Merge consecutive same-speaker blocks (chunk boundaries and long answers
+    # produce splits) so the user has fewer segments to review.
+    segments = _merge_consecutive_segments(segments)
+
+    # Re-serialize from parsed segments so the stored tagged transcript has a
+    # canonical format (consistent spacing, blank lines, no model artefacts).
+    canonical_tagged = _serialize_tagged_segments(segments)
+    speakers_list = _detect_speakers_in_segments(segments)
+
+    # Pre-fill speaker display names from the user-provided participants list
+    # (best-effort) so renaming is usually already done.
+    inferred_names: Dict[str, str] = {}
+    if speakers:
+        progress.update("refine", 1.0, "Matching speakers to participants...")
+        inferred_names, name_tokens = _infer_speaker_names(sid_model, canonical_tagged, speakers)
+        total_tokens += name_tokens
+
+    progress.complete_step("refine")
+
+    # Durable checkpoint: persist the tagged transcript as a draft note so the
+    # refinement/tagging work survives a reload while the user reviews tags.
+    # process_tagged_to_notes_task fills in the content on the same row later;
+    # "Discard & Start Over" deletes it if no notes were generated.
+    draft_note_id = str(uuid.uuid4())
+    try:
+        database.save_note({
+            'id': draft_note_id, 'created_at': datetime.now().isoformat(),
+            'meeting_type': "Expert Meeting", 'file_name': file_name,
+            'content': "", 'raw_transcript': raw_transcript,
+            'refined_transcript': canonical_tagged, 'token_usage': total_tokens,
+            'processing_time': 0, 'pdf_blob': pdf_bytes_data,
+        })
+    except Exception:
+        draft_note_id = None
+
+    return {
+        "raw_transcript": raw_transcript,
+        "file_name": file_name,
+        "pdf_bytes": pdf_bytes_data,
+        "tagged_transcript": canonical_tagged,
+        "segments": segments,
+        "speakers": speakers_list,
+        "token_usage": total_tokens,
+        "elapsed": time.time() - start_time,
+        "note_id": draft_note_id,
+        "inferred_names": inferred_names,
+    }
+
+
+def process_tagged_to_notes_task(
+    state: AppState,
+    status_ui,
+    progress: ProgressTracker,
+    *,
+    tagged_transcript: str,
+    raw_transcript: str,
+    file_name: str,
+    pdf_bytes: Optional[bytes],
+    downstream_style: str,
+    prior_tokens: int = 0,
+    draft_note_id: Optional[str] = None,
+    speaker_legend: str = "",
+) -> Dict[str, Any]:
+    """Generate notes from a user-edited, speaker-tagged transcript.
+
+    Mirrors the notes-generation half of process_and_save_task but skips the
+    transcription and refinement steps (those already ran in the speaker-ID
+    step). The tagged transcript IS the refined transcript for this flow.
+    """
+    start_time = time.time()
+    notes_model = _get_cached_model(state.notes_model)
+
+    # Temporarily override note style so _get_base_prompt_for_type returns the
+    # downstream pick (Option 1/2/3). Restore on exit.
+    original_style = state.selected_note_style
+    state.selected_note_style = downstream_style
+    total_tokens = prior_tokens
+    final_notes_content = ""
+    try:
+        final_transcript = tagged_transcript
+        final_notes_content, tokens = generate_notes_from_transcript(
+            state, final_transcript, notes_model, progress, speaker_legend=speaker_legend
+        )
+        total_tokens += tokens
+
+        if not final_notes_content or not final_notes_content.strip():
+            raise ValueError("The model returned empty notes. Please try again or use a different model.")
+
+        progress.complete_step("generate")
+        was_chunked = len(final_transcript.split()) > (getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE)
+        if was_chunked:
+            # Deterministic cleanup — no LLM call, zero content-loss risk.
+            final_notes_content = cleanup_stitched_notes(final_notes_content)
+
+        # Executive summary if downstream style is Option 3
+        if downstream_style == "Option 3: Less Verbose + Summary":
+            progress.update("summary", 0.3, "Working...")
+            summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
+            response = generate_with_retry(notes_model, summary_prompt)
+            final_notes_content += f"\n\n---\n\n{response.text}"
+            total_tokens += safe_get_token_count(response)
+            progress.complete_step("summary")
+
+        progress.update("save", 0.5, "Writing to database...")
+        note_data = {
+            'id': draft_note_id or str(uuid.uuid4()), 'created_at': datetime.now().isoformat(),
+            'meeting_type': "Expert Meeting",
+            'file_name': file_name, 'content': final_notes_content,
+            'raw_transcript': raw_transcript,
+            'refined_transcript': tagged_transcript,
+            'token_usage': total_tokens,
+            'processing_time': time.time() - start_time,
+            'pdf_blob': pdf_bytes,
+        }
+        try:
+            if draft_note_id:
+                # Fill in the draft row saved by the speaker-ID step, with the
+                # user-edited tagged transcript as the refined transcript.
+                database.update_note(draft_note_id, {
+                    'content': final_notes_content,
+                    'refined_transcript': tagged_transcript,
+                    'token_usage': total_tokens,
+                    'processing_time': note_data['processing_time'],
+                })
+            else:
+                database.save_note(note_data)
+        except Exception as db_error:
+            st.session_state.app_state.fallback_content = final_notes_content
+            raise Exception(f"Processing succeeded, but failed to save the note to the database. You can download the unsaved note below. Error: {db_error}")
+        return note_data
+    finally:
+        state.selected_note_style = original_style
+
+
+def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker):
+    start_time = time.time()
+    note_id = str(uuid.uuid4())
+    created_at = datetime.now().isoformat()
+    notes_model = _get_cached_model(state.notes_model)
+    refinement_model = _get_cached_model(state.refinement_model)
+
+    # Load input (file, recording, or pasted text) — includes audio transcription.
+    raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
 
     # Checkpoint: save raw transcript so it survives connection drops
     st.session_state["_checkpoint_raw_transcript"] = raw_transcript
     st.session_state["_checkpoint_file_name"] = file_name
 
+    # Durable checkpoint: persist a draft note NOW so the transcript (which may
+    # have cost minutes of audio transcription) survives a crash, reload, or a
+    # failure in any later stage. The same row is updated as stages complete.
+    draft_saved = False
+    try:
+        database.save_note({
+            'id': note_id, 'created_at': created_at,
+            'meeting_type': state.selected_meeting_type, 'file_name': file_name,
+            'content': "", 'raw_transcript': raw_transcript,
+            'refined_transcript': None, 'token_usage': 0,
+            'processing_time': 0, 'pdf_blob': pdf_bytes_data,
+        })
+        draft_saved = True
+    except Exception:
+        # Non-fatal: processing continues; the final save below will retry.
+        pass
+
     final_transcript, refined_transcript, total_tokens = raw_transcript, None, 0
 
     speakers = sanitize_input(state.speakers)
-    speaker_info = f"Participants: {speakers}." if speakers else ""
     refinement_extra = REFINEMENT_INSTRUCTIONS.get(state.selected_meeting_type, "")
+    chunk_size = getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE
+
+    # Shared speaker legend: parallel chunks never see the introductions, so
+    # without a common speaker map later sections drift to generic 'Speaker N'
+    # labels and name spellings diverge between sections. Costs one small
+    # model call, and only when the transcript will actually be chunked.
+    speaker_legend = speakers
+    if not speaker_legend and len(raw_transcript.split()) > chunk_size:
+        progress.update("prepare", 0.8, "Building speaker legend...")
+        speaker_legend, legend_tokens = _build_speaker_legend(refinement_model, raw_transcript, "")
+        total_tokens += legend_tokens
+
+    speaker_info = f"Speakers (use these exact names as labels, consistently): {speaker_legend}." if speaker_legend else ""
 
     # --- Step 2: Refinement ---
     if state.refinement_enabled:
@@ -1417,172 +1644,154 @@ def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker)
 
         lang_instruction = "IMPORTANT: Your entire output MUST be in English. If the transcript contains Hindi, Hinglish, or any other non-English language, translate all content into clear, natural English while preserving the original meaning, nuance, and speaker intent."
 
-        if len(words) <= CHUNK_WORD_SIZE:
-            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT:\n{raw_transcript}"
-            response = generate_with_retry(refinement_model, refine_prompt)
-            refined_transcript = response.text
-            total_tokens += safe_get_token_count(response)
+        if len(words) <= chunk_size:
+            refine_prompt = f"Refine the following transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n{REFINEMENT_COMPLETENESS_INSTRUCTION}\n{ASR_CORRECTION_INSTRUCTION}\n\nTRANSCRIPT:\n{raw_transcript}"
+            refined_transcript, guard_tokens = _refine_with_guard(refinement_model, refine_prompt, len(words))
+            total_tokens += guard_tokens
+            if refined_transcript is None:
+                st.warning(
+                    "⚠️ Refinement output was much shorter than the transcript (likely dropped content); "
+                    "continuing with the unrefined transcript so nothing is lost."
+                )
+                refined_transcript = raw_transcript
         else:
-            chunks = create_chunks_with_overlap(raw_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
+            # Non-overlapping, turn-aligned chunks: each region is refined
+            # exactly once, so joining the refined chunks cannot duplicate
+            # content. The previous chunk's tail is passed as read-only
+            # context for continuity (known upfront, enables parallelism).
+            chunks = create_chunks_with_context(raw_transcript, chunk_size, CONTEXT_TAIL_WORDS)
 
-            # Pre-build all prompts using raw chunk tails as context (known upfront, enables parallelism)
             prompts = []
             for i, chunk in enumerate(chunks):
                 if i == 0:
-                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk}")
+                    prompts.append(f"You are refining a transcript. Correct spelling, grammar, and punctuation. Label speakers clearly if possible. {speaker_info} {refinement_extra}\n{lang_instruction}\n{REFINEMENT_COMPLETENESS_INSTRUCTION}\n{ASR_CORRECTION_INSTRUCTION}\n\nTRANSCRIPT CHUNK TO REFINE:\n{chunk['text']}")
                 else:
-                    prev_chunk_words = chunks[i - 1].split()
-                    context = " ".join(prev_chunk_words[-CHUNK_WORD_OVERLAP:])
-                    prompts.append(f"""You are continuing to refine a long transcript. Below is the tail end of the previous section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition.
+                    prompts.append(f"""You are continuing to refine a long transcript. Below is the tail end of the previous section for context. Your task is to refine the new chunk provided, ensuring a seamless and natural transition. Do NOT include the context itself in your output — refine and output ONLY the new chunk.
 {speaker_info} {refinement_extra}
 {lang_instruction}
+{REFINEMENT_COMPLETENESS_INSTRUCTION}
+{ASR_CORRECTION_INSTRUCTION}
 ---
-CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY):
-...{context}
+CONTEXT FROM PREVIOUS CHUNK (FOR CONTINUITY ONLY — DO NOT REFINE OR OUTPUT):
+...{chunk['context']}
 ---
 NEW TRANSCRIPT CHUNK TO REFINE:
-{chunk}""")
+{chunk['text']}""")
 
-            progress.update("refine", 0.1, f"{len(chunks)} chunks in parallel")
+            progress.set_units("refine", parallel_batches(len(chunks)) * 1.5)
+            progress.update("refine", 0.1, f"{len(chunks)} sections in parallel")
 
             # Process chunks in parallel (max 3 concurrent to respect API rate limits)
-            all_refined_chunks = [None] * len(chunks)
+            all_refined_chunks: List[Optional[str]] = [None] * len(chunks)
+            refine_done = [False] * len(chunks)
             chunk_tokens = [0] * len(chunks)
 
             def refine_chunk(idx, prompt):
-                resp = generate_with_retry(refinement_model, prompt)
-                return idx, resp.text, safe_get_token_count(resp)
+                # Per-chunk failures (safety block, hard API error after
+                # retries, dropped-content output) must not kill the whole
+                # run OR vanish silently: return None and let the fallback
+                # below substitute the raw chunk text.
+                try:
+                    text, tokens = _refine_with_guard(refinement_model, prompt, len(chunks[idx]["text"].split()))
+                    return idx, text, tokens
+                except Exception:
+                    return idx, None, 0
 
             with ThreadPoolExecutor(max_workers=min(3, len(chunks))) as executor:
                 futures = {executor.submit(refine_chunk, i, p): i for i, p in enumerate(prompts)}
                 for future in as_completed(futures):
                     idx, text, tokens = future.result()
                     all_refined_chunks[idx] = text
+                    refine_done[idx] = True
                     chunk_tokens[idx] = tokens
-                    done_count = sum(1 for c in all_refined_chunks if c is not None)
-                    progress.update("refine", 0.1 + (0.9 * done_count / len(chunks)), f"{done_count}/{len(chunks)} chunks")
+                    done_count = sum(refine_done)
+                    progress.update("refine", 0.1 + (0.9 * done_count / len(chunks)), f"{done_count}/{len(chunks)} sections")
 
             total_tokens += sum(chunk_tokens)
-            refined_transcript = "\n\n".join(c for c in all_refined_chunks if c) if any(all_refined_chunks) else ""
+            # Every slot gets filled: a section whose refinement failed keeps
+            # its raw text (unrefined but complete) instead of being dropped
+            # from the join — a silent drop here is an invisible hole in the
+            # transcript that no later stage can detect.
+            fallback_sections = []
+            for i, text in enumerate(all_refined_chunks):
+                if not (text and text.strip()):
+                    fallback_sections.append(str(i + 1))
+                    all_refined_chunks[i] = chunks[i]["text"]
+            if fallback_sections:
+                st.warning(
+                    f"⚠️ Refinement failed or dropped content for section(s) {', '.join(fallback_sections)} "
+                    f"of {len(chunks)}; the original transcript text was kept for those sections so nothing is lost."
+                )
+            refined_transcript = "\n\n".join(all_refined_chunks)
 
         final_transcript = refined_transcript
-    else:
-        # Refinement disabled - mark prepare and refine as complete
-        progress.complete_step("prepare")
         progress.complete_step("refine")
+    else:
+        # Refinement disabled — the plan contains no refine step.
+        progress.complete_step("prepare")
 
     # Checkpoint: save refined transcript
     st.session_state["_checkpoint_refined_transcript"] = refined_transcript
+    if draft_saved and refined_transcript:
+        try:
+            database.update_note(note_id, {"refined_transcript": refined_transcript, "token_usage": total_tokens})
+        except Exception:
+            pass
 
     # --- Step 3: Generate Notes ---
-    words = final_transcript.split()
     # Earnings calls should not be chunked: their topic-based structure causes
     # repeated sections when the same headings appear across multiple chunks.
     skip_chunking = state.selected_meeting_type == "Earnings Call"
-    num_chunks = 1 if skip_chunking else max(1, (len(words) + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
-    progress.update("generate", 0, f"{len(words):,} words, {num_chunks} chunk{'s' if num_chunks > 1 else ''}")
-    final_notes_content = ""
-
-    if not skip_chunking and len(words) > CHUNK_WORD_SIZE:
-        chunks = create_chunks_with_overlap(final_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP)
-
-        all_notes_chunks = []
-        context_package = ""
-        prompt_base = _get_base_prompt_for_type(state)
-
-        for i, chunk in enumerate(chunks):
-            progress.update("generate", i / len(chunks), f"Chunk {i+1}/{len(chunks)}")
-            prompt_template = PROMPT_INITIAL if i == 0 else PROMPT_CONTINUATION
-            prompt = prompt_template.format(base_instructions=prompt_base, chunk_text=chunk, context_package=context_package)
-
-            stream_placeholder = st.empty()
-            response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-            current_notes_text, tokens = stream_and_collect(response, stream_placeholder)
-            total_tokens += tokens
-
-            all_notes_chunks.append(current_notes_text)
-
-            cumulative_notes_for_context = "\n\n".join(all_notes_chunks)
-            context_package = _create_enhanced_context_from_notes(cumulative_notes_for_context, chunk_number=i + 1)
-
-        if not all_notes_chunks or not any(c.strip() for c in all_notes_chunks):
-            raise ValueError("Failed to generate notes from any chunk. Please try again or use a different model.")
-        else:
-            final_notes_content = all_notes_chunks[0]
-            for i in range(1, len(all_notes_chunks)):
-                prev_notes = all_notes_chunks[i-1]
-                current_notes = all_notes_chunks[i]
-
-                # Match only standalone bold headings (full line), not inline bold within bullets.
-                # The old r"(\*\*.*?\*\*)" pattern matched any bold text including inline
-                # items like **$5B** or **important**, causing stitch points to land in the
-                # middle of bullet content and silently drop portions of the notes.
-                HEADING_RE = r"(?m)^(\*\*[^*\n]+\*\*)\s*$"
-
-                last_q_match = list(re.finditer(HEADING_RE, prev_notes))
-                if not last_q_match:
-                    final_notes_content += "\n\n" + current_notes
-                    continue
-
-                last_heading = last_q_match[-1].group(1)
-
-                # Use a line-anchored search so we don't accidentally land on an
-                # inline occurrence of the same text inside a bullet point.
-                stitch_match = re.search(r"(?m)^" + re.escape(last_heading) + r"\s*$", current_notes)
-                stitch_point = stitch_match.start() if stitch_match else -1
-
-                if stitch_point != -1:
-                    next_q_match = re.search(HEADING_RE, current_notes[stitch_point + len(last_heading):])
-                    if next_q_match:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading) + next_q_match.start():]
-                    else:
-                        final_notes_content += "\n\n" + current_notes[stitch_point + len(last_heading):]
-                else:
-                    st.warning(f"Could not find stitch point for chunk {i+1}. Appending full chunk; check for duplicates.")
-                    final_notes_content += "\n\n" + current_notes
-
-    else:
-        prompt = get_dynamic_prompt(state, final_transcript)
-        stream_placeholder = st.empty()
-        response = generate_with_retry(notes_model, prompt, stream=True, generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-        final_notes_content, tokens = stream_and_collect(response, stream_placeholder)
-        total_tokens += tokens
+    final_notes_content, gen_tokens = generate_notes_from_transcript(
+        state, final_transcript, notes_model, progress,
+        skip_chunking=skip_chunking, speaker_legend=speaker_legend,
+    )
+    total_tokens += gen_tokens
 
     # Defensive: ensure we have content
     if not final_notes_content or not final_notes_content.strip():
         raise ValueError("The model returned empty notes. Please try again or use a different model.")
 
-    # --- Step 4: Deterministic cleanup (replaces LLM proofread to avoid content loss) ---
+    # --- Step 4: Deterministic cleanup (no LLM call, zero content-loss risk) ---
     progress.complete_step("generate")
-    was_chunked = not skip_chunking and len(final_transcript.split()) > CHUNK_WORD_SIZE
+    was_chunked = not skip_chunking and len(final_transcript.split()) > (getattr(state, "chunk_word_size", CHUNK_WORD_SIZE) or CHUNK_WORD_SIZE)
     if was_chunked:
-        progress.update("cleanup", 0, "Cleaning stitching artifacts...")
         final_notes_content = cleanup_stitched_notes(final_notes_content)
-        progress.update("cleanup", 1.0, "Done")
-    else:
-        progress.update("cleanup", 1.0, "Skipped (single-chunk)")
-    progress.complete_step("cleanup")
+        if state.selected_meeting_type == "Internal Discussion":
+            # Each processed section emits its own Consolidated Mental Models /
+            # Unanswered Questions / Follow-Ups blocks and restarts topic
+            # numbering. Merge them deterministically into one document.
+            final_notes_content = merge_learning_doc_sections(final_notes_content)
 
     # --- Step 5: Executive Summary (Expert Meeting Option 3 only) ---
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
-        progress.update("save", 0, "Generating executive summary...")
+        progress.update("summary", 0.3, "Working...")
         summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
         response = generate_with_retry(notes_model, summary_prompt)
         final_notes_content += f"\n\n---\n\n{response.text}"
         total_tokens += safe_get_token_count(response)
+        progress.complete_step("summary")
 
     # --- Step 6: Save ---
     progress.update("save", 0.5, "Writing to database...")
 
     note_data = {
-        'id': str(uuid.uuid4()), 'created_at': datetime.now().isoformat(), 'meeting_type': state.selected_meeting_type,
+        'id': note_id, 'created_at': created_at, 'meeting_type': state.selected_meeting_type,
         'file_name': file_name, 'content': final_notes_content, 'raw_transcript': raw_transcript,
         'refined_transcript': refined_transcript, 'token_usage': total_tokens,
         'processing_time': time.time() - start_time,
         'pdf_blob': pdf_bytes_data
     }
     try:
-        database.save_note(note_data)
+        if draft_saved:
+            database.update_note(note_id, {
+                'content': final_notes_content,
+                'refined_transcript': refined_transcript,
+                'token_usage': total_tokens,
+                'processing_time': note_data['processing_time'],
+            })
+        else:
+            database.save_note(note_data)
     except Exception as db_error:
         st.session_state.app_state.fallback_content = final_notes_content
         raise Exception(f"Processing succeeded, but failed to save the note to the database. You can download the unsaved note below. Error: {db_error}")
@@ -1599,6 +1808,82 @@ def on_sector_change():
     all_sectors = db_get_sectors()
     state.earnings_call_topics = all_sectors.get(new_sector, "")
 
+def _transcribe_context_audio(state: AppState) -> None:
+    """Transcribe (and refine) a General Context voice note into
+    state.context_audio_text, run as the first step of the generate flow.
+
+    The transcribed text is combined with the typed context in
+    get_dynamic_prompt, so downstream note generation sees the spoken context
+    as ordinary text. context_audio_text is recomputed from scratch on every
+    generate (so re-running never duplicates it), and cleared when no voice
+    note is present. Failures warn and are non-fatal — generation proceeds
+    with whatever typed context exists."""
+    # Always recompute from the current voice note (or clear it), so a second
+    # generation never stacks a duplicate transcript onto the context.
+    state.context_audio_text = ""
+    if not state.add_context_enabled or state.selected_meeting_type == "Custom":
+        return
+
+    audio_bytes = None
+    if state.context_audio_recording is not None:
+        audio_bytes = state.context_audio_recording.getvalue()
+    elif state.context_audio_file is not None:
+        ext = os.path.splitext(state.context_audio_file.name)[1].lower()
+        if ext not in AUDIO_EXTENSIONS:
+            st.warning(f"Ignoring context voice note: unsupported format '{ext}'.")
+            return
+        audio_bytes = state.context_audio_file.getvalue()
+    if not audio_bytes:
+        return
+
+    transcription_model = _get_cached_model(state.transcription_model)
+    with st.status("Transcribing context voice note...", expanded=True) as status:
+        bar = st.progress(0.0)
+
+        def _cb(done, total, message):
+            bar.progress(done / total if total else 0.0)
+            status.update(label=f"Transcribing context voice note — {message}")
+
+        try:
+            raw_text, _suspect, warnings = _transcribe_audio_bytes(
+                audio_bytes,
+                transcription_model,
+                speakers_hint=sanitize_input(state.speakers),
+                progress_cb=_cb,
+            )
+        except Exception as e:
+            status.update(label="Context voice note transcription failed", state="error")
+            st.warning(f"Could not transcribe the context voice note; continuing without it. Details: {e}")
+            return
+
+        for w in warnings:
+            st.warning(w)
+        if not raw_text or not raw_text.strip():
+            status.update(label="No speech detected in context voice note", state="error")
+            return
+
+        final_text = raw_text
+        # Refine to the same standard as the main transcript, when enabled.
+        if state.refinement_enabled:
+            status.update(label="Refining context voice note...")
+            bar.progress(0.9)
+            refinement_model = _get_cached_model(state.refinement_model)
+            refine_prompt = (
+                "Refine the following voice note into clean, readable prose. "
+                "Correct spelling, grammar, punctuation, and speech-to-text errors. "
+                "Preserve all information — do NOT summarize, condense, or drop content. "
+                f"Output ONLY the refined text.\n{ASR_CORRECTION_INSTRUCTION}\n\n"
+                f"VOICE NOTE:\n{raw_text}"
+            )
+            refined, _tokens = _refine_with_guard(refinement_model, refine_prompt, len(raw_text.split()))
+            if refined and refined.strip():
+                final_text = refined.strip()
+
+        bar.progress(1.0)
+        status.update(label="Context voice note added", state="complete")
+
+    state.context_audio_text = final_text.strip()
+
 def render_input_and_processing_tab(state: AppState):
     # --- Source Input ---
     state.input_method = st.pills("Input Method", ["Paste Text", "Upload / Record"], default=state.input_method, key="input_method_pills")
@@ -1610,7 +1895,8 @@ def render_input_and_processing_tab(state: AppState):
     else:
         col_upload, col_record = st.columns(2)
         with col_upload:
-            state.uploaded_file = st.file_uploader("Upload a File", type=['pdf', 'txt', 'mp3', 'm4a', 'wav', 'ogg', 'flac'], help="PDF, TXT, MP3, M4A, WAV, OGG, FLAC")
+            # "audio" is a MIME shortcut (audio/*) covering mp3/m4a/wav/ogg/flac.
+            state.uploaded_file = st.file_uploader("Upload a File", type=['pdf', 'txt', 'md', 'audio'], help="PDF, TXT, MD, or any audio file")
         with col_record:
             state.audio_recording = st.audio_input("Record Microphone")
 
@@ -1627,10 +1913,10 @@ def render_input_and_processing_tab(state: AppState):
 
     if preview_text:
         wc = len(preview_text.split())
-        num_chunks = max(1, (wc + CHUNK_WORD_SIZE - 1) // CHUNK_WORD_SIZE)
+        num_chunks = estimate_chunk_count(wc, state.chunk_word_size)
         info = f"**{wc:,}** words"
         if num_chunks > 1:
-            info += f" | **{num_chunks}** chunks"
+            info += f" | ~**{num_chunks}** sections (processed in parallel)"
         st.caption(info)
     elif state.input_method == "Upload / Record" and state.uploaded_file:
         ext = os.path.splitext(state.uploaded_file.name)[1].lower()
@@ -1702,25 +1988,95 @@ def render_input_and_processing_tab(state: AppState):
     elif state.selected_meeting_type == "Custom":
         state.context_input = st.text_area("Custom Instructions", value=state.context_input, height=120, placeholder="Describe how you want the notes structured...")
 
+    # --- General Context (all non-Custom meeting types) ---
+    if state.selected_meeting_type != "Custom":
+        state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
+        if state.add_context_enabled:
+            state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
+            with st.expander("🎙️ Add context from voice"):
+                st.caption(
+                    "Upload a voice note or record one. It's transcribed and refined "
+                    "just like the main transcript when you click Generate Notes, then "
+                    "used together with the text above as context."
+                )
+                vc_upload_col, vc_record_col = st.columns(2)
+                with vc_upload_col:
+                    state.context_audio_file = st.file_uploader(
+                        "Upload voice note",
+                        type=['wav', 'mp3', 'm4a', 'ogg', 'flac'],
+                        key="context_voice_upload",
+                        help="Any audio file (mp3, m4a, wav, ogg, flac).",
+                    )
+                with vc_record_col:
+                    state.context_audio_recording = st.audio_input("Record voice note", key="context_voice_record")
+                if state.context_audio_file or state.context_audio_recording:
+                    st.caption("🎙️ Voice note ready — it will be transcribed when you generate notes.")
+        else:
+            # Context disabled: drop any captured voice note so it isn't used.
+            state.context_audio_file = None
+            state.context_audio_recording = None
+            state.context_audio_text = ""
+
     # --- Settings & Participants row ---
     col_settings, col_participants = st.columns(2)
     with col_settings:
         with st.popover("Settings & Models", use_container_width=True):
             state.refinement_enabled = st.toggle("Transcript Refinement", value=state.refinement_enabled)
-            if state.selected_meeting_type != "Custom":
-                state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
-                if state.add_context_enabled: state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
+            _chunk_options = CHUNK_SIZE_OPTIONS if state.chunk_word_size in CHUNK_SIZE_OPTIONS else sorted(set(CHUNK_SIZE_OPTIONS + [state.chunk_word_size]))
+            state.chunk_word_size = st.select_slider(
+                "Section size (words)",
+                options=_chunk_options,
+                value=state.chunk_word_size,
+                format_func=lambda v: f"{v:,}",
+                help="Long transcripts are split into sections of roughly this many words "
+                     "(aligned to speaker turns) and processed in parallel. The 6,000 default "
+                     "favours detail capture: the model compresses more as sections grow, "
+                     "merging similar questions and dropping specifics. Raise it for faster "
+                     "runs with fewer API calls; lower it if notes still feel thin.",
+            )
 
             st.divider()
-            state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
-            state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
-            state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
-            state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
+            _was_flash_all = state.use_flash_for_all
+            state.use_flash_for_all = st.toggle(
+                f"Use {FLASH_ALL_MODEL} for everything",
+                value=state.use_flash_for_all,
+                help=f"Overrides every model below with {FLASH_ALL_MODEL} — the fastest, cheapest run. "
+                     "Turning it off restores your previous per-stage selections.",
+            )
+            if state.use_flash_for_all and not _was_flash_all:
+                # Remember the per-stage picks so switching back restores them.
+                st.session_state["_model_picks_backup"] = {f: getattr(state, f) for f in MODEL_STAGE_FIELDS}
+            elif _was_flash_all and not state.use_flash_for_all:
+                for field_name, value in st.session_state.get("_model_picks_backup", {}).items():
+                    if field_name in MODEL_STAGE_FIELDS and value in AVAILABLE_MODELS:
+                        setattr(state, field_name, value)
+
+            if state.use_flash_for_all:
+                # Re-assert every rerun: cheap, idempotent, and keeps every
+                # downstream read of state.<stage>_model on Flash.
+                for field_name in MODEL_STAGE_FIELDS:
+                    setattr(state, field_name, FLASH_ALL_MODEL)
+                st.caption(
+                    f"All stages (notes, refinement, speaker ID, transcription, chat) are locked to "
+                    f"{FLASH_ALL_MODEL}. Turn the toggle off to choose models per stage."
+                )
+            else:
+                state.notes_model = st.selectbox("Notes Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.notes_model))
+                state.refinement_model = st.selectbox("Refinement Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.refinement_model))
+                _sid_default = state.speaker_id_model if state.speaker_id_model in AVAILABLE_MODELS else list(AVAILABLE_MODELS.keys())[0]
+                state.speaker_id_model = st.selectbox(
+                    "Speaker ID Model",
+                    list(AVAILABLE_MODELS.keys()),
+                    index=list(AVAILABLE_MODELS.keys()).index(_sid_default),
+                    help="Used only for the Speaker ID Flow (Expert Meeting Option 4). A stronger model produces better speaker separation and tag continuity across long transcripts.",
+                )
+                state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
+                state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
 
             st.divider()
             st.caption("Browser notifications for processing completion.")
             if st.button("Enable Notifications", key="enable_notif_btn", use_container_width=True):
-                components.html(
+                st.iframe(
                     """
                     <script>
                     if ("Notification" in window) {
@@ -1735,30 +2091,83 @@ def render_input_and_processing_tab(state: AppState):
                     }
                     </script>
                     """,
-                    height=0,
+                    height=1,  # st.iframe requires a positive height; 1px keeps it invisible
                 )
     with col_participants:
-        state.speakers = st.text_input("Participants (Optional)", value=state.speakers, placeholder="e.g., John Smith (Analyst), Jane Doe (CEO)")
+        state.speakers = st.text_input(
+            "Participants (Optional)",
+            value=state.speakers,
+            placeholder="e.g., John Smith (Analyst), Jane Doe (CEO)",
+            help="Strongly recommended for audio and panels: names entered here become "
+                 "the canonical spellings used throughout the notes. Audio transcription "
+                 "garbles names phonetically — this is the most reliable way to get "
+                 "'Aloke Bajpai' instead of 'Alog Baji' in the output.",
+        )
 
     # --- Generate ---
     st.divider()
     validation_error = validate_inputs(state)
 
+    # Detect Speaker ID Flow (Option 4 of Expert Meeting)
+    is_speaker_flow = (
+        state.selected_meeting_type == "Expert Meeting"
+        and state.selected_note_style == SPEAKER_ID_FLOW_OPTION
+    )
+
+    if is_speaker_flow:
+        st.info(
+            "The transcript is refined and tagged with speaker labels first. "
+            "You can rename speakers, reassign per-segment tags, add a new tag, and download the tagged transcript "
+            "before generating the final notes.",
+            icon="\U0001f399\ufe0f",
+            title="Speaker ID Flow",
+        )
+
     if validation_error:
         st.warning(validation_error)
 
-    if st.button("Generate Notes", type="primary", use_container_width=True, disabled=bool(validation_error)):
-        state.processing = True; state.error_message = None; state.fallback_content = None; st.rerun()
+    button_label = "Identify Speakers" if is_speaker_flow else "Generate Notes"
+    if st.button(button_label, type="primary", use_container_width=True, disabled=bool(validation_error)):
+        state.error_message = None
+        state.fallback_content = None
+        if is_speaker_flow:
+            st.session_state.sn_processing_id = True
+            # Reset prior speaker-flow state so a fresh run starts clean,
+            # including per-segment dropdown and per-speaker rename widget keys.
+            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked", "sn_draft_note_id"):
+                st.session_state.pop(k, None)
+            for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
+                st.session_state.pop(k, None)
+        else:
+            state.processing = True
+        st.rerun()
 
     # --- Prompt Preview (collapsed) ---
     with st.expander("Prompt Preview", expanded=False):
-        prompt_preview = get_dynamic_prompt(state, "[...transcript content...]")
-        st.code(prompt_preview, language="markdown", height=200)
+        if is_speaker_flow:
+            preview = SPEAKER_ID_PROMPT_INITIAL.format(
+                speaker_info=f"Known participants: {sanitize_input(state.speakers)}." if state.speakers else "",
+                refinement_extra=REFINEMENT_INSTRUCTIONS.get("Expert Meeting", ""),
+                transcript="[...transcript content...]",
+            )
+        else:
+            preview = get_dynamic_prompt(state, "[...transcript content...]")
+        st.code(preview, language="markdown", height=200)
 
-    # --- Processing ---
+    # --- Standard Processing (non-speaker flows) ---
     if state.processing:
+        # Transcribe any General Context voice note first, so downstream
+        # prompts see the spoken context as ordinary text.
+        _transcribe_context_audio(state)
         with st.status("Processing your request...", expanded=True) as status:
-            progress = ProgressTracker(status)
+            progress = ProgressTracker(build_processing_plan(
+                is_audio=_input_is_audio(state),
+                refinement_enabled=state.refinement_enabled,
+                with_summary=(
+                    state.selected_note_style == "Option 3: Less Verbose + Summary"
+                    and state.selected_meeting_type == "Expert Meeting"
+                ),
+            ))
             try:
                 final_note = process_and_save_task(state, status, progress)
                 state.active_note_id = final_note['id']
@@ -1770,7 +2179,6 @@ def render_input_and_processing_tab(state: AppState):
                     state="complete"
                 )
                 st.toast("Notes generated successfully!", icon="\u2705")
-                # Send browser notification
                 send_browser_notification(
                     "SynthNotes AI - Complete",
                     f"Your notes are ready! Processing took {processing_time:.1f}s"
@@ -1778,24 +2186,349 @@ def render_input_and_processing_tab(state: AppState):
             except Exception as e:
                 state.error_message = f"An error occurred during processing:\n{e}"
                 status.update(label=f"Error: {e}", state="error")
-                # Send error notification
                 send_browser_notification(
                     "SynthNotes AI - Error",
                     "Processing failed. Check the app for details."
                 )
         state.processing = False
 
+    # --- Speaker ID Processing (speaker-tag step) ---
+    if st.session_state.get("sn_processing_id"):
+        # Transcribe any General Context voice note now (while its widgets are
+        # in the tree); the text persists on state for the later notes step.
+        _transcribe_context_audio(state)
+        with st.status("Identifying speakers...", expanded=True) as status:
+            progress = ProgressTracker(build_speaker_id_plan(is_audio=_input_is_audio(state)))
+            try:
+                result = run_speaker_identification_task(state, status, progress)
+                st.session_state.sn_segments = result["segments"]
+                st.session_state.sn_speakers = result["speakers"]
+                # Pre-filled from the participants list where inference was
+                # confident; the user can still rename in the review panel.
+                st.session_state.sn_speaker_names = {
+                    s: result["inferred_names"].get(s, "") for s in result["speakers"]
+                }
+                st.session_state.sn_tagged_transcript = result["tagged_transcript"]
+                st.session_state.sn_raw_transcript = result["raw_transcript"]
+                st.session_state.sn_file_name = result["file_name"]
+                st.session_state.sn_pdf_bytes = result["pdf_bytes"]
+                st.session_state.sn_id_tokens = result["token_usage"]
+                st.session_state.sn_id_elapsed = result["elapsed"]
+                st.session_state.sn_draft_note_id = result["note_id"]
+                progress.finish()
+                n_speakers = len(result["speakers"])
+                n_segments = len(result["segments"])
+                status.update(
+                    label=f"Done! Detected {n_speakers} speaker{'s' if n_speakers != 1 else ''} across {n_segments} segments in {result['elapsed']:.1f}s. Review and edit tags below.",
+                    state="complete",
+                )
+                st.toast(f"Detected {n_speakers} speakers", icon="\U0001f399\ufe0f")
+                send_browser_notification(
+                    "SynthNotes AI - Speakers Identified",
+                    f"{n_speakers} speakers detected across {n_segments} segments."
+                )
+            except Exception as e:
+                state.error_message = f"Speaker identification failed:\n{e}"
+                status.update(label=f"Error: {e}", state="error")
+                send_browser_notification(
+                    "SynthNotes AI - Error",
+                    "Speaker identification failed. Check the app for details."
+                )
+        st.session_state.sn_processing_id = False
+
+    # --- Speaker Review Panel + Notes Generation (only when segments exist) ---
+    if is_speaker_flow and st.session_state.get("sn_segments"):
+        _render_speaker_review_panel(state)
+
     if state.error_message:
-        st.error("Processing failed. See details below.")
-        with st.expander("Error Details", expanded=True):
-            st.code(state.error_message)
-        err_col1, err_col2 = st.columns(2)
+        st.error(state.error_message, title="Processing failed")
+        # Recovery: transcripts checkpointed before the failure are saved to
+        # History as an incomplete note and downloadable here.
+        ckpt_raw = st.session_state.get("_checkpoint_raw_transcript")
+        ckpt_refined = st.session_state.get("_checkpoint_refined_transcript")
+        if ckpt_raw or ckpt_refined:
+            st.caption(
+                "Work completed before the failure is not lost: the transcript was "
+                "checkpointed to **Output & History** and can also be downloaded below."
+            )
+        err_col1, err_col2, err_col3, err_col4 = st.columns(4)
         if state.fallback_content:
-            err_col1.download_button("Download Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt", use_container_width=True)
-        if err_col2.button("Dismiss Error", use_container_width=True):
+            err_col1.download_button("Unsaved Note (.txt)", state.fallback_content, "synthnotes_fallback.txt", use_container_width=True)
+        if ckpt_raw:
+            err_col2.download_button("Raw Transcript (.txt)", ckpt_raw, "raw_transcript_checkpoint.txt", use_container_width=True)
+        if ckpt_refined:
+            err_col3.download_button("Refined Transcript (.txt)", ckpt_refined, "refined_transcript_checkpoint.txt", use_container_width=True)
+        if err_col4.button("Dismiss Error", use_container_width=True):
             state.error_message = None
             state.fallback_content = None
             st.rerun()
+
+def _on_speaker_name_change(speaker_tag: str):
+    """Push the latest text_input value for `speaker_tag` into the speaker_names
+    dict immediately on commit, so dropdown labels reflect the new name on the
+    next render without depending on stale-vs-current comparisons."""
+    new_val = st.session_state.get(f"sn_name_{speaker_tag}", "")
+    names = st.session_state.get("sn_speaker_names")
+    if names is not None:
+        names[speaker_tag] = new_val
+
+
+def _render_speaker_review_panel(state: AppState):
+    """Render the speaker-tagged transcript editor used by the Speaker ID Flow.
+
+    Lets the user rename speakers, add a new (initially empty) speaker tag,
+    reassign any segment's tag (including `Skip` for logistics), download the
+    tagged transcript, and then run the standard Expert notes generation on
+    the edited transcript. `Skip`-tagged segments are excluded from the
+    transcript that feeds the notes prompt.
+    """
+    st.divider()
+    st.subheader("Speaker Review & Tagging")
+
+    segments: List[Dict[str, str]] = st.session_state.sn_segments
+    speakers: List[str] = st.session_state.sn_speakers
+    speaker_names: Dict[str, str] = st.session_state.sn_speaker_names
+
+    # Ensure Skip is always available as a tag option, ordered last
+    if SKIP_TAG not in speakers:
+        speakers.append(SKIP_TAG)
+    else:
+        speakers[:] = [s for s in speakers if s != SKIP_TAG] + [SKIP_TAG]
+    speaker_names.setdefault(SKIP_TAG, "")
+
+    file_name = st.session_state.get("sn_file_name", "transcript")
+    n_seg = len(segments)
+    real_speakers = [s for s in speakers if s != SKIP_TAG]
+    n_spk = len(real_speakers)
+    n_skip = sum(1 for s in segments if s["speaker"] == SKIP_TAG)
+    st.caption(
+        f"{n_spk} speaker tag{'s' if n_spk != 1 else ''} · {n_seg} segments"
+        + (f" · {n_skip} skipped (logistics)" if n_skip else "")
+        + f" · source: {file_name}"
+    )
+
+    # --- Speaker labels: rename and add new (Skip is not renameable) ---
+    st.markdown("**Speakers**")
+    name_cols = st.columns(min(max(len(real_speakers), 1), 3))
+    for i, sp in enumerate(real_speakers):
+        with name_cols[i % len(name_cols)]:
+            st.text_input(
+                f"{sp} display name",
+                value=speaker_names.get(sp, ""),
+                placeholder="e.g. Jane Doe (CEO)",
+                key=f"sn_name_{sp}",
+                on_change=_on_speaker_name_change,
+                args=(sp,),
+            )
+
+    add_col, swap_col, _ = st.columns([1, 1, 2])
+    with add_col:
+        if st.button("➕ Add Speaker Tag", key="sn_add_speaker_btn", use_container_width=True):
+            # Find the next free Speaker N (ignore Skip)
+            existing_nums = []
+            for s in real_speakers:
+                m = re.search(r"\d+", s)
+                if m:
+                    existing_nums.append(int(m.group(0)))
+            next_num = max(existing_nums) + 1 if existing_nums else 1
+            new_tag = f"Speaker {next_num}"
+            # Insert before Skip so Skip stays last
+            speakers.insert(len(speakers) - 1, new_tag)
+            speaker_names[new_tag] = ""
+            st.toast(f"Added {new_tag}. Reassign any segment to it via the dropdown.")
+            st.rerun()
+    if len(real_speakers) == 2:
+        with swap_col:
+            if st.button(
+                "🔄 Swap Speaker 1 ↔ 2",
+                key="sn_swap_speakers_btn",
+                use_container_width=True,
+                help="One click fixes the most common tagging error: the model assigning "
+                     "the interviewer's turns to the expert and vice versa. Swaps every "
+                     "segment's tag and the display names.",
+            ):
+                s1, s2 = real_speakers[0], real_speakers[1]
+                for seg in segments:
+                    if seg["speaker"] == s1:
+                        seg["speaker"] = s2
+                    elif seg["speaker"] == s2:
+                        seg["speaker"] = s1
+                speaker_names[s1], speaker_names[s2] = speaker_names.get(s2, ""), speaker_names.get(s1, "")
+                # Clear widget state so dropdowns and name fields re-render
+                # from the swapped segment data instead of stale selections.
+                for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
+                    st.session_state.pop(k, None)
+                st.toast("Swapped all Speaker 1 ↔ Speaker 2 tags.")
+                st.rerun()
+
+    st.caption(
+        "Rename speakers above (display names appear in the final notes). "
+        "Use **Add Speaker Tag** to create a new tag — reassign any segment via the dropdown below. "
+        "**Skip** is used by the model to mark logistical chatter (charger/food/breaks/tech checks); "
+        "those segments are excluded from the final notes. Reassign any segment to a real speaker if needed."
+    )
+
+    st.divider()
+
+    # --- Per-segment reassign + edit ---
+    st.markdown("**Segments**")
+    st.caption("Each segment shows the tag dropdown (left) and the refined text (right). Change the dropdown to reassign a segment.")
+
+    # Show just the display name once set; fall back to the generic tag.
+    def _display_for_tag(tag: str) -> str:
+        if tag == SKIP_TAG:
+            return "Skip (logistics)"
+        return speaker_names.get(tag) or tag
+
+    for idx, seg in enumerate(segments):
+        is_skip = seg["speaker"] == SKIP_TAG
+        with st.container(border=True):
+            sel_col, text_col = st.columns([1, 4])
+            with sel_col:
+                try:
+                    default_idx = speakers.index(seg["speaker"])
+                except ValueError:
+                    default_idx = 0
+                    seg["speaker"] = speakers[0]
+                picked_tag = st.selectbox(
+                    f"Tag #{idx + 1}",
+                    speakers,
+                    index=default_idx,
+                    format_func=_display_for_tag,
+                    key=f"sn_seg_tag_{idx}",
+                    label_visibility="collapsed",
+                )
+                if picked_tag != seg["speaker"]:
+                    seg["speaker"] = picked_tag
+            with text_col:
+                preview = seg["text"] if len(seg["text"]) <= 600 else seg["text"][:600] + "…"
+                if is_skip:
+                    st.markdown(f":gray[*(excluded from notes)*  \n{preview}]")
+                else:
+                    st.markdown(preview)
+                if len(seg["text"]) > 600:
+                    with st.expander("Full text", expanded=False):
+                        st.markdown(seg["text"])
+
+    st.divider()
+
+    # --- Download tagged transcript (includes Skip for the record) ---
+    canonical_tagged = _serialize_tagged_segments(segments)  # generic Speaker N + Skip labels
+    named_tagged = _serialize_tagged_segments(segments, display_names=speaker_names)  # with display names
+    # The transcript that feeds the notes prompt excludes Skip segments.
+    notes_input_tagged = _serialize_tagged_segments(
+        segments, display_names=speaker_names, exclude_tags=[SKIP_TAG]
+    )
+
+    safe_stem = re.sub(r"[^A-Za-z0-9_\-]+", "_", os.path.splitext(file_name)[0] or "transcript")[:60]
+    dl_col1, dl_col2 = st.columns(2)
+    with dl_col1:
+        st.download_button(
+            "⬇️ Download Tagged Transcript (.txt)",
+            named_tagged,
+            file_name=f"{safe_stem}_tagged.txt",
+            mime="text/plain",
+            use_container_width=True,
+            key="sn_download_named",
+        )
+    with dl_col2:
+        st.download_button(
+            "⬇️ Download Raw Refined (no names) (.txt)",
+            canonical_tagged,
+            file_name=f"{safe_stem}_speakers.txt",
+            mime="text/plain",
+            use_container_width=True,
+            key="sn_download_raw",
+        )
+
+    st.divider()
+
+    # --- Downstream notes step ---
+    st.markdown("**Generate Final Notes**")
+    ds_col1, ds_col2 = st.columns([2, 1])
+    with ds_col1:
+        downstream_style = st.selectbox(
+            "Final note style (uses the existing Expert Meeting prompts)",
+            SPEAKER_ID_DOWNSTREAM_OPTIONS,
+            index=1,  # default to Option 2: Less Verbose
+            key="sn_downstream_style",
+        )
+    with ds_col2:
+        st.write("")  # spacer for vertical alignment
+        st.write("")
+        if st.button("Generate Notes", type="primary", use_container_width=True, key="sn_generate_notes_btn"):
+            st.session_state.sn_processing_notes = True
+            st.session_state.sn_downstream_style_locked = downstream_style
+            st.rerun()
+
+    # --- Run notes generation ---
+    if st.session_state.get("sn_processing_notes"):
+        with st.status("Generating notes from tagged transcript...", expanded=True) as status:
+            progress = ProgressTracker(build_notes_only_plan(
+                with_summary=(
+                    st.session_state.sn_downstream_style_locked == "Option 3: Less Verbose + Summary"
+                ),
+            ))
+            try:
+                final_note = process_tagged_to_notes_task(
+                    state,
+                    status,
+                    progress,
+                    tagged_transcript=notes_input_tagged,
+                    raw_transcript=st.session_state.sn_raw_transcript,
+                    file_name=st.session_state.sn_file_name,
+                    pdf_bytes=st.session_state.sn_pdf_bytes,
+                    downstream_style=st.session_state.sn_downstream_style_locked,
+                    prior_tokens=st.session_state.get("sn_id_tokens", 0),
+                    draft_note_id=st.session_state.get("sn_draft_note_id"),
+                    # Display names assigned in the review panel become the
+                    # canonical speaker legend for the notes prompts.
+                    speaker_legend=", ".join(
+                        name for tag, name in st.session_state.get("sn_speaker_names", {}).items()
+                        if name and tag != SKIP_TAG
+                    ),
+                )
+                state.active_note_id = final_note['id']
+                progress.finish()
+                processing_time = final_note.get('processing_time', 0)
+                word_count = len(final_note.get('content', '').split())
+                status.update(
+                    label=f"Done! {word_count:,} words generated in {processing_time:.1f}s. Switch to the **Output & History** tab to view your note.",
+                    state="complete",
+                )
+                st.toast("Notes generated from tagged transcript!", icon="✅")
+                send_browser_notification(
+                    "SynthNotes AI - Complete",
+                    f"Your speaker-tagged notes are ready! Processing took {processing_time:.1f}s",
+                )
+            except Exception as e:
+                state.error_message = f"An error occurred while generating notes:\n{e}"
+                status.update(label=f"Error: {e}", state="error")
+                send_browser_notification(
+                    "SynthNotes AI - Error",
+                    "Notes generation failed. Check the app for details.",
+                )
+        st.session_state.sn_processing_notes = False
+
+    # --- Reset / discard ---
+    reset_col, _ = st.columns([1, 3])
+    with reset_col:
+        if st.button("Discard & Start Over", key="sn_reset_btn", use_container_width=True):
+            # Remove the draft checkpoint note if no notes were generated on it.
+            draft_id = st.session_state.get("sn_draft_note_id")
+            if draft_id:
+                try:
+                    draft = database.get_note_by_id(draft_id)
+                    if draft and not (draft.get("content") or "").strip():
+                        database.delete_note(draft_id)
+                except Exception:
+                    pass
+            for k in ("sn_segments", "sn_speakers", "sn_speaker_names", "sn_tagged_transcript", "sn_raw_transcript", "sn_file_name", "sn_pdf_bytes", "sn_id_tokens", "sn_id_elapsed", "sn_downstream_style_locked", "sn_draft_note_id"):
+                st.session_state.pop(k, None)
+            for k in [k for k in list(st.session_state.keys()) if k.startswith("sn_seg_tag_") or k.startswith("sn_name_")]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
 
 @st.dialog("Delete Note")
 def _confirm_delete_dialog(note_id: str, note_name: str):
@@ -1875,6 +2608,186 @@ def run_validation_in_chunks(notes: str, transcript: str, model_name: str) -> li
     return [r1.text, r2.text]
 
 
+# --- NOTE POST-PROCESSING (Output & History tab) ---
+
+def _strip_code_fences(text: str) -> str:
+    """Remove a wrapping markdown code fence from a model response, if any."""
+    text = text.strip()
+    if text.startswith("```"):
+        fence_lines = text.split("\n")[1:]
+        if fence_lines and fence_lines[-1].strip() == "```":
+            fence_lines = fence_lines[:-1]
+        text = "\n".join(fence_lines).strip()
+    return text
+
+
+def run_qa_merge(notes: str, model_name: str) -> dict:
+    """LLM pass that clubs small back-to-back Q&A blocks covering the same point.
+
+    The prompt's contract is strict — answer bullets are carried over verbatim
+    and unmerged blocks reproduced exactly — so the output must stay close to
+    the input length. The word ratio is returned for the review UI to flag."""
+    model = genai.GenerativeModel(model_name)
+    response = generate_with_retry(
+        model, QA_MERGE_PROMPT.format(notes=notes), generation_config=GENERATION_CONFIG
+    )
+    finish = _finish_reason_name(response)
+    if finish not in _OK_FINISH_REASONS:
+        raise ValueError(f"Merge pass did not complete (finish reason: {finish}).")
+    merged = _strip_code_fences(_extract_response_text(response))
+    if not merged:
+        raise ValueError("Merge pass returned an empty response.")
+    return {
+        "text": merged,
+        "word_ratio": len(merged.split()) / max(1, len(notes.split())),
+        "tokens": safe_get_token_count(response),
+    }
+
+
+def run_topic_grouping(notes: str, model_name: str) -> dict:
+    """Relocate same-topic Q&A blocks next to each other without rewriting text.
+
+    Two steps: the model first lists the topics and assigns every block to one,
+    returning only a JSON plan over block indices; the note is then reassembled
+    deterministically in Python from whole, untouched blocks — so this pass
+    cannot change a single word of the note."""
+    preamble, blocks = split_qa_blocks(notes)
+    if len(blocks) < 3:
+        raise ValueError(f"Topic grouping needs at least 3 Q&A blocks; this note has {len(blocks)}.")
+
+    def _heading(block: str) -> str:
+        return block.split("\n", 1)[0].strip().strip("*").strip()
+
+    # Compact digest per block — heading plus the first answer bullets — so the
+    # model clusters on content without needing (or being able to alter) the
+    # full text.
+    digests = []
+    for i, block in enumerate(blocks):
+        block_lines = [ln.strip() for ln in block.split("\n") if ln.strip()]
+        snippet = " ".join(ln for ln in block_lines[1:] if ln.startswith("-"))[:220]
+        digests.append(f"[{i}] {block_lines[0]}" + (f"\n    {snippet}" if snippet else ""))
+
+    prompt = QA_TOPIC_GROUPING_PROMPT.format(
+        block_count=len(blocks), max_index=len(blocks) - 1, block_list="\n".join(digests)
+    )
+    model = genai.GenerativeModel(model_name)
+    response = generate_with_retry(model, prompt, generation_config=GENERATION_CONFIG)
+    raw_json = _strip_code_fences(_extract_response_text(response))
+    json_match = re.search(r'\{[\s\S]*\}', raw_json)
+    if json_match:
+        raw_json = json_match.group(0)
+    plan = json.loads(raw_json)
+    topics = plan.get("topics") if isinstance(plan, dict) else None
+    if not isinstance(topics, list) or not topics:
+        raise ValueError("Topic discovery returned an invalid grouping plan.")
+
+    order, cleaned_topics = flatten_grouping_plan(topics, len(blocks))
+    topic_summary = [
+        {"name": t["name"], "headings": [_heading(blocks[i]) for i in t["blocks"]]}
+        for t in cleaned_topics
+    ]
+    return {
+        "text": reorder_qa_blocks(preamble, blocks, order),
+        "topics": topic_summary,
+        "moved": sum(1 for pos, idx in enumerate(order) if pos != idx),
+        "tokens": safe_get_token_count(response),
+    }
+
+
+def run_note_postprocess(notes: str, do_merge: bool, do_group: bool, model_name: str) -> dict:
+    """Run the selected post-processing passes in sequence — merge first, then
+    topic grouping on the merged text. Returns the processed text plus
+    per-pass stats for the review UI."""
+    _, source_blocks = split_qa_blocks(notes)
+    result = {
+        "text": notes,
+        "source_words": len(notes.split()),
+        "source_blocks": len(source_blocks),
+        "merge": None,
+        "grouping": None,
+        "tokens": 0,
+    }
+    if do_merge:
+        result["merge"] = run_qa_merge(notes, model_name)
+        result["text"] = result["merge"]["text"]
+        result["tokens"] += result["merge"]["tokens"]
+    if do_group:
+        result["grouping"] = run_topic_grouping(result["text"], model_name)
+        result["text"] = result["grouping"]["text"]
+        result["tokens"] += result["grouping"]["tokens"]
+    return result
+
+
+def _render_history_sidebar(state: AppState, notes: List[dict]):
+    """Compact note history + analytics in the sidebar, so the main page
+    stays focused on the active note."""
+    with st.sidebar:
+        st.subheader("History")
+
+        raw_summary_data = database.get_analytics_summary()
+        summary_dict = {}
+        if isinstance(raw_summary_data, dict):
+            summary_dict = raw_summary_data
+        elif isinstance(raw_summary_data, tuple) and raw_summary_data:
+            if isinstance(raw_summary_data[0], dict):
+                summary_dict = raw_summary_data[0]
+            else:
+                summary_dict['total_notes'] = raw_summary_data[0] if len(raw_summary_data) > 0 else 0
+                summary_dict['avg_time'] = raw_summary_data[1] if len(raw_summary_data) > 1 else 0.0
+                summary_dict['total_tokens'] = raw_summary_data[2] if len(raw_summary_data) > 2 else 0
+        st.caption(
+            f"{summary_dict.get('total_notes', 0)} notes · "
+            f"avg {summary_dict.get('avg_time', 0.0):.0f}s/note · "
+            f"{summary_dict.get('total_tokens', 0):,} tokens"
+        )
+
+        search_query = st.text_input(
+            "Search notes by file name", placeholder="Search notes...",
+            label_visibility="collapsed", key="history_search",
+        )
+        type_filter = st.selectbox(
+            "Filter by meeting type", ["All Types"] + MEETING_TYPES,
+            label_visibility="collapsed", key="history_type_filter",
+        )
+
+        filtered_notes = notes
+        if search_query:
+            filtered_notes = [n for n in filtered_notes if search_query.lower() in n.get('file_name', '').lower()]
+        if type_filter != "All Types":
+            filtered_notes = [n for n in filtered_notes if n.get('meeting_type') == type_filter]
+
+        if not filtered_notes:
+            st.info("No notes match your search.", title="No results")
+            return
+
+        for note in filtered_notes:
+            is_active = note['id'] == state.active_note_id
+            with st.container(border=True):
+                card_name = note['file_name']
+                if len(card_name) > 42:
+                    card_name = card_name[:39] + "..."
+                name_col, menu_col = st.columns([5, 1])
+                with name_col:
+                    st.markdown(f"**{card_name}**" + (" &nbsp; `viewing`" if is_active else ""))
+                with menu_col:
+                    action = st.menu_button(
+                        "⋮", ["View", "Delete"],
+                        key=f"note_menu_{note['id']}", type="tertiary",
+                    )
+                st.caption(
+                    f"{note['meeting_type']} · "
+                    f"{datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M')}"
+                )
+                if not (note.get('content') or '').strip():
+                    st.caption("⚠️ Incomplete — transcript saved, no notes yet")
+                if action == "View":
+                    if not is_active:
+                        state.active_note_id = note['id']
+                        st.rerun()
+                elif action == "Delete":
+                    _confirm_delete_dialog(note['id'], note['file_name'])
+
+
 def render_output_and_history_tab(state: AppState):
     notes = database.get_all_notes()
 
@@ -1894,6 +2807,8 @@ Your generated notes, transcripts, and chat history will appear here.
     if not state.active_note_id or not any(n['id'] == state.active_note_id for n in notes):
         state.active_note_id = notes[0]['id']
 
+    _render_history_sidebar(state, notes)
+
     active_note = database.get_note_by_id(state.active_note_id)
     if not active_note:
         active_note = database.get_note_by_id(notes[0]['id'])
@@ -1912,6 +2827,14 @@ Your generated notes, transcripts, and chat history will appear here.
         m1.metric("Time", f"{active_note.get('processing_time', 0):.1f}s")
         m2.metric("Tokens", f"{active_note.get('token_usage', 0):,}")
         m3.metric("Date", datetime.fromisoformat(active_note['created_at']).strftime('%b %d'))
+
+    if not (active_note.get('content') or '').strip():
+        st.warning(
+            "Notes generation didn't finish for this entry, but the transcript was "
+            "checkpointed and is shown on the right. Copy it into the Input & Generate "
+            "tab (refinement can be toggled off if it already ran) to retry.",
+            title="Incomplete note — transcript recovered",
+        )
 
     # --- Side-by-side Notes & Transcript ---
     final_transcript = active_note.get('refined_transcript') or active_note.get('raw_transcript')
@@ -1934,7 +2857,7 @@ Your generated notes, transcripts, and chat history will appear here.
     with col_transcript:
         st.markdown(f"**{transcript_source} Transcript**")
         if final_transcript:
-            st.text_area("", value=final_transcript, height=600, disabled=True, label_visibility="collapsed", key=f"side_tx_{active_note['id']}")
+            st.text_area("Transcript", value=final_transcript, height=600, disabled=True, label_visibility="collapsed", key=f"side_tx_{active_note['id']}")
         else:
             st.info("No transcript available.")
 
@@ -1943,43 +2866,148 @@ Your generated notes, transcripts, and chat history will appear here.
     fname = active_note.get('file_name', 'note')
     raw_tx = active_note.get('raw_transcript')
 
-    dl1, dl2, dl3, dl4 = st.columns(4)
-    with dl1:
-        copy_to_clipboard_button(edited_content)
-    dl2.download_button(
-        label="Notes (.txt)",
-        data=edited_content,
-        file_name=f"SynthNote_{fname}.txt",
-        mime="text/plain",
-        use_container_width=True
-    )
-    dl3.download_button(
-        label="Notes (.md)",
-        data=edited_content,
-        file_name=f"SynthNote_{fname}.md",
-        mime="text/markdown",
-        use_container_width=True
-    )
-    if final_transcript:
-        dl4.download_button(
-            label=f"{transcript_source} Transcript",
-            data=final_transcript,
-            file_name=f"{transcript_source}_Transcript_{fname}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
-    elif raw_tx:
-        dl4.download_button(
-            label="Raw Transcript",
-            data=raw_tx,
-            file_name=f"Raw_Transcript_{fname}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
-    else:
-        dl4.empty()
+    act_col, fb_col = st.columns([1, 3])
+    with act_col:
+        with st.popover("Export / Copy", icon=":material/download:", use_container_width=True):
+            copy_to_clipboard_button(edited_content)
+            st.download_button(
+                label="Notes (.txt)",
+                data=edited_content,
+                file_name=f"SynthNote_{fname}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+            st.download_button(
+                label="Notes (.md)",
+                data=edited_content,
+                file_name=f"SynthNote_{fname}.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
+            if final_transcript:
+                st.download_button(
+                    label=f"{transcript_source} Transcript (.txt)",
+                    data=final_transcript,
+                    file_name=f"{transcript_source}_Transcript_{fname}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+            elif raw_tx:
+                st.download_button(
+                    label="Raw Transcript (.txt)",
+                    data=raw_tx,
+                    file_name=f"Raw_Transcript_{fname}.txt",
+                    mime="text/plain",
+                    use_container_width=True,
+                )
+    with fb_col:
+        st.feedback("thumbs", key=f"fb_{active_note['id']}")
 
-    st.feedback("thumbs", key=f"fb_{active_note['id']}")
+    # --- POST-PROCESS NOTES ---
+    if (edited_content or '').strip():
+        st.divider()
+        st.subheader("Post-Process Notes")
+        st.caption(
+            "Optional cleanup passes for the finished note. Select one or both and process — "
+            "the result is shown for review before anything replaces the note."
+        )
+        _, pp_source_blocks = split_qa_blocks(edited_content)
+        if len(pp_source_blocks) < 2:
+            st.info(
+                "No Q&A blocks detected in this note (bold question headings), "
+                "so there is nothing to merge or regroup."
+            )
+        else:
+            pp_key = f"postprocess_{note_id}"
+            opt_merge_col, opt_group_col = st.columns(2)
+            with opt_merge_col:
+                do_merge = st.checkbox(
+                    "Merge back-to-back Q&As",
+                    key=f"pp_merge_{note_id}",
+                    help="Clubs small adjacent Q&A blocks that clearly cover the same point into one "
+                         "block, reducing the number of Q&A blocks. Answer bullets are carried over "
+                         "word-for-word — nothing is reworded, and unrelated neighbours are left alone.",
+                )
+            with opt_group_col:
+                do_group = st.checkbox(
+                    "Group similar topics together",
+                    key=f"pp_group_{note_id}",
+                    help="First lists every topic in the note, then relocates whole Q&A blocks so "
+                         "same-topic questions sit together without breaking the conversation's flow. "
+                         "Blocks are only moved, never rewritten.",
+                )
+            if do_merge and do_group:
+                st.caption("Both selected: Q&As are merged first, then the merged note is regrouped by topic.")
+
+            if st.button("Process Output", key=f"pp_btn_{note_id}", type="secondary",
+                         disabled=not (do_merge or do_group)):
+                with st.spinner("Post-processing notes — this may take a moment..."):
+                    try:
+                        pp_model = AVAILABLE_MODELS.get(state.notes_model, "gemini-2.5-pro")
+                        st.session_state[pp_key] = run_note_postprocess(
+                            edited_content, do_merge, do_group, pp_model
+                        )
+                    except Exception as e:
+                        st.session_state[pp_key] = {"error": str(e)}
+
+            if pp_key in st.session_state:
+                pp = st.session_state[pp_key]
+                if pp.get("error"):
+                    st.error(pp["error"], title="Post-processing failed")
+                else:
+                    merge_stats = pp.get("merge")
+                    grouping = pp.get("grouping")
+                    final_blocks = len(split_qa_blocks(pp["text"])[1])
+                    words_after = len(pp["text"].split())
+
+                    s1, s2, s3 = st.columns(3)
+                    s1.metric("Q&A blocks", f"{final_blocks}",
+                              delta=(final_blocks - pp["source_blocks"]) or None,
+                              delta_color="inverse")
+                    s2.metric("Words", f"{words_after:,}",
+                              delta=(words_after - pp["source_words"]) or None)
+                    s3.metric("Blocks relocated", f"{grouping['moved']}" if grouping else "—")
+
+                    if merge_stats and merge_stats["word_ratio"] < POSTPROCESS_MIN_WORD_RATIO:
+                        st.warning(
+                            f"The merged output is only {merge_stats['word_ratio']:.0%} of the original "
+                            "length — the model may have dropped content. Review the preview carefully "
+                            "before applying.",
+                            title="Length check",
+                        )
+
+                    if grouping and grouping["topics"]:
+                        with st.expander(f"Topics identified ({len(grouping['topics'])})"):
+                            for topic in grouping["topics"]:
+                                st.markdown(f"**{topic['name']}**")
+                                for heading in topic["headings"]:
+                                    st.markdown(f"- {heading}")
+
+                    st.markdown("**Preview**")
+                    with st.container(height=500, border=True):
+                        st.markdown(pp["text"])
+
+                    apply_col, discard_col, dl_col = st.columns([1, 1, 2])
+                    with apply_col:
+                        if st.button("Apply to Note", key=f"pp_apply_{note_id}",
+                                     type="primary", use_container_width=True):
+                            database.update_note(note_id, {"content": pp["text"]})
+                            # Reset the editor and stale validation so the updated note reloads cleanly
+                            st.session_state.pop(f"output_editor_{note_id}", None)
+                            st.session_state.pop(f"validation_result_{note_id}", None)
+                            st.session_state.pop(pp_key, None)
+                            st.toast("Post-processed notes applied.", icon="✅")
+                            st.rerun()
+                    with discard_col:
+                        if st.button("Discard", key=f"pp_discard_{note_id}", use_container_width=True):
+                            st.session_state.pop(pp_key, None)
+                            st.rerun()
+                    with dl_col:
+                        st.download_button(
+                            "Download processed (.md)", data=pp["text"],
+                            file_name=f"PostProcessed_{fname}.md", mime="text/markdown",
+                            key=f"pp_dl_{note_id}", use_container_width=True,
+                        )
 
     # --- VALIDATE OUTPUT COMPLETENESS ---
     if final_transcript:
@@ -2036,24 +3064,36 @@ Your generated notes, transcripts, and chat history will appear here.
     st.caption("Ask questions about the content. The model has access to both the notes and the source transcript for verbatim lookups.")
 
     st.session_state.chat_histories.setdefault(active_note['id'], [])
+    history = st.session_state.chat_histories[active_note['id']]
 
-    for message in st.session_state.chat_histories[active_note['id']]:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    chat_box = None
+    if history:
+        chat_box = st.container(height=420, autoscroll=True)
+        with chat_box:
+            for message in history:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
 
-    if prompt := st.chat_input("Ask a question about the note content..."):
-        st.session_state.chat_histories[active_note['id']].append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # Pinned to the bottom of the viewport so the input is always reachable.
+    with st.bottom:
+        prompt = st.chat_input("Ask a question about this note...")
 
-        with st.chat_message("assistant", avatar=":material/progress_activity:"):
-            full_response = ""
-            try:
-                transcript_context = final_transcript[:30000] if final_transcript else "Not available."
-                truncation_note = ""
-                if final_transcript and len(final_transcript) > 30000:
-                    truncation_note = f"\n\nNote: The transcript was truncated from {len(final_transcript):,} to 30,000 characters. Some content at the end may be missing from the TRANSCRIPT section. The NOTES section contains the full meeting content."
-                system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
+    if prompt:
+        if chat_box is None:
+            chat_box = st.container(height=420, autoscroll=True)
+        history.append({"role": "user", "content": prompt})
+        with chat_box:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant", avatar=":material/progress_activity:"):
+                full_response = ""
+                try:
+                    transcript_context = final_transcript[:CHAT_TRANSCRIPT_CHAR_LIMIT] if final_transcript else "Not available."
+                    truncation_note = ""
+                    if final_transcript and len(final_transcript) > CHAT_TRANSCRIPT_CHAR_LIMIT:
+                        truncation_note = f"\n\nNote: The transcript was truncated from {len(final_transcript):,} to {CHAT_TRANSCRIPT_CHAR_LIMIT:,} characters. Some content at the end may be missing from the TRANSCRIPT section. The NOTES section contains the full meeting content."
+                    system_prompt = f"""You are an expert analyst. Your task is to answer questions based on the provided meeting notes and source transcript.
 If the user asks for verbatim quotes or exact wording, refer to the TRANSCRIPT section. For analysis and summary questions, use the NOTES section.{truncation_note}
 
 MEETING NOTES:
@@ -2065,103 +3105,36 @@ SOURCE TRANSCRIPT:
 {transcript_context}
 ---
 """
-                chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-1.5-flash")
-                chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
-                messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in st.session_state.chat_histories[active_note['id']]]
+                    chat_model_name = AVAILABLE_MODELS.get(state.chat_model, "gemini-2.5-flash")
+                    chat_model = genai.GenerativeModel(chat_model_name, system_instruction=system_prompt)
+                    messages_for_api = [{'role': "model" if m["role"] == "assistant" else "user", 'parts': [m['content']]} for m in history]
 
-                chat = chat_model.start_chat(history=messages_for_api[:-1])
-                response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
+                    chat = chat_model.start_chat(history=messages_for_api[:-1])
+                    response = chat.send_message(messages_for_api[-1]['parts'], stream=True)
 
-                message_placeholder = st.empty()
-                try:
-                    for chunk in response:
-                        if not chunk.parts:
-                            continue
-                        full_response += chunk.text
-                        message_placeholder.markdown(full_response + "\u258c")
-                except Exception as stream_err:
-                    # Handle streaming interruption gracefully
-                    if full_response:
-                        full_response += f"\n\n*(Stream interrupted: {stream_err})*"
-                    else:
-                        raise stream_err
-                message_placeholder.markdown(full_response)
+                    message_placeholder = st.empty()
+                    try:
+                        for chunk in response:
+                            if not chunk.parts:
+                                continue
+                            full_response += chunk.text
+                            message_placeholder.markdown(full_response + "\u258c")
+                    except Exception as stream_err:
+                        # Handle streaming interruption gracefully
+                        if full_response:
+                            full_response += f"\n\n*(Stream interrupted: {stream_err})*"
+                        else:
+                            raise stream_err
+                    message_placeholder.markdown(full_response)
 
-            except Exception as e:
-                full_response = f"Sorry, an error occurred: {str(e)}"
-                st.error(full_response)
-                if st.session_state.chat_histories[active_note['id']]:
-                    st.session_state.chat_histories[active_note['id']].pop()
+                except Exception as e:
+                    full_response = f"Sorry, an error occurred: {str(e)}"
+                    st.error(full_response, title="Chat failed")
+                    if history:
+                        history.pop()
 
         if 'full_response' in locals() and not full_response.startswith("Sorry"):
-            st.session_state.chat_histories[active_note['id']].append({"role": "assistant", "content": full_response})
-
-    # --- Analytics ---
-    st.divider()
-    st.subheader("History")
-
-    raw_summary_data = database.get_analytics_summary()
-    summary_dict = {}
-    if isinstance(raw_summary_data, dict):
-        summary_dict = raw_summary_data
-    elif isinstance(raw_summary_data, tuple) and raw_summary_data:
-        if isinstance(raw_summary_data[0], dict):
-            summary_dict = raw_summary_data[0]
-        else:
-            summary_dict['total_notes'] = raw_summary_data[0] if len(raw_summary_data) > 0 else 0
-            summary_dict['avg_time'] = raw_summary_data[1] if len(raw_summary_data) > 1 else 0.0
-            summary_dict['total_tokens'] = raw_summary_data[2] if len(raw_summary_data) > 2 else 0
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Notes", summary_dict.get('total_notes', 0))
-    c2.metric("Avg. Time / Note", f"{summary_dict.get('avg_time', 0.0):.1f}s")
-    c3.metric("Total Tokens", f"{summary_dict.get('total_tokens', 0):,}")
-
-    # --- Search & Filter ---
-    filter_col1, filter_col2 = st.columns([3, 1])
-    with filter_col1:
-        search_query = st.text_input("Search notes by file name", placeholder="Search notes...", label_visibility="collapsed")
-    with filter_col2:
-        type_filter = st.selectbox("Filter by meeting type", ["All Types"] + MEETING_TYPES, label_visibility="collapsed")
-
-    filtered_notes = notes
-    if search_query:
-        filtered_notes = [n for n in filtered_notes if search_query.lower() in n.get('file_name', '').lower()]
-    if type_filter != "All Types":
-        filtered_notes = [n for n in filtered_notes if n.get('meeting_type') == type_filter]
-
-    if not filtered_notes:
-        st.info("No notes match your search. Try a different keyword or clear the filter.")
-
-    for note in filtered_notes:
-        is_active = note['id'] == state.active_note_id
-        with st.container(border=True):
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                # Truncate long filenames for card display
-                card_name = note['file_name']
-                if len(card_name) > 60:
-                    card_name = card_name[:57] + "..."
-                label = f"**{card_name}**"
-                if is_active:
-                    label += " &nbsp; `viewing`"
-                st.markdown(label)
-                content_text = note.get('content', '')
-                if content_text:
-                    snippet = content_text[:150].replace('\n', ' ').strip()
-                    if len(content_text) > 150:
-                        snippet += "..."
-                    st.caption(snippet)
-                # Badge + date on one line
-                badge_col, date_col = st.columns([1, 2])
-                badge_col.badge(note['meeting_type'])
-                date_col.caption(datetime.fromisoformat(note['created_at']).strftime('%b %d, %Y %H:%M'))
-            with col2:
-                if st.button("View", key=f"view_{note['id']}", use_container_width=True, disabled=is_active):
-                    state.active_note_id = note['id']
-                    st.rerun()
-                if st.button("Delete", key=f"del_{note['id']}", use_container_width=True, type="tertiary"):
-                    _confirm_delete_dialog(note['id'], note['file_name'])
+            history.append({"role": "assistant", "content": full_response})
 
 def _build_ia_prompt_template(meeting_type: str) -> str:
     """Return the IA prompt for the given meeting type; {transcript} left as placeholder."""
@@ -2309,8 +3282,7 @@ def render_ia_processing(state: AppState):
 
             # --- Optional refinement: chunk and extract Q&A ---
             if ia_enable_refine:
-                raw_words = st.session_state.ia_transcript.split()
-                chunks = create_chunks_with_overlap(st.session_state.ia_transcript, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP) if len(raw_words) > CHUNK_WORD_SIZE else [st.session_state.ia_transcript]
+                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.ia_transcript, state.chunk_word_size, 0)]
                 total_chunks = len(chunks)
                 refined_parts = [None] * total_chunks
 
@@ -2321,7 +3293,7 @@ def render_ia_processing(state: AppState):
                             total_chunks=total_chunks,
                             chunk=chunk,
                         )
-                        resp = generate_with_retry(model, prompt)
+                        resp = generate_with_retry(model, prompt, generation_config=GENERATION_CONFIG)
                         return idx, resp.text
 
                     with ThreadPoolExecutor(max_workers=min(3, total_chunks)) as executor:
@@ -2362,7 +3334,7 @@ def render_ia_processing(state: AppState):
                 if _addendum:
                     prompt += "\n\n---\nADDITIONAL FORMATTING INSTRUCTIONS:\n" + "\n".join(_addendum)
 
-                response = generate_with_retry(model, prompt)
+                response = generate_with_retry(model, prompt, generation_config=GENERATION_CONFIG)
                 st.session_state.ia_output = response.text
                 st.rerun()
         except Exception as e:
@@ -2699,8 +3671,7 @@ def render_otg_notes_tab(state: AppState):
 
             # --- Optional refinement: chunk and extract Q&A ---
             if enable_refine:
-                raw_words = st.session_state.otg_input.split()
-                chunks = create_chunks_with_overlap(st.session_state.otg_input, CHUNK_WORD_SIZE, CHUNK_WORD_OVERLAP) if len(raw_words) > CHUNK_WORD_SIZE else [st.session_state.otg_input]
+                chunks = [c["text"] for c in create_chunks_with_context(st.session_state.otg_input, state.chunk_word_size, 0)]
                 total_chunks = len(chunks)
                 refined_parts = [None] * total_chunks
 
@@ -2711,7 +3682,7 @@ def render_otg_notes_tab(state: AppState):
                             total_chunks=total_chunks,
                             chunk=chunk,
                         )
-                        resp = generate_with_retry(otg_model, prompt)
+                        resp = generate_with_retry(otg_model, prompt, generation_config=GENERATION_CONFIG)
                         return idx, resp.text
 
                     with ThreadPoolExecutor(max_workers=min(3, total_chunks)) as executor:
@@ -2862,7 +3833,7 @@ def _build_topic_structure_text(selected_topics: dict) -> str:
 
 
 def _generate_notes_for_file(file_label: str, transcript: str, topic_structure_text: str,
-                              model_name: str) -> Tuple[str, int]:
+                              model_name: str, on_progress=None) -> Tuple[str, int]:
     """Generate earnings call notes for a single file under the given topic structure.
     Returns (notes_text, token_count).
     """
@@ -2874,7 +3845,7 @@ def _generate_notes_for_file(file_label: str, transcript: str, topic_structure_t
     model = _get_cached_model(model_name)
     response = generate_with_retry(model, prompt, stream=True,
                                    generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-    full_text, token_count = stream_and_collect(response)
+    full_text, token_count = stream_and_collect(response, on_progress=on_progress)
     return full_text, token_count
 
 
@@ -2953,7 +3924,7 @@ def _build_dimension_structure_text(selected_dimensions: dict) -> str:
 
 
 def _extract_report_qualitative(file_label: str, report_text: str, dimension_structure_text: str,
-                                 model_name: str) -> Tuple[str, int]:
+                                 model_name: str, on_progress=None) -> Tuple[str, int]:
     """Extract qualitative data from a single report for the given dimensions.
     Returns (extraction_text, token_count).
     """
@@ -2965,7 +3936,7 @@ def _extract_report_qualitative(file_label: str, report_text: str, dimension_str
     model = _get_cached_model(model_name)
     response = generate_with_retry(model, prompt, stream=True,
                                    generation_config={"max_output_tokens": MAX_OUTPUT_TOKENS})
-    full_text, token_count = stream_and_collect(response)
+    full_text, token_count = stream_and_collect(response, on_progress=on_progress)
     return full_text, token_count
 
 
@@ -3221,14 +4192,24 @@ def render_report_comparison_tab(state: AppState):
             num_files = len(file_texts)
             for i, (fname, text) in enumerate(file_texts):
                 # Extraction is ~70% of the work, comparison is ~30%
-                pct = (i / num_files) * 0.7
-                progress_bar.progress(pct)
+                base = (i / num_files) * 0.7
+                progress_bar.progress(base)
                 status_text.markdown(
-                    f"**{int(pct*100)}%** — Extracting qualitative data from **{fname}** ({i+1}/{num_files})"
+                    f"**{int(base*100)}%** — Extracting qualitative data from **{fname}** ({i+1}/{num_files})"
                 )
 
+                expected = max(200, int(len(text.split()) * NOTES_OUTPUT_RATIO))
+
+                def _on_stream(words, base=base, fname=fname, i=i, expected=expected):
+                    frac = base + (min(words / expected, 0.95) / num_files) * 0.7
+                    progress_bar.progress(min(frac, 1.0))
+                    status_text.markdown(
+                        f"**{int(frac*100)}%** — Extracting qualitative data from **{fname}** "
+                        f"({i+1}/{num_files}) · {words:,} words generated"
+                    )
+
                 extraction_text, tokens = _extract_report_qualitative(
-                    fname, text, dimension_structure_text, notes_model
+                    fname, text, dimension_structure_text, notes_model, on_progress=_on_stream
                 )
                 total_tokens += tokens
                 all_extractions.append((fname, extraction_text))
@@ -3579,12 +4560,24 @@ def render_ec_analysis_tab(state: AppState):
         status_text = st.empty()
 
         try:
+            num_files = len(file_texts)
             for i, (fname, text) in enumerate(file_texts):
-                pct = i / len(file_texts)
-                progress_bar.progress(pct)
-                status_text.markdown(f"**{int(pct*100)}%** — Processing **{fname}** ({i+1}/{len(file_texts)})")
+                base = i / num_files
+                progress_bar.progress(base)
+                status_text.markdown(f"**{int(base*100)}%** — Processing **{fname}** ({i+1}/{num_files})")
 
-                notes_text, tokens = _generate_notes_for_file(fname, text, topic_structure_text, notes_model)
+                expected = max(200, int(len(text.split()) * NOTES_OUTPUT_RATIO))
+
+                def _on_stream(words, base=base, fname=fname, i=i, expected=expected):
+                    frac = base + min(words / expected, 0.95) / num_files
+                    progress_bar.progress(min(frac, 1.0))
+                    status_text.markdown(
+                        f"**{int(frac*100)}%** — Processing **{fname}** ({i+1}/{num_files}) · {words:,} words generated"
+                    )
+
+                notes_text, tokens = _generate_notes_for_file(
+                    fname, text, topic_structure_text, notes_model, on_progress=_on_stream
+                )
                 total_tokens += tokens
                 all_file_notes.append((fname, notes_text))
 
@@ -3688,6 +4681,13 @@ def render_ec_analysis_tab(state: AppState):
 
 
 # --- 6. MAIN APPLICATION RUNNER ---
+def _safe_utf8(s: Any) -> str:
+    """Strip lone UTF-16 surrogates so the result can be UTF-8 encoded into
+    Streamlit's protobuf string fields. Without this, error-display calls
+    can themselves crash and hide the underlying exception."""
+    return str(s).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
+
 def run_app():
     st.set_page_config(page_title="SynthNotes AI", layout="wide", page_icon="🤖")
 
@@ -3696,44 +4696,9 @@ def run_app():
 
     st.logo("https://placehold.co/64x64?text=SN", link="https://streamlit.io")
 
-    # --- Header with dark mode toggle ---
-    title_col, theme_col = st.columns([6, 1])
-    with title_col:
-        st.title("SynthNotes AI")
-    with theme_col:
-        # Detect current theme and show toggle
-        current_theme = st.context.theme
-        is_dark = current_theme.get("backgroundColor", "#ffffff").lower() in (
-            "#0e1117", "#111111", "#000000", "#0e1118", "#262730",
-        )
-        dark_mode = st.toggle(
-            "Dark" if is_dark else "Light",
-            value=is_dark,
-            key="dark_mode_toggle",
-            help="Switch between light and dark mode",
-        )
-        if dark_mode != is_dark:
-            # Inject JS to toggle Streamlit's theme via settings menu
-            target_theme = "Dark" if dark_mode else "Light"
-            components.html(
-                f"""
-                <script>
-                // Toggle theme by updating localStorage and reloading
-                const stTheme = '{target_theme.lower()}';
-                try {{
-                    const key = Object.keys(localStorage).find(k => k.includes('stActiveTheme')) || 'stActiveTheme-/-v1';
-                    localStorage.setItem(key, JSON.stringify({{name: stTheme, themeInput: {{}}}}));
-                    window.parent.location.reload();
-                }} catch(e) {{
-                    // Fallback: use URL params
-                    const url = new URL(window.parent.location);
-                    url.searchParams.set('embed_options', 'dark_theme' === stTheme ? 'dark_theme' : 'light_theme');
-                    window.parent.location = url;
-                }}
-                </script>
-                """,
-                height=0,
-            )
+    # Theme switching is handled by Streamlit's built-in settings menu —
+    # the old localStorage-rewrite toggle was brittle across versions.
+    st.title("SynthNotes AI")
 
     if "config_error" in st.session_state:
         st.error(st.session_state.config_error); st.stop()
@@ -3755,31 +4720,31 @@ def run_app():
             try:
                 render_input_and_processing_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in Input tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in Input tab: {tab_err}"))
 
         def _page_output():
             try:
                 render_output_and_history_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in Output tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in Output tab: {tab_err}"))
 
         def _page_otg():
             try:
                 render_otg_notes_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in OTG Notes tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in OTG Notes tab: {tab_err}"))
 
         def _page_ec_analysis():
             try:
                 render_ec_analysis_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in EC Analysis tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in EC Analysis tab: {tab_err}"))
 
         def _page_report_comparison():
             try:
                 render_report_comparison_tab(st.session_state.app_state)
             except Exception as tab_err:
-                st.error(f"Error in Report Comparison tab: {tab_err}")
+                st.error(_safe_utf8(f"Error in Report Comparison tab: {tab_err}"))
 
         nav = st.navigation(
             [
@@ -3794,7 +4759,11 @@ def run_app():
         nav.run()
 
     except Exception as e:
-        st.error("A critical application error occurred."); st.code(traceback.format_exc())
+        st.error("A critical application error occurred.")
+        try:
+            st.code(_safe_utf8(traceback.format_exc()))
+        except Exception:
+            st.exception(e)
 
 if __name__ == "__main__":
     run_app()

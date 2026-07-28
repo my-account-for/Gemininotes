@@ -109,6 +109,30 @@ def _save_note_op(conn, note_data: dict):
 def save_note(note_data: dict):
     safe_db_operation(_save_note_op, note_data)
 
+# Columns that may be updated in place. Used by update_note for staged saves:
+# a draft row is inserted as soon as the raw transcript exists, then updated
+# after refinement and again after notes generation, so transcripts survive
+# a crash/disconnect at any later stage.
+_UPDATABLE_NOTE_FIELDS = {
+    "content", "raw_transcript", "refined_transcript",
+    "token_usage", "processing_time", "file_name", "meeting_type",
+}
+
+def _update_note_op(conn, note_id: str, fields: dict):
+    keys = [k for k in fields if k in _UPDATABLE_NOTE_FIELDS]
+    if not keys:
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in keys)
+    cursor = conn.cursor()
+    cursor.execute(
+        f"UPDATE notes SET {set_clause} WHERE id = ?",
+        [fields[k] for k in keys] + [note_id],
+    )
+    conn.commit()
+
+def update_note(note_id: str, fields: dict):
+    safe_db_operation(_update_note_op, note_id, fields)
+
 def _get_all_notes_op(conn):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
