@@ -355,7 +355,7 @@ class AppState:
     use_flash_for_all: bool = False
     refinement_enabled: bool = True
     chunk_word_size: int = CHUNK_WORD_SIZE
-    add_context_enabled: bool = False
+    add_context_enabled: bool = True
     context_input: str = ""
     speakers: str = ""
     earnings_call_topics: str = ""
@@ -1133,6 +1133,162 @@ def _fmt_audio_ts(ms: int) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def _transcribe_audio_bytes(
+    audio_bytes: bytes,
+    transcription_model,
+    speakers_hint: str = "",
+    progress_cb=None,
+    checkpoint: bool = False,
+) -> Tuple[str, List[str], List[str]]:
+    """Chunk-transcribe raw audio bytes with Gemini into a plain transcript.
+
+    Shared by the main generate pipeline (via _load_source_text) and the
+    general-context voice-note feature, so both transcribe audio identically:
+    5-minute overlapping chunks, per-chunk plausibility retries, seam dedup.
+
+    Returns (raw_transcript, suspect_ranges, warnings):
+      - progress_cb(done:int, total:int, message:str) — optional UI hook,
+        called at the START of each chunk (done is the 0-based chunk index).
+      - checkpoint — when True, mirror per-chunk results into session_state so
+        a reload can diagnose a partial run (used by the main pipeline only).
+      - warnings — fully-formatted strings the caller should surface via
+        st.warning (incomplete ranges, low word-per-minute density).
+    """
+    # Proper nouns are where ASR fails; prime it with what we know. The
+    # full-coverage contract matters just as much: on noisy or language-mixed
+    # chunks the model's failure mode is stopping early, not erroring.
+    transcribe_instruction = (
+        "Transcribe this audio recording verbatim, from the very beginning "
+        "to the very end. Do NOT stop early, skip, or summarize any section — "
+        "if a passage is hard to hear, transcribe your best guess and mark it "
+        "[inaudible] rather than omitting it. Output ONLY the transcribed speech — "
+        "no openings, closings, or markers of your own such as [END OF RECORDING]. "
+        "Pay special attention to "
+        "proper nouns — names of people, companies, products, and websites — "
+        "and transcribe them as accurately as possible."
+    )
+    if speakers_hint:
+        transcribe_instruction += f" Participants and entities likely mentioned: {speakers_hint}."
+
+    try:
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    except Exception as audio_err:
+        raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
+
+    chunk_length_ms = 5 * 60 * 1000
+    # Chunks after the first start TRANSCRIBE_OVERLAP_MS early so the sentences
+    # at each boundary appear in two chunks; strip_overlap() removes the
+    # duplicated words at join time.
+    audio_chunks = []
+    for start in range(0, len(audio), chunk_length_ms):
+        chunk_start = max(0, start - TRANSCRIBE_OVERLAP_MS) if start else 0
+        chunk_end = min(start + chunk_length_ms, len(audio))
+        audio_chunks.append((chunk_start, chunk_end, audio[chunk_start:chunk_end]))
+
+    all_transcripts, suspect_ranges, cloud_files, local_files = [], [], [], []
+    warnings: List[str] = []
+    # Per-chunk checkpoint: lets a partial/failed run be diagnosed (which
+    # chunk, which time range) instead of leaving one opaque joined string.
+    if checkpoint:
+        st.session_state["_checkpoint_transcript_chunks"] = []
+    try:
+        for i, (chunk_start, chunk_end, chunk) in enumerate(audio_chunks):
+            try:
+                if progress_cb:
+                    progress_cb(i, len(audio_chunks), f"Chunk {i+1}/{len(audio_chunks)}")
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
+                    chunk.export(temp_f.name, format="wav")
+                    local_files.append(temp_f.name)
+                    cloud_ref = genai.upload_file(path=temp_f.name)
+                    cloud_files.append(cloud_ref.name)
+                    while cloud_ref.state.name == "PROCESSING":
+                        time.sleep(2)
+                        cloud_ref = genai.get_file(cloud_ref.name)
+                    if cloud_ref.state.name != "ACTIVE":
+                        raise Exception(f"Audio chunk {i+1} cloud processing failed.")
+
+                    # A "successful" response is not a successful transcription:
+                    # the model can stop early or return nothing on hard chunks,
+                    # with no error raised. Validate word count against duration
+                    # and retry; exempt near-silent chunks, where a short (or
+                    # empty) transcript is the correct answer.
+                    duration_min = (chunk_end - chunk_start) / 60000.0
+                    near_silent = chunk.dBFS < SILENT_CHUNK_DBFS
+                    min_words = 0 if near_silent or duration_min < 0.5 else int(duration_min * TRANSCRIBE_MIN_WORDS_PER_MINUTE)
+                    text = ""
+                    for attempt in range(TRANSCRIBE_CHUNK_ATTEMPTS):
+                        response = generate_with_retry(
+                            transcription_model,
+                            [transcribe_instruction, cloud_ref],
+                            generation_config=GENERATION_CONFIG,
+                        )
+                        attempt_text = _extract_response_text(response)
+                        if len(attempt_text.split()) > len(text.split()):
+                            text = attempt_text  # keep the best attempt
+                        if len(text.split()) >= min_words and _finish_reason_name(response) in _OK_FINISH_REASONS:
+                            break
+                        time.sleep(2)
+
+                    # Drop model-added framing like "[END OF RECORDING]" —
+                    # mid-file it reads as a false ending, and trailing meta-text
+                    # breaks the seam dedup's tail anchoring.
+                    text = strip_asr_meta_markers(text)
+                    time_range = f"{_fmt_audio_ts(chunk_start)}-{_fmt_audio_ts(chunk_end)}"
+                    if len(text.split()) < min_words:
+                        # Still implausibly short after retries: keep whatever
+                        # came back, but leave a VISIBLE marker instead of an
+                        # invisible seam.
+                        suspect_ranges.append(time_range)
+                        if text.strip():
+                            text += (
+                                f"\n\n[POSSIBLE MISSING CONTENT: transcription of audio {time_range} "
+                                f"returned only {len(text.split())} words and may be incomplete.]"
+                            )
+                        else:
+                            text = (
+                                f"[TRANSCRIPTION GAP: audio from {time_range} could not be "
+                                f"transcribed after {TRANSCRIBE_CHUNK_ATTEMPTS} attempts.]"
+                            )
+                    all_transcripts.append(text)
+                    if checkpoint:
+                        st.session_state["_checkpoint_transcript_chunks"].append(
+                            {"index": i, "range": time_range, "words": len(text.split()), "text": text}
+                        )
+            except Exception as e:
+                raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
+
+        merged_transcripts: List[str] = []
+        for i, t in enumerate(all_transcripts):
+            if i and merged_transcripts and t.strip():
+                t = strip_overlap(merged_transcripts[-1], t)
+            if t.strip():
+                merged_transcripts.append(t.strip())
+        raw_transcript = "\n\n".join(merged_transcripts).strip()
+
+        if suspect_ranges:
+            warnings.append(
+                f"⚠️ Transcription may be incomplete for audio range(s): {', '.join(suspect_ranges)}. "
+                "Markers were inserted in the transcript at the affected points — consider re-running."
+            )
+        total_minutes = len(audio) / 60000.0
+        if total_minutes >= 1:
+            wpm = len(raw_transcript.split()) / total_minutes
+            if wpm < TRANSCRIPT_LOW_DENSITY_WPM:
+                warnings.append(
+                    f"⚠️ The transcript averages only {wpm:.0f} words per minute of audio "
+                    f"(normal conversation is 120-160). Parts of the recording may not have "
+                    f"been transcribed — review the transcript before trusting it."
+                )
+        return raw_transcript, suspect_ranges, warnings
+    finally:
+        for path in local_files:
+            try: os.remove(path)
+            except Exception: pass
+        for cloud_name in cloud_files:
+            try: genai.delete_file(cloud_name)
+            except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
+
+
 def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> Tuple[str, str, Optional[bytes]]:
     """Load raw transcript from the configured input source (text/upload/recording).
 
@@ -1154,141 +1310,25 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
 
         if file_type == "audio_file":
             progress.update("transcribe", 0, "Processing audio file...")
-            # Proper nouns are where ASR fails; prime it with what we know.
-            # The full-coverage contract matters just as much: on noisy or
-            # language-mixed chunks the model's failure mode is stopping
-            # early, not erroring.
-            transcribe_instruction = (
-                "Transcribe this audio recording verbatim, from the very beginning "
-                "to the very end. Do NOT stop early, skip, or summarize any section — "
-                "if a passage is hard to hear, transcribe your best guess and mark it "
-                "[inaudible] rather than omitting it. Output ONLY the transcribed speech — "
-                "no openings, closings, or markers of your own such as [END OF RECORDING]. "
-                "Pay special attention to "
-                "proper nouns — names of people, companies, products, and websites — "
-                "and transcribe them as accurately as possible."
-            )
             known_speakers = sanitize_input(state.speakers)
-            if known_speakers:
-                transcribe_instruction += f" Participants and entities likely mentioned: {known_speakers}."
             audio_bytes = state.audio_recording.getvalue() if state.audio_recording else state.uploaded_file.getvalue()
-            try:
-                audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-            except Exception as audio_err:
-                raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
 
-            chunk_length_ms = 5 * 60 * 1000
-            # Chunks after the first start TRANSCRIBE_OVERLAP_MS early so the
-            # sentences at each boundary appear in two chunks; strip_overlap()
-            # removes the duplicated words at join time.
-            audio_chunks = []
-            for start in range(0, len(audio), chunk_length_ms):
-                chunk_start = max(0, start - TRANSCRIBE_OVERLAP_MS) if start else 0
-                chunk_end = min(start + chunk_length_ms, len(audio))
-                audio_chunks.append((chunk_start, chunk_end, audio[chunk_start:chunk_end]))
-            # Re-scale the transcription step now that the real workload is known.
-            progress.set_units("transcribe", max(2.0, len(audio_chunks) * 2.0))
+            def _transcribe_progress(done, total, message):
+                if done == 0:
+                    # Re-scale the transcription step now that the real workload is known.
+                    progress.set_units("transcribe", max(2.0, total * 2.0))
+                progress.update("transcribe", done / total if total else 0.0, message)
 
-            all_transcripts, suspect_ranges, cloud_files, local_files = [], [], [], []
-            # Per-chunk checkpoint: lets a partial/failed run be diagnosed
-            # (which chunk, which time range) instead of leaving one opaque
-            # joined string.
-            st.session_state["_checkpoint_transcript_chunks"] = []
-            try:
-                for i, (chunk_start, chunk_end, chunk) in enumerate(audio_chunks):
-                    try:
-                        progress.update("transcribe", i / len(audio_chunks), f"Chunk {i+1}/{len(audio_chunks)}")
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_f:
-                            chunk.export(temp_f.name, format="wav")
-                            local_files.append(temp_f.name)
-                            cloud_ref = genai.upload_file(path=temp_f.name)
-                            cloud_files.append(cloud_ref.name)
-                            while cloud_ref.state.name == "PROCESSING":
-                                time.sleep(2)
-                                cloud_ref = genai.get_file(cloud_ref.name)
-                            if cloud_ref.state.name != "ACTIVE":
-                                raise Exception(f"Audio chunk {i+1} cloud processing failed.")
-
-                            # A "successful" response is not a successful
-                            # transcription: the model can stop early or return
-                            # nothing on hard chunks, with no error raised.
-                            # Validate word count against duration and retry;
-                            # exempt near-silent chunks, where a short (or
-                            # empty) transcript is the correct answer.
-                            duration_min = (chunk_end - chunk_start) / 60000.0
-                            near_silent = chunk.dBFS < SILENT_CHUNK_DBFS
-                            min_words = 0 if near_silent or duration_min < 0.5 else int(duration_min * TRANSCRIBE_MIN_WORDS_PER_MINUTE)
-                            text = ""
-                            for attempt in range(TRANSCRIBE_CHUNK_ATTEMPTS):
-                                response = generate_with_retry(
-                                    transcription_model,
-                                    [transcribe_instruction, cloud_ref],
-                                    generation_config=GENERATION_CONFIG,
-                                )
-                                attempt_text = _extract_response_text(response)
-                                if len(attempt_text.split()) > len(text.split()):
-                                    text = attempt_text  # keep the best attempt
-                                if len(text.split()) >= min_words and _finish_reason_name(response) in _OK_FINISH_REASONS:
-                                    break
-                                time.sleep(2)
-
-                            # Drop model-added framing like "[END OF RECORDING]" —
-                            # mid-file it reads as a false ending, and trailing
-                            # meta-text breaks the seam dedup's tail anchoring.
-                            text = strip_asr_meta_markers(text)
-                            time_range = f"{_fmt_audio_ts(chunk_start)}-{_fmt_audio_ts(chunk_end)}"
-                            if len(text.split()) < min_words:
-                                # Still implausibly short after retries: keep
-                                # whatever came back, but leave a VISIBLE
-                                # marker instead of an invisible seam.
-                                suspect_ranges.append(time_range)
-                                if text.strip():
-                                    text += (
-                                        f"\n\n[POSSIBLE MISSING CONTENT: transcription of audio {time_range} "
-                                        f"returned only {len(text.split())} words and may be incomplete.]"
-                                    )
-                                else:
-                                    text = (
-                                        f"[TRANSCRIPTION GAP: audio from {time_range} could not be "
-                                        f"transcribed after {TRANSCRIBE_CHUNK_ATTEMPTS} attempts.]"
-                                    )
-                            all_transcripts.append(text)
-                            st.session_state["_checkpoint_transcript_chunks"].append(
-                                {"index": i, "range": time_range, "words": len(text.split()), "text": text}
-                            )
-                    except Exception as e:
-                        raise Exception(f"Transcription failed on chunk {i+1}/{len(audio_chunks)}. Reason: {e}")
-
-                merged_transcripts: List[str] = []
-                for i, t in enumerate(all_transcripts):
-                    if i and merged_transcripts and t.strip():
-                        t = strip_overlap(merged_transcripts[-1], t)
-                    if t.strip():
-                        merged_transcripts.append(t.strip())
-                raw_transcript = "\n\n".join(merged_transcripts).strip()
-
-                if suspect_ranges:
-                    st.warning(
-                        f"⚠️ Transcription may be incomplete for audio range(s): {', '.join(suspect_ranges)}. "
-                        "Markers were inserted in the transcript at the affected points — consider re-running."
-                    )
-                total_minutes = len(audio) / 60000.0
-                if total_minutes >= 1:
-                    wpm = len(raw_transcript.split()) / total_minutes
-                    if wpm < TRANSCRIPT_LOW_DENSITY_WPM:
-                        st.warning(
-                            f"⚠️ The transcript averages only {wpm:.0f} words per minute of audio "
-                            f"(normal conversation is 120-160). Parts of the recording may not have "
-                            f"been transcribed — review the transcript before trusting the notes."
-                        )
-                progress.complete_step("transcribe")
-            finally:
-                for path in local_files:
-                    try: os.remove(path)
-                    except Exception: pass
-                for cloud_name in cloud_files:
-                    try: genai.delete_file(cloud_name)
-                    except Exception as e: st.warning(f"Could not delete cloud file {cloud_name}: {e}")
+            raw_transcript, _suspect_ranges, _warnings = _transcribe_audio_bytes(
+                audio_bytes,
+                transcription_model,
+                speakers_hint=known_speakers,
+                progress_cb=_transcribe_progress,
+                checkpoint=True,
+            )
+            for _w in _warnings:
+                st.warning(_w)
+            progress.complete_step("transcribe")
 
         elif file_type is None or (isinstance(file_type, str) and file_type.startswith("Error:")):
             raise ValueError(file_type or "Failed to read file content.")
@@ -1759,6 +1799,76 @@ def on_sector_change():
     all_sectors = db_get_sectors()
     state.earnings_call_topics = all_sectors.get(new_sector, "")
 
+def _process_context_voice(state: AppState, uploaded_file, audio_recording) -> None:
+    """Transcribe + refine a general-context voice note and append the result
+    to state.context_input. Uses the same transcription and refinement stages
+    as the main transcript so context audio is handled just like the main app.
+    Reruns on success so the updated Context Details text area re-renders."""
+    audio_bytes = None
+    if audio_recording is not None:
+        audio_bytes = audio_recording.getvalue()
+    elif uploaded_file is not None:
+        ext = os.path.splitext(uploaded_file.name)[1].lower()
+        if ext not in AUDIO_EXTENSIONS:
+            st.error(f"Unsupported audio format '{ext}'. Use one of: {', '.join(AUDIO_EXTENSIONS)}.")
+            return
+        audio_bytes = uploaded_file.getvalue()
+    if not audio_bytes:
+        st.warning("Please upload or record a voice note first.")
+        return
+
+    transcription_model = _get_cached_model(state.transcription_model)
+    with st.status("Processing voice note...", expanded=True) as status:
+        bar = st.progress(0.0)
+
+        def _cb(done, total, message):
+            bar.progress(done / total if total else 0.0)
+            status.update(label=f"Transcribing voice note — {message}")
+
+        try:
+            raw_text, _suspect, warnings = _transcribe_audio_bytes(
+                audio_bytes,
+                transcription_model,
+                speakers_hint=sanitize_input(state.speakers),
+                progress_cb=_cb,
+            )
+        except Exception as e:
+            status.update(label="Voice note transcription failed", state="error")
+            st.error(f"Could not transcribe the voice note: {e}")
+            return
+
+        for w in warnings:
+            st.warning(w)
+        if not raw_text or not raw_text.strip():
+            status.update(label="No speech detected", state="error")
+            st.warning("No speech could be transcribed from the voice note.")
+            return
+
+        final_text = raw_text
+        # Refine to the same standard as the main transcript, when enabled.
+        if state.refinement_enabled:
+            status.update(label="Refining voice note...")
+            bar.progress(0.9)
+            refinement_model = _get_cached_model(state.refinement_model)
+            refine_prompt = (
+                "Refine the following voice note into clean, readable prose. "
+                "Correct spelling, grammar, punctuation, and speech-to-text errors. "
+                "Preserve all information — do NOT summarize, condense, or drop content. "
+                f"Output ONLY the refined text.\n{ASR_CORRECTION_INSTRUCTION}\n\n"
+                f"VOICE NOTE:\n{raw_text}"
+            )
+            refined, _tokens = _refine_with_guard(refinement_model, refine_prompt, len(raw_text.split()))
+            if refined and refined.strip():
+                final_text = refined.strip()
+
+        bar.progress(1.0)
+        status.update(label="Voice note added to context", state="complete")
+
+    existing = (state.context_input or "").strip()
+    state.context_input = f"{existing}\n\n{final_text}".strip() if existing else final_text
+    st.toast("Voice note added to General Context.")
+    st.rerun()
+
 def render_input_and_processing_tab(state: AppState):
     # --- Source Input ---
     state.input_method = st.pills("Input Method", ["Paste Text", "Upload / Record"], default=state.input_method, key="input_method_pills")
@@ -1867,7 +1977,32 @@ def render_input_and_processing_tab(state: AppState):
     if state.selected_meeting_type != "Custom":
         state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
         if state.add_context_enabled:
+            # No widget key: the text area is driven by value=state.context_input
+            # so that _process_context_voice can update it and st.rerun() to show
+            # the appended transcript (a keyed widget would ignore the new value).
             state.context_input = st.text_area("Context Details:", value=state.context_input, placeholder="e.g., Company Name, Date...")
+            with st.expander("🎙️ Add context from voice"):
+                st.caption(
+                    "Upload a voice note or record one. It's transcribed and refined "
+                    "just like the main transcript, then appended to Context Details above."
+                )
+                vc_upload_col, vc_record_col = st.columns(2)
+                with vc_upload_col:
+                    context_voice_file = st.file_uploader(
+                        "Upload voice note",
+                        type=['wav', 'mp3', 'm4a', 'ogg', 'flac'],
+                        key="context_voice_upload",
+                        help="Any audio file (mp3, m4a, wav, ogg, flac).",
+                    )
+                with vc_record_col:
+                    context_voice_rec = st.audio_input("Record voice note", key="context_voice_record")
+                if st.button(
+                    "Process voice → context",
+                    key="process_context_voice_btn",
+                    use_container_width=True,
+                    disabled=not (context_voice_file or context_voice_rec),
+                ):
+                    _process_context_voice(state, context_voice_file, context_voice_rec)
 
     # --- Settings & Participants row ---
     col_settings, col_participants = st.columns(2)
