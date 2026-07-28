@@ -14,6 +14,7 @@ from chunking import (
     strip_overlap,
     strip_asr_meta_markers,
     merge_learning_doc_sections,
+    renumber_topic_sections,
     split_qa_blocks,
     flatten_grouping_plan,
     reorder_qa_blocks,
@@ -295,6 +296,48 @@ def test_merge_learning_doc_preserves_all_content():
 def test_merge_learning_doc_without_end_sections_unchanged():
     doc = "### **1. Topic**\n* a point\n\n### **2. Another**\n* b point"
     assert merge_learning_doc_sections(doc) == doc
+
+
+# --- renumber_topic_sections (Internal Discussion, speaker-grouped format) ---
+
+def test_renumber_topic_sections_fixes_restarted_numbering():
+    doc = (
+        "**1. Launch timeline**\n"
+        "- **Amit:**\n"
+        "    - Target October.\n"
+        "**2. Hiring**\n"
+        "- **Amit:**\n"
+        "    - Two engineers.\n"
+        "**1. Budget review**\n"          # a second section restarted at 1
+        "- **Jitin:**\n"
+        "    - 12% over plan.\n"
+    )
+    out = renumber_topic_sections(doc)
+    assert "**1. Launch timeline**" in out
+    assert "**2. Hiring**" in out
+    assert "**3. Budget review**" in out
+    assert "**1. Budget review**" not in out
+
+
+def test_renumber_topic_sections_leaves_speaker_labels_and_nesting_alone():
+    doc = (
+        "**1. Topic**\n"
+        "- **Amit:**\n"
+        "    - First point.\n"
+        "    - :red[**Lesson: ship early.**]\n"
+        "- **Jitin:**\n"
+        "    - A reply.\n"
+    )
+    out = renumber_topic_sections(doc)
+    # Speaker lead-ins and nested bullets (incl. the highlight) are untouched.
+    assert "- **Amit:**" in out
+    assert "- **Jitin:**" in out
+    assert "    - :red[**Lesson: ship early.**]" in out
+
+
+def test_renumber_topic_sections_empty_input():
+    assert renumber_topic_sections("") == ""
+    assert renumber_topic_sections("   ") == "   "
 
 
 # --- Q&A post-processing helpers: split / grouping plan / reorder ---
