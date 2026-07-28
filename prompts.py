@@ -516,6 +516,58 @@ TAGGED TRANSCRIPT (beginning — generic Speaker N labels):
 {transcript_sample}
 """
 
+# --- DUAL-ENGINE TRANSCRIPT MERGE (Gemini content + AssemblyAI diarization) ---
+# Transcript A = Gemini (high detail, weak/no speaker labels).
+# Transcript B = AssemblyAI utterances (diarized, lower fidelity).
+# The merged output is emitted as tagged turns so it can feed the speaker
+# review panel directly (parsed by _parse_named_tagged_transcript).
+TRANSCRIPT_MERGE_PROMPT = """You are an expert transcript editor. You will receive two machine transcripts of the SAME audio recording, produced by two different systems with complementary strengths and weaknesses. Your job is to merge them into a single, accurate, speaker-attributed transcript.
+
+TRANSCRIPT A (content source). Produced by a system that captures nearly all spoken detail — including mixed-language speech, names, numbers, and fast exchanges — but does NOT reliably identify who is speaking.
+
+TRANSCRIPT B (attribution source). Produced by a system with speaker diarization. Its speaker labels (Speaker A/B/C..., with timestamps) are useful anchors, but its text is less complete and often garbled, especially for non-English or code-switched speech. It may also assign separate speaker labels to non-conversational audio (videos played during the meeting, hold-music voiceovers, automated phone systems).
+
+Known context about the recording: {speaker_info}
+
+Output language: {output_language}
+
+Method — follow these steps in order:
+
+Step 1 — Read both transcripts fully before writing anything. Build a mental map of: (a) how many real human speakers there are, (b) which diarization labels in Transcript B correspond to which real person, and (c) which labels/segments are NOT a meeting participant at all (marketing/demo videos, screen-share audio, automated IVR voices, music). Long monologues in polished marketing English amid a casual conversation are almost always played videos, not a new participant.
+
+Step 2 — Map diarization labels to real names. Use, in priority order: (1) names given in the context above; (2) direct address within the dialogue ("...right, Jiten?" — the person SAYING this is not Jiten; the person replying usually is); (3) self-references ("let me tell you what I did", "I built this") and role consistency — in most meetings one person presents/demos/explains and another questions/challenges; a speaker rarely flips roles mid-conversation; (4) Transcript B's label boundaries with timestamps. If after all this some segments cannot be confidently named, use a consistent placeholder (e.g., "Speaker 3") rather than guessing a name.
+
+Step 3 — Merge. Walk through the recording chronologically and produce one unified transcript:
+- Transcript A is the default source of the words; use its wording wherever it is coherent.
+- Where Transcript A is garbled, missing, or ambiguous but Transcript B is clear, use Transcript B's version.
+- Where the two disagree on a fact (a name, number, place), prefer the version internally consistent with the rest of the conversation and common sense; machine transcripts frequently corrupt proper nouns. Fix ONLY when context makes the correct reading clear.
+- Where BOTH are garbled, write [inaudible] — never invent or paraphrase to fill a gap. Accuracy over completeness.
+- Do not summarize, condense, or editorialize. Keep the substance of every turn. You may drop pure disfluencies (repeated false starts, "hmm"/"haan" acknowledgment strings) that carry no meaning, but keep hedges, thinking-aloud phrases, and self-corrections.
+- Attribute every turn using the Step-2 mapping, cross-checked against conversational logic: a question is answered by the OTHER person; the person driving a demo narrates the screen; the person who introduced a topic elaborates on it. Transcript B's labels are anchors, not ground truth — when a label contradicts obvious conversational logic, trust the logic. In rapid multi-voice stretches where attribution of short interjections is genuinely uncertain, fold brief interjections into the nearest clearly-attributed turn.
+
+Step 4 — Language. Produce the final transcript in: {output_language}. If translating, translate meaning faithfully — keep register and hedging; keep proper nouns, product names, and technical terms as-is; where a culturally specific phrase has no clean equivalent, translate the sense and, if needed, keep the original in parentheses.
+
+Step 5 — OUTPUT FORMAT (strict — this feeds an automated pipeline):
+- Output ONLY the merged transcript as tagged turns. Nothing else — no header, no summary, no section headings, no explanation.
+- Each turn is the speaker's name in bold on its own line, then the turn's text: `**<Speaker Name>:**` on one line, the text on the following line(s), and exactly one blank line between turns.
+- Use the SAME name spelling consistently for each person throughout. Where a person could not be named, use a consistent placeholder like `**Speaker 3:**`.
+- For played videos, automated voices, hold music, or any other NON-participant audio, use the label `**Skip:**` instead of a name (these are excluded from the final notes). If helpful, begin such a block with a brief bracket note, e.g. `**Skip:**` then `[demo video] ...`.
+
+Step 6 — Self-check before finalizing: (a) no substantive content in Transcript A is missing; (b) chronological order preserved; (c) speaker names used consistently; (d) every question is followed by an answer attributed to a DIFFERENT speaker; (e) video/automated-voice blocks are tagged `**Skip:**`, never a participant; (f) every uncertainty is visibly marked ([inaudible]) rather than silently guessed.
+
+Return ONLY the tagged-turn transcript.
+
+TRANSCRIPT A (content source — high detail, unreliable speakers):
+<transcript_a>
+{transcript_a}
+</transcript_a>
+
+TRANSCRIPT B (attribution source — diarized, lower fidelity):
+<transcript_b>
+{transcript_b}
+</transcript_b>
+"""
+
 # --- OTG NOTES PROMPTS ---
 
 OTG_EXTRACT_PROMPT = """Analyze the following meeting notes and extract structured metadata. Return ONLY valid JSON with no other text.
