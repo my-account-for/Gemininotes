@@ -1786,10 +1786,10 @@ def process_tagged_to_notes_task(
 def _postprocess_internal_discussion_notes(notes_content: str, notes_model, progress) -> Tuple[str, int]:
     """Step 2 for Internal Discussion notes: an additive LLM pass over the
     finished step-1 document that (a) highlights genuine insights / mental
-    models / frameworks / learnings inline as bold-red (``:red[**...**]``),
-    (b) highlights unanswered/open questions as bold-orange, and (c) appends
-    consolidated "Open Questions" and "Action Items, Next Steps & To-Track"
-    sections.
+    models / frameworks / learnings inline as bold + underlined
+    (``<u>**...**</u>``), (b) highlights unanswered/open questions as bold
+    (``**...**``), and (c) appends consolidated "Open Questions" and "Action
+    Items, Next Steps & To-Track" sections. No colour markup is used.
 
     The pass only ADDS content, so the output should be at least as long as the
     input; if it comes back materially shorter (the model truncated or dropped
@@ -3164,7 +3164,9 @@ Your generated notes, transcripts, and chat history will appear here.
         else:
             edited_content = active_note['content']
             with st.container(height=600, border=True):
-                st.markdown(edited_content)
+                # unsafe_allow_html so the internal-discussion learnings render
+                # underlined (<u>…</u>); bold and other markdown still apply.
+                st.markdown(edited_content, unsafe_allow_html=True)
             note_wc = len(edited_content.split()) if edited_content else 0
             st.caption(f"{note_wc:,} words")
     with col_transcript:
