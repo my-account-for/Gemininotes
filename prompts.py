@@ -405,7 +405,7 @@ REFINEMENT_INSTRUCTIONS = {
     "Internal Discussion": "Pay special attention to participant names, project/product names, technical terms, and any referenced documents or systems.",
 }
 
-# --- SPEAKER IDENTIFICATION PROMPTS (Option 4 of Expert Meeting) ---
+# --- SPEAKER IDENTIFICATION PROMPTS (speaker-label refinement layer) ---
 
 SPEAKER_ID_PROMPT_INITIAL = """You are refining a transcript AND identifying distinct speakers.
 

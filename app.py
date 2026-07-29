@@ -327,9 +327,10 @@ FLASH_ALL_MODEL = "Gemini 3.5 Flash"
 MODEL_STAGE_FIELDS = ("notes_model", "refinement_model", "speaker_id_model", "transcription_model", "chat_model")
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Internal Discussion", "Custom"]
 MAX_TOPIC_DISCOVERY_FILES = 4  # Number of PDFs to scan for topic discovery
-SPEAKER_ID_FLOW_OPTION = "Option 4: Speaker ID Flow"
-EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary", SPEAKER_ID_FLOW_OPTION]
-SPEAKER_ID_DOWNSTREAM_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
+# Note styles are orthogonal to speaker tagging. Speaker-label refinement is
+# an optional layer (state.verify_speakers) available for Expert, Management,
+# and Internal meetings — not a note-style option.
+EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
 TONE_OPTIONS = ["As Is", "Very Positive", "Positive", "Neutral", "Negative", "Very Negative"]
@@ -348,7 +349,7 @@ NUMBER_FOCUS_INSTRUCTIONS = {
 }
 
 MEETING_TYPE_HELP = {
-    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations. Option 4 enables a speaker-tagging review step before notes are generated.",
+    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations.",
     "Earnings Call": "Financial data, management commentary, guidance, and analyst Q&A",
     "Management Meeting": "Decisions, action items, owners, and key discussion points",
     "Internal Discussion": "Investment-team learnings document: thematic topics with bolded insights and mental models, consolidated mental models, unanswered questions, and follow-ups",
@@ -378,9 +379,11 @@ class AppState:
     context_audio_file: Optional[Any] = None
     context_audio_recording: Optional[Any] = None
     context_audio_text: str = ""
-    # Internal Discussion: route through the speaker-ID verification flow
-    # (refine → auto-tag → user review) before generating speaker-grouped notes.
-    internal_verify_speakers: bool = True
+    # Optional speaker-label refinement layer: refine the transcript AND tag
+    # each speaker, let the user review/rename them, then generate notes with
+    # the confirmed labels. Available for Expert, Management, and Internal
+    # meetings. Opt-in (off by default), like the refinement layer.
+    verify_speakers: bool = False
     # Speaker-ID flow: also diarize the audio with AssemblyAI and merge it with
     # the Gemini transcript for stronger speaker attribution (needs a key).
     use_assemblyai_merge: bool = False
@@ -1035,11 +1038,10 @@ def _get_base_prompt_for_type(state):
     """Returns the base prompt instructions for the selected meeting type."""
     mt = state.selected_meeting_type
     if mt == "Expert Meeting":
-        # Speaker ID Flow uses a downstream Option 1/2/3 picker inside the
-        # speaker review panel. When the user clicks "Generate Notes" there we
-        # temporarily override selected_note_style to that downstream pick.
-        # If something invokes this with the raw Option 4 selected, fall back
-        # to the concise prompt — same default as Option 2.
+        # Note style drives which Expert prompt is used. In the speaker-label
+        # refinement layer the confirmed note style is applied the same way
+        # (process_tagged_to_notes_task aligns selected_note_style before this
+        # is called). Any unrecognized style falls back to the concise prompt.
         if state.selected_note_style == "Option 1: Detailed & Strict":
             return EXPERT_MEETING_DETAILED_PROMPT
         else:
@@ -1689,12 +1691,14 @@ def process_tagged_to_notes_task(
     start_time = time.time()
     notes_model = _get_cached_model(state.notes_model)
     is_internal = state.selected_meeting_type == "Internal Discussion"
+    is_expert = state.selected_meeting_type == "Expert Meeting"
 
-    # For Expert Meeting, temporarily override note style so
-    # _get_base_prompt_for_type returns the downstream pick (Option 1/2/3).
-    # Internal Discussion has no style — its speaker-grouped prompt is fixed.
+    # Only Expert Meeting has selectable note styles (Option 1/2/3). Align the
+    # note style to the confirmed downstream pick so _get_base_prompt_for_type
+    # returns the right Expert prompt. Management and Internal have fixed prompts
+    # that ignore note style, so no override is needed there.
     original_style = state.selected_note_style
-    if not is_internal:
+    if is_expert:
         state.selected_note_style = downstream_style
     total_tokens = prior_tokens
     final_notes_content = ""
@@ -1726,7 +1730,7 @@ def process_tagged_to_notes_task(
             progress.complete_step("postprocess")
 
         # Executive summary if downstream style is Option 3 (Expert Meeting only)
-        if not is_internal and downstream_style == "Option 3: Less Verbose + Summary":
+        if is_expert and downstream_style == "Option 3: Less Verbose + Summary":
             progress.update("summary", 0.3, "Working...")
             summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
             response = generate_with_retry(notes_model, summary_prompt)
@@ -2167,6 +2171,10 @@ def render_input_and_processing_tab(state: AppState):
         with cfg_col1:
             state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type), help=MEETING_TYPE_HELP.get(state.selected_meeting_type, ""))
         with cfg_col2:
+            # Guard against a persisted note style that no longer exists
+            # (e.g. the retired "Option 4: Speaker ID Flow").
+            if state.selected_note_style not in EXPERT_MEETING_OPTIONS:
+                state.selected_note_style = "Option 2: Less Verbose"
             state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
     else:
         state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type), help=MEETING_TYPE_HELP.get(state.selected_meeting_type, ""))
@@ -2221,14 +2229,15 @@ def render_input_and_processing_tab(state: AppState):
     elif state.selected_meeting_type == "Custom":
         state.context_input = st.text_area("Custom Instructions", value=state.context_input, height=120, placeholder="Describe how you want the notes structured...")
 
-    if state.selected_meeting_type == "Internal Discussion":
-        state.internal_verify_speakers = st.checkbox(
-            "Verify speakers before generating notes",
-            value=state.internal_verify_speakers,
-            help="Recommended for audio. First refines the transcript and tags each speaker, "
-                 "lets you rename and correct them, then generates the speaker-grouped notes "
-                 "using the names you confirm. Turn off to generate notes directly (attribution "
-                 "then relies on whatever speaker labels the transcript already contains).",
+    if state.selected_meeting_type in ("Expert Meeting", "Management Meeting", "Internal Discussion"):
+        state.verify_speakers = st.checkbox(
+            "Refine transcript with speaker labels",
+            value=state.verify_speakers,
+            help="Recommended for audio. An optional layer that first refines the transcript and "
+                 "tags each speaker, lets you rename and correct them, then generates the notes "
+                 "using the names you confirm — in your selected note style. Turn off to generate "
+                 "notes directly (attribution then relies on whatever speaker labels the transcript "
+                 "already contains).",
         )
 
     # --- General Context (all non-Custom meeting types) ---
@@ -2271,8 +2280,8 @@ def render_input_and_processing_tab(state: AppState):
                 "Diarize with AssemblyAI + merge",
                 value=state.use_assemblyai_merge and _aai_ready,
                 disabled=not _aai_ready,
-                help="For audio in the speaker-verification flow (Internal Discussion, or "
-                     "Expert Meeting Option 4): transcribe with Gemini for detail AND diarize "
+                help="For audio when the speaker-label refinement layer is on (Expert, "
+                     "Management, or Internal meetings): transcribe with Gemini for detail AND diarize "
                      "with AssemblyAI for speaker turns, then merge into one speaker-attributed "
                      "transcript (merged with the Notes model). Improves 'who said what' on "
                      "multi-speaker recordings. Falls back to Gemini tagging if AssemblyAI fails.",
@@ -2325,7 +2334,7 @@ def render_input_and_processing_tab(state: AppState):
                     "Speaker ID Model",
                     list(AVAILABLE_MODELS.keys()),
                     index=list(AVAILABLE_MODELS.keys()).index(_sid_default),
-                    help="Used only for the Speaker ID Flow (Expert Meeting Option 4). A stronger model produces better speaker separation and tag continuity across long transcripts.",
+                    help="Used only for the speaker-label refinement layer. A stronger model produces better speaker separation and tag continuity across long transcripts.",
                 )
                 state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
                 state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
@@ -2365,13 +2374,12 @@ def render_input_and_processing_tab(state: AppState):
     st.divider()
     validation_error = validate_inputs(state)
 
-    # Detect Speaker ID Flow (Option 4 of Expert Meeting)
+    # Speaker-label refinement layer (state.verify_speakers) \u2014 an optional
+    # layer available for Expert, Management, and Internal meetings. Refines and
+    # tags speakers, then routes through the review panel before notes generate.
     is_speaker_flow = (
-        state.selected_meeting_type == "Expert Meeting"
-        and state.selected_note_style == SPEAKER_ID_FLOW_OPTION
-    ) or (
-        state.selected_meeting_type == "Internal Discussion"
-        and state.internal_verify_speakers
+        state.selected_meeting_type in ("Expert Meeting", "Management Meeting", "Internal Discussion")
+        and state.verify_speakers
     )
 
     if is_speaker_flow:
@@ -2380,7 +2388,7 @@ def render_input_and_processing_tab(state: AppState):
             "You can rename speakers, reassign per-segment tags, add a new tag, and download the tagged transcript "
             "before generating the final notes.",
             icon="\U0001f399\ufe0f",
-            title="Speaker ID Flow",
+            title="Speaker Label Refinement",
         )
 
     if validation_error:
@@ -2538,7 +2546,7 @@ def _on_speaker_name_change(speaker_tag: str):
 
 
 def _render_speaker_review_panel(state: AppState):
-    """Render the speaker-tagged transcript editor used by the Speaker ID Flow.
+    """Render the speaker-tagged transcript editor used by the speaker-label refinement layer.
 
     Lets the user rename speakers, add a new (initially empty) speaker tag,
     reassign any segment's tag (including `Skip` for logistics), download the
@@ -2712,41 +2720,33 @@ def _render_speaker_review_panel(state: AppState):
     st.divider()
 
     # --- Downstream notes step ---
+    # The note style is chosen up front in the sidebar (Note Style selectbox for
+    # Expert Meeting; fixed prompts for Management and Internal). Speaker
+    # tagging is orthogonal, so there is no separate style picker here — notes
+    # generate in the already-selected style using the confirmed speaker labels.
     is_internal = state.selected_meeting_type == "Internal Discussion"
+    is_expert = state.selected_meeting_type == "Expert Meeting"
     st.markdown("**Generate Final Notes**")
     if is_internal:
-        # No style choice — the Internal Discussion speaker-grouped prompt is fixed.
         st.caption(
             "Notes are grouped by topic and attributed to the speakers you confirmed above; "
             "learnings are highlighted and action items consolidated automatically."
         )
-        if st.button("Generate Notes", type="primary", use_container_width=True, key="sn_generate_notes_btn"):
-            st.session_state.sn_processing_notes = True
-            st.session_state.sn_downstream_style_locked = state.selected_note_style
-            st.rerun()
     else:
-        ds_col1, ds_col2 = st.columns([2, 1])
-        with ds_col1:
-            downstream_style = st.selectbox(
-                "Final note style (uses the existing Expert Meeting prompts)",
-                SPEAKER_ID_DOWNSTREAM_OPTIONS,
-                index=1,  # default to Option 2: Less Verbose
-                key="sn_downstream_style",
-            )
-        with ds_col2:
-            st.write("")  # spacer for vertical alignment
-            st.write("")
-            if st.button("Generate Notes", type="primary", use_container_width=True, key="sn_generate_notes_btn"):
-                st.session_state.sn_processing_notes = True
-                st.session_state.sn_downstream_style_locked = downstream_style
-                st.rerun()
+        st.caption(
+            "Notes use the speaker labels you confirmed above, in the note style selected above."
+        )
+    if st.button("Generate Notes", type="primary", use_container_width=True, key="sn_generate_notes_btn"):
+        st.session_state.sn_processing_notes = True
+        st.session_state.sn_downstream_style_locked = state.selected_note_style
+        st.rerun()
 
     # --- Run notes generation ---
     if st.session_state.get("sn_processing_notes"):
         with st.status("Generating notes from tagged transcript...", expanded=True) as status:
             progress = ProgressTracker(build_notes_only_plan(
                 with_summary=(
-                    not is_internal
+                    is_expert
                     and st.session_state.sn_downstream_style_locked == "Option 3: Less Verbose + Summary"
                 ),
                 with_learning_postprocess=is_internal,
