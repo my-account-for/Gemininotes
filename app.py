@@ -234,7 +234,7 @@ MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
 # --- Transcription hardening (see _load_source_text) ---
 # Audio chunks after the first start this many ms early, so the sentences at
-# each 5-minute boundary appear in two chunks; strip_overlap() removes the
+# each chunk boundary appear in two chunks; strip_overlap() removes the
 # duplicated words at join time. A blind cut splits words mid-syllable, which
 # degrades ASR at every seam.
 TRANSCRIBE_OVERLAP_MS = 25 * 1000
@@ -268,6 +268,12 @@ POSTPROCESS_MIN_WORD_RATIO = 0.9
 # capture; the user can raise it via the Settings slider for speed.
 CHUNK_WORD_SIZE = 6000  # default; user-adjustable per session in Settings & Models
 CHUNK_SIZE_OPTIONS = [4000, 6000, 8000, 10000, 15000, 20000]
+# Audio is transcribed in fixed-length chunks (see _transcribe_audio_bytes).
+# Larger chunks mean fewer API calls and fewer seams, but each call carries
+# more audio — raising the risk the model stops early on long, noisy passages.
+# 5 minutes is the safe default; the user can raise it in Settings & Models.
+AUDIO_CHUNK_MINUTES = 5  # default; user-adjustable per session
+AUDIO_CHUNK_MINUTES_OPTIONS = [5, 10, 15, 20, 30]
 
 # Audio formats accepted for upload. ffmpeg (installed via packages.txt) backs
 # pydub, so anything ffmpeg can decode works — every chunk is re-exported to
@@ -318,6 +324,7 @@ AVAILABLE_MODELS = {
     "Gemini 3.0 Pro": "gemini-3-pro-preview",
     "Gemini 3 Pro Preview": "gemini-3-pro-preview",
     "Gemini 3.5 Flash": "gemini-3.5-flash",
+    "Gemini 3.6 Flash": "gemini-3.6-flash",
 }
 # Model applied to every pipeline stage when the "use Flash for everything"
 # toggle in Settings & Models is on.
@@ -365,13 +372,15 @@ class AppState:
     earnings_call_mode: str = "Generate New Notes"
     selected_sector: str = "IT Services"
     notes_model: str = "Gemini 2.5 Pro"
-    refinement_model: str =  "Gemini 2.5 Flash"
-    speaker_id_model: str = "Gemini 3 Pro Preview"
-    transcription_model: str =  "Gemini 3.0 Flash"
+    refinement_model: str = "Gemini 3.6 Flash"
+    speaker_id_model: str = "Gemini 3.6 Flash"
+    transcription_model: str = "Gemini 3.6 Flash"
     chat_model: str = "Gemini 2.5 Pro"
     use_flash_for_all: bool = False
     refinement_enabled: bool = True
     chunk_word_size: int = CHUNK_WORD_SIZE
+    # Length (minutes) of each audio transcription chunk. See AUDIO_CHUNK_MINUTES.
+    audio_chunk_minutes: int = AUDIO_CHUNK_MINUTES
     add_context_enabled: bool = True
     context_input: str = ""
     # Optional General Context voice note: captured in the UI, transcribed at
@@ -1171,12 +1180,14 @@ def _transcribe_audio_bytes(
     speakers_hint: str = "",
     progress_cb=None,
     checkpoint: bool = False,
+    chunk_minutes: int = AUDIO_CHUNK_MINUTES,
 ) -> Tuple[str, List[str], List[str]]:
     """Chunk-transcribe raw audio bytes with Gemini into a plain transcript.
 
     Shared by the main generate pipeline (via _load_source_text) and the
     general-context voice-note feature, so both transcribe audio identically:
-    5-minute overlapping chunks, per-chunk plausibility retries, seam dedup.
+    `chunk_minutes`-long overlapping chunks (default 5), per-chunk plausibility
+    retries, seam dedup.
 
     Returns (raw_transcript, suspect_ranges, warnings):
       - progress_cb(done:int, total:int, message:str) — optional UI hook,
@@ -1207,7 +1218,7 @@ def _transcribe_audio_bytes(
     except Exception as audio_err:
         raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
 
-    chunk_length_ms = 5 * 60 * 1000
+    chunk_length_ms = max(1, chunk_minutes) * 60 * 1000
     # Chunks after the first start TRANSCRIBE_OVERLAP_MS early so the sentences
     # at each boundary appear in two chunks; strip_overlap() removes the
     # duplicated words at join time.
@@ -1357,6 +1368,7 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
                 speakers_hint=known_speakers,
                 progress_cb=_transcribe_progress,
                 checkpoint=True,
+                chunk_minutes=getattr(state, "audio_chunk_minutes", AUDIO_CHUNK_MINUTES),
             )
             for _w in _warnings:
                 st.warning(_w)
@@ -2084,6 +2096,7 @@ def _transcribe_context_audio(state: AppState) -> None:
                 transcription_model,
                 speakers_hint=sanitize_input(state.speakers),
                 progress_cb=_cb,
+                chunk_minutes=getattr(state, "audio_chunk_minutes", AUDIO_CHUNK_MINUTES),
             )
         except Exception as e:
             status.update(label="Context voice note transcription failed", state="error")
@@ -2299,6 +2312,22 @@ def render_input_and_processing_tab(state: AppState):
                      "favours detail capture: the model compresses more as sections grow, "
                      "merging similar questions and dropping specifics. Raise it for faster "
                      "runs with fewer API calls; lower it if notes still feel thin.",
+            )
+            _audio_chunk_options = (
+                AUDIO_CHUNK_MINUTES_OPTIONS
+                if state.audio_chunk_minutes in AUDIO_CHUNK_MINUTES_OPTIONS
+                else sorted(set(AUDIO_CHUNK_MINUTES_OPTIONS + [state.audio_chunk_minutes]))
+            )
+            state.audio_chunk_minutes = st.select_slider(
+                "Audio chunk size (minutes)",
+                options=_audio_chunk_options,
+                value=state.audio_chunk_minutes,
+                format_func=lambda v: f"{v} min",
+                help="Audio files are transcribed in fixed-length chunks. The 5-minute default "
+                     "is safest; larger chunks mean fewer API calls and fewer seams to stitch, "
+                     "but each call carries more audio — raising the risk the model stops early "
+                     "on long or noisy passages. Applies to both the main transcript and context "
+                     "voice notes.",
             )
 
             st.divider()
