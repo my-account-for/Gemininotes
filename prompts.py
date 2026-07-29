@@ -182,16 +182,18 @@ INTERNAL_DISCUSSION_POSTPROCESS_PROMPT = """You are post-processing an already-w
 
 **ABSOLUTE PRESERVATION RULE:** Reproduce the entire document — every topic heading, every speaker label, every bullet, every number and name — in the same order and wording. Do NOT summarize, shorten, reword, reorder, merge, or delete any content. The ONLY edits you may make are the additions described below. When unsure whether to touch something, leave it exactly as it is.
 
+**DO NOT USE ANY COLOUR MARKUP.** Never emit `:red[…]`, `:orange[…]`, `:blue[…]`, or any other `:colour[…]` directive anywhere in the output. Emphasis is bold and underline only, as specified below.
+
 **ADDITION 1 — HIGHLIGHT LEARNINGS (in place):**
-Find any point that is a genuine **insight**, **mental model**, **framework**, or **key learning** — whether explicitly labelled or clearly functioning as one (a transferable principle, a "the lesson here is…", a rule of thumb, a named framework, a realisation the group arrived at). Wrap that bullet's text in a bold-RED highlight using this EXACT syntax:
-    `:red[**…the learning text…**]`
+Find any point that is a genuine **insight**, **mental model**, **framework**, **principle**, **rule of thumb**, **key learning**, **takeaway**, or **realisation** — whether explicitly labelled (e.g. "the mental model here is…", "key learning:", "the insight is…", "the lesson here is…", "the takeaway is…", "as a framework…", "the principle is…") or clearly functioning as one (a transferable principle, a named framework, a rule of thumb, a realisation the group arrived at). Make that bullet's text **BOLD and UNDERLINED** using this EXACT syntax:
+    `<u>**…the learning text…**</u>`
 Example: `- The real lesson is that speed of iteration beats up-front planning here.`
-  becomes `- :red[**The real lesson is that speed of iteration beats up-front planning here.**]`
-Highlight ONLY genuine learnings/insights/frameworks — never ordinary facts, updates, or opinions.
+  becomes `- <u>**The real lesson is that speed of iteration beats up-front planning here.**</u>`
+Highlight ONLY genuine learnings / insights / mental models / frameworks / principles — never ordinary facts, updates, or opinions.
 
 **ADDITION 2 — HIGHLIGHT UNANSWERED / OPEN QUESTIONS (in place):**
-Find any bullet that records a question raised but left unanswered or unresolved (these are often prefixed "Open question:"). Wrap that bullet's text in a bold-ORANGE highlight using this EXACT syntax:
-    `:orange[**Open question: …**]`
+Find any bullet that records a question raised but left unanswered or unresolved (these are often prefixed "Open question:"). Make that bullet's text **BOLD** (no underline, no colour) using this EXACT syntax:
+    `**Open question: …**`
 Only highlight genuinely unresolved questions — not questions that were answered in the discussion.
 
 For both highlight types: keep the bullet marker and its indentation exactly as they were (only the text after the marker gets wrapped), and highlight the specific bullet(s) only — never a whole speaker sub-list.
