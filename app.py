@@ -388,14 +388,16 @@ class AppState:
     context_audio_file: Optional[Any] = None
     context_audio_recording: Optional[Any] = None
     context_audio_text: str = ""
-    # Optional speaker-label refinement layer: refine the transcript AND tag
-    # each speaker, let the user review/rename them, then generate notes with
-    # the confirmed labels. Available for Expert, Management, and Internal
-    # meetings. Opt-in (off by default), like the refinement layer.
-    verify_speakers: bool = False
-    # Speaker-ID flow: also diarize the audio with AssemblyAI and merge it with
-    # the Gemini transcript for stronger speaker attribution (needs a key).
-    use_assemblyai_merge: bool = False
+    # Speaker-label refinement layer: refine the transcript AND tag each
+    # speaker, let the user review/rename them, then generate notes with the
+    # confirmed labels. Available for Expert, Management, and Internal meetings.
+    # On by default.
+    verify_speakers: bool = True
+    # Speaker-label refinement: also diarize the audio with AssemblyAI and merge
+    # it with the Gemini transcript for stronger speaker attribution. On by
+    # default, but only takes effect for audio input when ASSEMBLYAI_API_KEY is
+    # set (see _use_assemblyai_merge); otherwise it silently no-ops.
+    use_assemblyai_merge: bool = True
     speakers: str = ""
     earnings_call_topics: str = ""
     existing_notes_input: str = ""
@@ -2252,6 +2254,19 @@ def render_input_and_processing_tab(state: AppState):
                  "notes directly (attribution then relies on whatever speaker labels the transcript "
                  "already contains).",
         )
+        if state.verify_speakers:
+            _aai_ready = _assemblyai_configured()
+            state.use_assemblyai_merge = st.checkbox(
+                "Diarize with AssemblyAI + merge",
+                value=state.use_assemblyai_merge and _aai_ready,
+                disabled=not _aai_ready,
+                help="For audio only: transcribe with Gemini for detail AND diarize with AssemblyAI "
+                     "for speaker turns, then merge into one speaker-attributed transcript. Improves "
+                     "'who said what' on multi-speaker recordings. Falls back to Gemini tagging if "
+                     "AssemblyAI fails.",
+            )
+            if not _aai_ready:
+                st.caption("Set `ASSEMBLYAI_API_KEY` to enable AssemblyAI diarization + merge.")
 
     # --- General Context (all non-Custom meeting types) ---
     if state.selected_meeting_type != "Custom":
@@ -2288,19 +2303,6 @@ def render_input_and_processing_tab(state: AppState):
         with st.popover("Settings & Models", use_container_width=True):
             state.refinement_enabled = st.toggle("Transcript Refinement", value=state.refinement_enabled)
 
-            _aai_ready = _assemblyai_configured()
-            state.use_assemblyai_merge = st.toggle(
-                "Diarize with AssemblyAI + merge",
-                value=state.use_assemblyai_merge and _aai_ready,
-                disabled=not _aai_ready,
-                help="For audio when the speaker-label refinement layer is on (Expert, "
-                     "Management, or Internal meetings): transcribe with Gemini for detail AND diarize "
-                     "with AssemblyAI for speaker turns, then merge into one speaker-attributed "
-                     "transcript (merged with the Notes model). Improves 'who said what' on "
-                     "multi-speaker recordings. Falls back to Gemini tagging if AssemblyAI fails.",
-            )
-            if not _aai_ready:
-                st.caption("Set `ASSEMBLYAI_API_KEY` to enable AssemblyAI diarization + merge.")
             _chunk_options = CHUNK_SIZE_OPTIONS if state.chunk_word_size in CHUNK_SIZE_OPTIONS else sorted(set(CHUNK_SIZE_OPTIONS + [state.chunk_word_size]))
             state.chunk_word_size = st.select_slider(
                 "Section size (words)",
