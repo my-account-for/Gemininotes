@@ -33,7 +33,7 @@ from chunking import (
     merge_continuation_seams,
     strip_overlap,
     strip_asr_meta_markers,
-    merge_learning_doc_sections,
+    renumber_topic_sections,
     split_qa_blocks,
     flatten_grouping_plan,
     reorder_qa_blocks,
@@ -54,6 +54,8 @@ from prompts import (
     EARNINGS_CALL_PROMPT,
     MANAGEMENT_MEETING_PROMPT,
     INTERNAL_DISCUSSION_PROMPT,
+    INTERNAL_DISCUSSION_POSTPROCESS_PROMPT,
+    TRANSCRIPT_MERGE_PROMPT,
     PROMPT_INITIAL,
     PROMPT_CONTINUATION,
     VALIDATION_DETAILED_PROMPT,
@@ -232,7 +234,7 @@ MAX_PDF_MB = 25
 MAX_AUDIO_MB = 200
 # --- Transcription hardening (see _load_source_text) ---
 # Audio chunks after the first start this many ms early, so the sentences at
-# each 5-minute boundary appear in two chunks; strip_overlap() removes the
+# each chunk boundary appear in two chunks; strip_overlap() removes the
 # duplicated words at join time. A blind cut splits words mid-syllable, which
 # degrades ASR at every seam.
 TRANSCRIBE_OVERLAP_MS = 25 * 1000
@@ -266,6 +268,26 @@ POSTPROCESS_MIN_WORD_RATIO = 0.9
 # capture; the user can raise it via the Settings slider for speed.
 CHUNK_WORD_SIZE = 6000  # default; user-adjustable per session in Settings & Models
 CHUNK_SIZE_OPTIONS = [4000, 6000, 8000, 10000, 15000, 20000]
+# Audio is transcribed in fixed-length chunks (see _transcribe_audio_bytes).
+# Larger chunks mean fewer API calls and fewer seams, but each call carries
+# more audio — raising the risk the model stops early on long, noisy passages.
+# 5 minutes is the safe default; the user can raise it in Settings & Models.
+AUDIO_CHUNK_MINUTES = 5  # default; user-adjustable per session
+AUDIO_CHUNK_MINUTES_OPTIONS = [5, 10, 15, 20, 30]
+
+# Audio formats accepted for upload. ffmpeg (installed via packages.txt) backs
+# pydub, so anything ffmpeg can decode works — every chunk is re-exported to
+# WAV before transcription regardless of the source container. Beyond the core
+# formats this includes the MPEG family (.mpeg/.mpg/.mpga, MPEG-4 audio) and
+# other common recorder outputs. Single source of truth — reused by the file
+# uploaders, get_file_content, size validation, and the audio-input detection.
+AUDIO_EXTENSIONS = [
+    ".wav", ".mp3", ".m4a", ".ogg", ".flac",
+    ".mpeg", ".mpg", ".mpga", ".mp4", ".m4b", ".aac",
+    ".opus", ".webm", ".oga", ".wma", ".amr", ".3gp", ".3gpp", ".aiff", ".aif",
+]
+# Extension list (no leading dot) for st.file_uploader's `type=` argument.
+AUDIO_UPLOAD_TYPES = [ext.lstrip(".") for ext in AUDIO_EXTENSIONS]
 # Tail of the previous chunk passed to the model as read-only continuity
 # context. It is never processed into notes, so it cannot create duplicates.
 CONTEXT_TAIL_WORDS = 800
@@ -302,6 +324,7 @@ AVAILABLE_MODELS = {
     "Gemini 3.0 Pro": "gemini-3-pro-preview",
     "Gemini 3 Pro Preview": "gemini-3-pro-preview",
     "Gemini 3.5 Flash": "gemini-3.5-flash",
+    "Gemini 3.6 Flash": "gemini-3.6-flash",
 }
 # Model applied to every pipeline stage when the "use Flash for everything"
 # toggle in Settings & Models is on.
@@ -311,9 +334,10 @@ FLASH_ALL_MODEL = "Gemini 3.5 Flash"
 MODEL_STAGE_FIELDS = ("notes_model", "refinement_model", "speaker_id_model", "transcription_model", "chat_model")
 MEETING_TYPES = ["Expert Meeting", "Earnings Call", "Management Meeting", "Internal Discussion", "Custom"]
 MAX_TOPIC_DISCOVERY_FILES = 4  # Number of PDFs to scan for topic discovery
-SPEAKER_ID_FLOW_OPTION = "Option 4: Speaker ID Flow"
-EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary", SPEAKER_ID_FLOW_OPTION]
-SPEAKER_ID_DOWNSTREAM_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
+# Note styles are orthogonal to speaker tagging. Speaker-label refinement is
+# an optional layer (state.verify_speakers) available for Expert, Management,
+# and Internal meetings — not a note-style option.
+EXPERT_MEETING_OPTIONS = ["Option 1: Detailed & Strict", "Option 2: Less Verbose", "Option 3: Less Verbose + Summary"]
 EARNINGS_CALL_MODES = ["Generate New Notes", "Enrich Existing Notes"]
 
 TONE_OPTIONS = ["As Is", "Very Positive", "Positive", "Neutral", "Negative", "Very Negative"]
@@ -332,7 +356,7 @@ NUMBER_FOCUS_INSTRUCTIONS = {
 }
 
 MEETING_TYPE_HELP = {
-    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations. Option 4 enables a speaker-tagging review step before notes are generated.",
+    "Expert Meeting": "Q&A format with detailed factual extraction from expert consultations.",
     "Earnings Call": "Financial data, management commentary, guidance, and analyst Q&A",
     "Management Meeting": "Decisions, action items, owners, and key discussion points",
     "Internal Discussion": "Investment-team learnings document: thematic topics with bolded insights and mental models, consolidated mental models, unanswered questions, and follow-ups",
@@ -348,13 +372,15 @@ class AppState:
     earnings_call_mode: str = "Generate New Notes"
     selected_sector: str = "IT Services"
     notes_model: str = "Gemini 2.5 Pro"
-    refinement_model: str =  "Gemini 2.5 Flash"
-    speaker_id_model: str = "Gemini 3 Pro Preview"
-    transcription_model: str =  "Gemini 3.0 Flash"
+    refinement_model: str = "Gemini 3.6 Flash"
+    speaker_id_model: str = "Gemini 3.6 Flash"
+    transcription_model: str = "Gemini 3.6 Flash"
     chat_model: str = "Gemini 2.5 Pro"
     use_flash_for_all: bool = False
     refinement_enabled: bool = True
     chunk_word_size: int = CHUNK_WORD_SIZE
+    # Length (minutes) of each audio transcription chunk. See AUDIO_CHUNK_MINUTES.
+    audio_chunk_minutes: int = AUDIO_CHUNK_MINUTES
     add_context_enabled: bool = True
     context_input: str = ""
     # Optional General Context voice note: captured in the UI, transcribed at
@@ -362,6 +388,16 @@ class AppState:
     context_audio_file: Optional[Any] = None
     context_audio_recording: Optional[Any] = None
     context_audio_text: str = ""
+    # Speaker-label refinement layer: refine the transcript AND tag each
+    # speaker, let the user review/rename them, then generate notes with the
+    # confirmed labels. Available for Expert, Management, and Internal meetings.
+    # On by default.
+    verify_speakers: bool = True
+    # Speaker-label refinement: also diarize the audio with AssemblyAI and merge
+    # it with the Gemini transcript for stronger speaker attribution. On by
+    # default, but only takes effect for audio input when ASSEMBLYAI_API_KEY is
+    # set (see _use_assemblyai_merge); otherwise it silently no-ops.
+    use_assemblyai_merge: bool = True
     speakers: str = ""
     earnings_call_topics: str = ""
     existing_notes_input: str = ""
@@ -553,7 +589,7 @@ def get_file_content(uploaded_file, audio_recording=None) -> Tuple[Optional[str]
             elif ext in [".txt", ".md"]:
                 return file_bytes_io.read().decode("utf-8"), name, None
 
-            elif ext in [".wav", ".mp3", ".m4a", ".ogg", ".flac"]:
+            elif ext in AUDIO_EXTENSIONS:
                 return "audio_file", name, None
 
         except Exception as e:
@@ -645,13 +681,15 @@ def _merge_consecutive_segments(segments: List[Dict[str, str]]) -> List[Dict[str
     return merged
 
 
-def _infer_speaker_names(sid_model, tagged_transcript: str, participants: str) -> Tuple[Dict[str, str], int]:
-    """Map generic Speaker N labels to the user-provided participant names so
-    the rename fields come pre-filled. Best-effort: returns ({}, tokens) on
-    any failure — the user can always rename manually."""
+def _infer_speaker_names(sid_model, tagged_transcript: str, participants: str, raw_transcript: str = "") -> Tuple[Dict[str, str], int]:
+    """Map generic Speaker N labels to real names so the rename fields come
+    pre-filled. Uses both the participant list AND any speaker names already
+    present in the uploaded (original) transcript. Best-effort: returns
+    ({}, tokens) on any failure — the user can always rename manually."""
     try:
         prompt = SPEAKER_NAME_MAP_PROMPT.format(
-            participants=participants,
+            participants=participants or "(none provided)",
+            original_sample=(raw_transcript or "(not available)")[:12000],
             transcript_sample=tagged_transcript[:12000],
         )
         response = generate_with_retry(sid_model, prompt)
@@ -994,11 +1032,10 @@ def generate_notes_from_transcript(
         results[i] = text
 
     if state.selected_meeting_type == "Internal Discussion":
-        # Learnings-doc sections each end with their own Consolidated Mental
-        # Models / Unanswered Questions / Follow-Ups blocks, which
-        # merge_learning_doc_sections reorganizes later — attaching a
-        # continued topic's bullets to the previous section's tail would put
-        # them inside the wrong block, so sections are joined verbatim.
+        # Each section emits its own numbered, speaker-attributed topic blocks
+        # (numbering restarts per section). They are joined verbatim here; a
+        # later deterministic pass renumbers the topics and an LLM post-process
+        # highlights learnings and appends the consolidated action items.
         final_notes = "\n\n".join(r.strip() for r in results if r and r.strip())
     else:
         # A section that starts mid-answer re-states the question as a
@@ -1012,11 +1049,10 @@ def _get_base_prompt_for_type(state):
     """Returns the base prompt instructions for the selected meeting type."""
     mt = state.selected_meeting_type
     if mt == "Expert Meeting":
-        # Speaker ID Flow uses a downstream Option 1/2/3 picker inside the
-        # speaker review panel. When the user clicks "Generate Notes" there we
-        # temporarily override selected_note_style to that downstream pick.
-        # If something invokes this with the raw Option 4 selected, fall back
-        # to the concise prompt — same default as Option 2.
+        # Note style drives which Expert prompt is used. In the speaker-label
+        # refinement layer the confirmed note style is applied the same way
+        # (process_tagged_to_notes_task aligns selected_note_style before this
+        # is called). Any unrecognized style falls back to the concise prompt.
         if state.selected_note_style == "Option 1: Detailed & Strict":
             return EXPERT_MEETING_DETAILED_PROMPT
         else:
@@ -1069,7 +1105,7 @@ def validate_inputs(state: AppState) -> Optional[str]:
             ext = os.path.splitext(state.uploaded_file.name)[1].lower()
             if ext == ".pdf" and size_mb > MAX_PDF_MB:
                 return f"PDF is too large ({size_mb:.1f}MB). Limit: {MAX_PDF_MB}MB."
-            elif ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac'] and size_mb > MAX_AUDIO_MB:
+            elif ext in AUDIO_EXTENSIONS and size_mb > MAX_AUDIO_MB:
                 return f"Audio is too large ({size_mb:.1f}MB). Limit: {MAX_AUDIO_MB}MB."
 
     if state.selected_meeting_type == "Earnings Call" and state.earnings_call_mode == "Enrich Existing Notes" and not state.existing_notes_input:
@@ -1094,8 +1130,6 @@ def is_mobile_device() -> bool:
     # Note: This is a heuristic. Streamlit doesn't expose device info directly.
     # We'll use a session state flag that can be set via JS, defaulting to False.
     return st.session_state.get("_is_mobile", False)
-
-AUDIO_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.ogg', '.flac']
 
 def _input_is_audio(state: AppState) -> bool:
     """Whether the configured input will require audio transcription.
@@ -1148,12 +1182,14 @@ def _transcribe_audio_bytes(
     speakers_hint: str = "",
     progress_cb=None,
     checkpoint: bool = False,
+    chunk_minutes: int = AUDIO_CHUNK_MINUTES,
 ) -> Tuple[str, List[str], List[str]]:
     """Chunk-transcribe raw audio bytes with Gemini into a plain transcript.
 
     Shared by the main generate pipeline (via _load_source_text) and the
     general-context voice-note feature, so both transcribe audio identically:
-    5-minute overlapping chunks, per-chunk plausibility retries, seam dedup.
+    `chunk_minutes`-long overlapping chunks (default 5), per-chunk plausibility
+    retries, seam dedup.
 
     Returns (raw_transcript, suspect_ranges, warnings):
       - progress_cb(done:int, total:int, message:str) — optional UI hook,
@@ -1184,7 +1220,7 @@ def _transcribe_audio_bytes(
     except Exception as audio_err:
         raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
 
-    chunk_length_ms = 5 * 60 * 1000
+    chunk_length_ms = max(1, chunk_minutes) * 60 * 1000
     # Chunks after the first start TRANSCRIBE_OVERLAP_MS early so the sentences
     # at each boundary appear in two chunks; strip_overlap() removes the
     # duplicated words at join time.
@@ -1334,6 +1370,7 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
                 speakers_hint=known_speakers,
                 progress_cb=_transcribe_progress,
                 checkpoint=True,
+                chunk_minutes=getattr(state, "audio_chunk_minutes", AUDIO_CHUNK_MINUTES),
             )
             for _w in _warnings:
                 st.warning(_w)
@@ -1353,31 +1390,107 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
     return raw_transcript, file_name, pdf_bytes_data
 
 
-def run_speaker_identification_task(state: AppState, status_ui, progress: ProgressTracker) -> Dict[str, Any]:
-    """Refine transcript AND tag speakers (2 or 3, auto-detected).
+def _assemblyai_configured() -> bool:
+    """True when an AssemblyAI API key is available in the environment."""
+    return bool(os.environ.get("ASSEMBLYAI_API_KEY"))
 
-    Returns a dict with: raw_transcript, file_name, pdf_bytes, tagged_transcript,
-    segments, speakers, token_usage. The result is stored in session_state so
-    the user can edit speaker tags before generating notes.
-    """
-    start_time = time.time()
-    # Speaker ID uses its own model (defaults to a stronger one than refinement)
-    # because distinguishing voices across a long transcript benefits from the
-    # bigger context model. Fall back to refinement_model if unset.
-    sid_model_name = getattr(state, "speaker_id_model", None) or state.refinement_model
-    sid_model = _get_cached_model(sid_model_name)
 
-    raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
+def _use_assemblyai_merge(state: AppState) -> bool:
+    """Whether the AssemblyAI diarization + merge path should run for this run:
+    the toggle is on, a key is configured, and the input is audio."""
+    return bool(getattr(state, "use_assemblyai_merge", False)) and _input_is_audio(state) and _assemblyai_configured()
 
-    # Save checkpoints in case the user reloads
-    st.session_state["_checkpoint_raw_transcript"] = raw_transcript
-    st.session_state["_checkpoint_file_name"] = file_name
 
-    progress.complete_step("prepare")
+def _transcribe_with_assemblyai(audio_bytes: bytes) -> Tuple[str, str]:
+    """Diarize audio with AssemblyAI and return (utterances_text, error).
 
-    speakers = sanitize_input(state.speakers)
+    utterances_text is one line per utterance: "Speaker A [MM:SS]: text",
+    which is the attribution source (Transcript B) for the merge. Returns
+    ("", <reason>) on any failure so the caller can fall back to Gemini
+    tagging — this path is strictly best-effort."""
+    api_key = os.environ.get("ASSEMBLYAI_API_KEY")
+    if not api_key:
+        return "", "ASSEMBLYAI_API_KEY is not set."
+    try:
+        import assemblyai as aai
+    except ImportError:
+        return "", "The 'assemblyai' package is not installed."
+
+    tmp_path = None
+    try:
+        aai.settings.api_key = api_key
+        # speaker_labels gives per-utterance diarization; language detection
+        # keeps it usable for code-switched / non-English recordings.
+        config = aai.TranscriptionConfig(speaker_labels=True, language_detection=True)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".audio") as tf:
+            tf.write(audio_bytes)
+            tmp_path = tf.name
+        transcript = aai.Transcriber(config=config).transcribe(tmp_path)
+        if getattr(transcript, "status", None) == aai.TranscriptStatus.error:
+            return "", f"AssemblyAI error: {getattr(transcript, 'error', 'unknown')}"
+        utterances = getattr(transcript, "utterances", None) or []
+        if not utterances:
+            return "", "AssemblyAI returned no diarized utterances."
+        lines = [f"Speaker {u.speaker} [{_fmt_audio_ts(int(u.start))}]: {u.text}" for u in utterances]
+        return "\n".join(lines), ""
+    except Exception as e:
+        return "", str(e)
+    finally:
+        if tmp_path:
+            try: os.remove(tmp_path)
+            except Exception: pass
+
+
+def _merge_dual_transcripts(transcript_a: str, transcript_b: str, speaker_info: str, merge_model) -> Tuple[str, int]:
+    """Merge the Gemini content transcript (A) and the AssemblyAI diarized
+    transcript (B) into one speaker-attributed transcript of tagged turns.
+    Returns (merged_text, tokens); ("", tokens) if the model returns nothing."""
+    prompt = TRANSCRIPT_MERGE_PROMPT.format(
+        speaker_info=speaker_info or "Unknown — infer from the conversation.",
+        output_language="Clear English (translate any non-English or code-switched speech; keep proper nouns, product names, and technical terms as-is).",
+        transcript_a=transcript_a,
+        transcript_b=transcript_b,
+    )
+    # Reconstruction, not generation — keep it deterministic.
+    response = generate_with_retry(
+        merge_model, prompt,
+        generation_config={**GENERATION_CONFIG, "temperature": 0.1},
+    )
+    return _extract_response_text(response), safe_get_token_count(response)
+
+
+def _parse_named_tagged_transcript(text: str) -> List[Dict[str, str]]:
+    """Parse a merge transcript whose turns are tagged with arbitrary
+    ``**Name:**`` (or ``**Skip:**``) labels into
+    {"speaker": <name>|"Skip", "text": ...} segments. Generalises
+    _parse_tagged_transcript, which only accepts generic "Speaker N" labels."""
+    if not text:
+        return []
+    # A turn marker is a short bold label ending in a colon, e.g. "**Amit:**".
+    pattern = re.compile(r"\*\*\s*([^\n*:]{1,60}?)\s*:\s*\*\*\s*")
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return []
+    segments: List[Dict[str, str]] = []
+    preamble = text[: matches[0].start()].strip()
+    if preamble and len(preamble.split()) > 25:
+        segments.append({"speaker": SKIP_TAG, "text": preamble})
+    for i, m in enumerate(matches):
+        label = m.group(1).strip()
+        speaker = SKIP_TAG if label.lower() == "skip" else label
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        seg_text = text[start:end].strip()
+        if seg_text:
+            segments.append({"speaker": speaker, "text": seg_text})
+    return segments
+
+
+def _gemini_tag_speakers(state: AppState, sid_model, raw_transcript: str, speakers: str, progress) -> Tuple[List[Dict[str, str]], int]:
+    """Default speaker-ID path: refine the transcript AND tag speakers with
+    Gemini (chunked for long transcripts). Returns (segments, tokens)."""
     speaker_info = f"Known participants (use as hint only, but still tag as Speaker 1/2/3): {speakers}." if speakers else ""
-    refinement_extra = REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "") + "\n" + ASR_CORRECTION_INSTRUCTION
+    refinement_extra = REFINEMENT_INSTRUCTIONS.get(state.selected_meeting_type, REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "")) + "\n" + ASR_CORRECTION_INSTRUCTION
 
     progress.update("refine", 0, "Refining and tagging speakers...")
     words = raw_transcript.split()
@@ -1449,7 +1562,68 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
             prev_tagged_tail = _serialize_tagged_segments(chunk_segments[-4:]) if chunk_segments else ""
 
     tagged_transcript = "\n\n".join(c.strip() for c in tagged_chunks if c and c.strip())
-    segments = _parse_tagged_transcript(tagged_transcript)
+    return _parse_tagged_transcript(tagged_transcript), total_tokens
+
+
+def run_speaker_identification_task(state: AppState, status_ui, progress: ProgressTracker) -> Dict[str, Any]:
+    """Refine transcript AND tag speakers (2 or 3, auto-detected).
+
+    Returns a dict with: raw_transcript, file_name, pdf_bytes, tagged_transcript,
+    segments, speakers, token_usage. The result is stored in session_state so
+    the user can edit speaker tags before generating notes.
+    """
+    start_time = time.time()
+    # Speaker ID uses its own model (defaults to a stronger one than refinement)
+    # because distinguishing voices across a long transcript benefits from the
+    # bigger context model. Fall back to refinement_model if unset.
+    sid_model_name = getattr(state, "speaker_id_model", None) or state.refinement_model
+    sid_model = _get_cached_model(sid_model_name)
+
+    raw_transcript, file_name, pdf_bytes_data = _load_source_text(state, status_ui, progress)
+
+    # Save checkpoints in case the user reloads
+    st.session_state["_checkpoint_raw_transcript"] = raw_transcript
+    st.session_state["_checkpoint_file_name"] = file_name
+
+    progress.complete_step("prepare")
+
+    speakers = sanitize_input(state.speakers)
+    total_tokens = 0
+    segments: List[Dict[str, str]] = []
+    merged_via_assemblyai = False
+
+    if _use_assemblyai_merge(state):
+        # Dual-engine path: Gemini transcript (content) + AssemblyAI
+        # diarization (attribution), merged into one speaker-attributed
+        # transcript. Best-effort — any failure falls back to Gemini tagging.
+        try:
+            audio_bytes = (
+                state.audio_recording.getvalue() if state.audio_recording
+                else (state.uploaded_file.getvalue() if state.uploaded_file else None)
+            )
+            progress.update("diarize", 0, "Diarizing audio with AssemblyAI...")
+            transcript_b, aai_err = _transcribe_with_assemblyai(audio_bytes) if audio_bytes else ("", "No audio available.")
+            if transcript_b:
+                progress.complete_step("diarize")
+                progress.update("merge", 0.2, "Merging Gemini + AssemblyAI transcripts...")
+                merged, merge_tokens = _merge_dual_transcripts(
+                    raw_transcript, transcript_b, speakers, _get_cached_model(state.notes_model)
+                )
+                total_tokens += merge_tokens
+                segments = _parse_named_tagged_transcript(merged)
+                if segments:
+                    merged_via_assemblyai = True
+                else:
+                    st.warning("The transcript merge produced no usable segments; falling back to Gemini speaker tagging.")
+            else:
+                st.warning(f"AssemblyAI diarization unavailable; falling back to Gemini speaker tagging. {aai_err}")
+        except Exception as e:
+            st.warning(f"AssemblyAI merge failed; falling back to Gemini speaker tagging. Details: {e}")
+
+    if not merged_via_assemblyai:
+        segments, tag_tokens = _gemini_tag_speakers(state, sid_model, raw_transcript, speakers, progress)
+        total_tokens += tag_tokens
+
     if not segments:
         raise ValueError("Speaker identification did not return any tagged segments. Try re-running, or switch to Option 1/2/3.")
 
@@ -1462,15 +1636,21 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
     canonical_tagged = _serialize_tagged_segments(segments)
     speakers_list = _detect_speakers_in_segments(segments)
 
-    # Pre-fill speaker display names from the user-provided participants list
-    # (best-effort) so renaming is usually already done.
-    inferred_names: Dict[str, str] = {}
-    if speakers:
-        progress.update("refine", 1.0, "Matching speakers to participants...")
-        inferred_names, name_tokens = _infer_speaker_names(sid_model, canonical_tagged, speakers)
+    if merged_via_assemblyai:
+        # The merge already assigned real names as the tags — use them as the
+        # display names directly; no separate name inference needed.
+        inferred_names = {s: s for s in speakers_list if s != SKIP_TAG}
+        progress.complete_step("merge")
+    else:
+        # Pre-fill speaker display names (best-effort) so renaming is usually
+        # already done — from the participants list AND from any real speaker
+        # names already present in the uploaded transcript.
+        progress.update("refine", 1.0, "Matching speakers to names...")
+        inferred_names, name_tokens = _infer_speaker_names(
+            sid_model, canonical_tagged, speakers, raw_transcript=raw_transcript
+        )
         total_tokens += name_tokens
-
-    progress.complete_step("refine")
+        progress.complete_step("refine")
 
     # Durable checkpoint: persist the tagged transcript as a draft note so the
     # refinement/tagging work survives a reload while the user reviews tags.
@@ -1480,7 +1660,7 @@ def run_speaker_identification_task(state: AppState, status_ui, progress: Progre
     try:
         database.save_note({
             'id': draft_note_id, 'created_at': datetime.now().isoformat(),
-            'meeting_type': "Expert Meeting", 'file_name': file_name,
+            'meeting_type': state.selected_meeting_type, 'file_name': file_name,
             'content': "", 'raw_transcript': raw_transcript,
             'refined_transcript': canonical_tagged, 'token_usage': total_tokens,
             'processing_time': 0, 'pdf_blob': pdf_bytes_data,
@@ -1524,11 +1704,16 @@ def process_tagged_to_notes_task(
     """
     start_time = time.time()
     notes_model = _get_cached_model(state.notes_model)
+    is_internal = state.selected_meeting_type == "Internal Discussion"
+    is_expert = state.selected_meeting_type == "Expert Meeting"
 
-    # Temporarily override note style so _get_base_prompt_for_type returns the
-    # downstream pick (Option 1/2/3). Restore on exit.
+    # Only Expert Meeting has selectable note styles (Option 1/2/3). Align the
+    # note style to the confirmed downstream pick so _get_base_prompt_for_type
+    # returns the right Expert prompt. Management and Internal have fixed prompts
+    # that ignore note style, so no override is needed there.
     original_style = state.selected_note_style
-    state.selected_note_style = downstream_style
+    if is_expert:
+        state.selected_note_style = downstream_style
     total_tokens = prior_tokens
     final_notes_content = ""
     try:
@@ -1546,9 +1731,20 @@ def process_tagged_to_notes_task(
         if was_chunked:
             # Deterministic cleanup — no LLM call, zero content-loss risk.
             final_notes_content = cleanup_stitched_notes(final_notes_content)
+            if is_internal:
+                final_notes_content = renumber_topic_sections(final_notes_content)
 
-        # Executive summary if downstream style is Option 3
-        if downstream_style == "Option 3: Less Verbose + Summary":
+        # Internal Discussion post-processing: highlight learnings inline and
+        # append the consolidated action-items backlog (same as the direct flow).
+        if is_internal:
+            final_notes_content, pp_tokens = _postprocess_internal_discussion_notes(
+                final_notes_content, notes_model, progress
+            )
+            total_tokens += pp_tokens
+            progress.complete_step("postprocess")
+
+        # Executive summary if downstream style is Option 3 (Expert Meeting only)
+        if is_expert and downstream_style == "Option 3: Less Verbose + Summary":
             progress.update("summary", 0.3, "Working...")
             summary_prompt = EXECUTIVE_SUMMARY_PROMPT.format(notes=final_notes_content)
             response = generate_with_retry(notes_model, summary_prompt)
@@ -1559,7 +1755,7 @@ def process_tagged_to_notes_task(
         progress.update("save", 0.5, "Writing to database...")
         note_data = {
             'id': draft_note_id or str(uuid.uuid4()), 'created_at': datetime.now().isoformat(),
-            'meeting_type': "Expert Meeting",
+            'meeting_type': state.selected_meeting_type,
             'file_name': file_name, 'content': final_notes_content,
             'raw_transcript': raw_transcript,
             'refined_transcript': tagged_transcript,
@@ -1585,6 +1781,49 @@ def process_tagged_to_notes_task(
         return note_data
     finally:
         state.selected_note_style = original_style
+
+
+def _postprocess_internal_discussion_notes(notes_content: str, notes_model, progress) -> Tuple[str, int]:
+    """Step 2 for Internal Discussion notes: an additive LLM pass over the
+    finished step-1 document that (a) highlights genuine insights / mental
+    models / frameworks / learnings inline as bold + underlined
+    (``<u>**...**</u>``), (b) highlights unanswered/open questions as bold
+    (``**...**``), and (c) appends consolidated "Open Questions" and "Action
+    Items, Next Steps & To-Track" sections. No colour markup is used.
+
+    The pass only ADDS content, so the output should be at least as long as the
+    input; if it comes back materially shorter (the model truncated or dropped
+    content), the original complete step-1 notes are kept instead. Returns
+    (notes, tokens)."""
+    if not notes_content or not notes_content.strip():
+        return notes_content, 0
+
+    progress.update("postprocess", 0.3, "Highlighting learnings & consolidating action items...")
+    prompt = f"{INTERNAL_DISCUSSION_POSTPROCESS_PROMPT}\n\n---\n\nNOTES DOCUMENT:\n{notes_content}"
+    source_words = len(notes_content.split())
+    # Additive pass: never accept an output that lost more than ~10% of the
+    # document, which would mean content was dropped rather than annotated.
+    floor_words = int(source_words * 0.9)
+    tokens = 0
+    best = ""
+    for _ in range(2):
+        response = generate_with_retry(notes_model, prompt, generation_config=GENERATION_CONFIG)
+        tokens += safe_get_token_count(response)
+        text = _extract_response_text(response)
+        if len(text.split()) > len(best.split()):
+            best = text
+        if best.strip() and len(best.split()) >= floor_words and _finish_reason_name(response) in _OK_FINISH_REASONS:
+            progress.update("postprocess", 1.0, "Done")
+            return best.strip(), tokens
+
+    # Guard tripped — keep the complete step-1 notes rather than a lossy rewrite.
+    progress.update("postprocess", 1.0, "Kept original notes (post-process guard)")
+    st.warning(
+        "⚠️ The learnings-highlight / action-item pass returned less content than the "
+        "notes it was given (often on very long discussions), so the un-highlighted notes "
+        "were kept to avoid losing anything."
+    )
+    return notes_content, tokens
 
 
 def process_and_save_task(state: AppState, status_ui, progress: ProgressTracker):
@@ -1758,10 +1997,19 @@ NEW TRANSCRIPT CHUNK TO REFINE:
     if was_chunked:
         final_notes_content = cleanup_stitched_notes(final_notes_content)
         if state.selected_meeting_type == "Internal Discussion":
-            # Each processed section emits its own Consolidated Mental Models /
-            # Unanswered Questions / Follow-Ups blocks and restarts topic
-            # numbering. Merge them deterministically into one document.
-            final_notes_content = merge_learning_doc_sections(final_notes_content)
+            # Parallel sections each restart topic numbering at 1; renumber the
+            # topic headings sequentially across the whole document.
+            final_notes_content = renumber_topic_sections(final_notes_content)
+
+    # --- Step 4b: Internal Discussion post-processing ---
+    # Highlight insights / mental models / frameworks / learnings inline and
+    # append a consolidated action-items backlog at the end.
+    if state.selected_meeting_type == "Internal Discussion":
+        final_notes_content, pp_tokens = _postprocess_internal_discussion_notes(
+            final_notes_content, notes_model, progress
+        )
+        total_tokens += pp_tokens
+        progress.complete_step("postprocess")
 
     # --- Step 5: Executive Summary (Expert Meeting Option 3 only) ---
     if state.selected_note_style == "Option 3: Less Verbose + Summary" and state.selected_meeting_type == "Expert Meeting":
@@ -1850,6 +2098,7 @@ def _transcribe_context_audio(state: AppState) -> None:
                 transcription_model,
                 speakers_hint=sanitize_input(state.speakers),
                 progress_cb=_cb,
+                chunk_minutes=getattr(state, "audio_chunk_minutes", AUDIO_CHUNK_MINUTES),
             )
         except Exception as e:
             status.update(label="Context voice note transcription failed", state="error")
@@ -1895,8 +2144,11 @@ def render_input_and_processing_tab(state: AppState):
     else:
         col_upload, col_record = st.columns(2)
         with col_upload:
-            # "audio" is a MIME shortcut (audio/*) covering mp3/m4a/wav/ogg/flac.
-            state.uploaded_file = st.file_uploader("Upload a File", type=['pdf', 'txt', 'md', 'audio'], help="PDF, TXT, MD, or any audio file")
+            state.uploaded_file = st.file_uploader(
+                "Upload a File",
+                type=['pdf', 'txt', 'md'] + AUDIO_UPLOAD_TYPES,
+                help="PDF, TXT, MD, or an audio file (mp3, m4a, wav, ogg, flac, mpeg/mpg, mp4, aac, opus, and more)",
+            )
         with col_record:
             state.audio_recording = st.audio_input("Record Microphone")
 
@@ -1906,7 +2158,7 @@ def render_input_and_processing_tab(state: AppState):
         preview_text = state.text_input
     elif state.input_method == "Upload / Record" and state.uploaded_file:
         ext = os.path.splitext(state.uploaded_file.name)[1].lower()
-        if ext not in ['.wav', '.mp3', '.m4a', '.ogg', '.flac']:
+        if ext not in AUDIO_EXTENSIONS:
             content, _, _ = get_file_content(state.uploaded_file, None)
             if content and not str(content).startswith("Error:") and content != "audio_file":
                 preview_text = content
@@ -1920,7 +2172,7 @@ def render_input_and_processing_tab(state: AppState):
         st.caption(info)
     elif state.input_method == "Upload / Record" and state.uploaded_file:
         ext = os.path.splitext(state.uploaded_file.name)[1].lower()
-        if ext in ['.wav', '.mp3', '.m4a', '.ogg', '.flac']:
+        if ext in AUDIO_EXTENSIONS:
             st.caption("Audio file — word count available after transcription")
 
     st.divider()
@@ -1934,6 +2186,10 @@ def render_input_and_processing_tab(state: AppState):
         with cfg_col1:
             state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type), help=MEETING_TYPE_HELP.get(state.selected_meeting_type, ""))
         with cfg_col2:
+            # Guard against a persisted note style that no longer exists
+            # (e.g. the retired "Option 4: Speaker ID Flow").
+            if state.selected_note_style not in EXPERT_MEETING_OPTIONS:
+                state.selected_note_style = "Option 2: Less Verbose"
             state.selected_note_style = st.selectbox("Note Style", EXPERT_MEETING_OPTIONS, index=EXPERT_MEETING_OPTIONS.index(state.selected_note_style))
     else:
         state.selected_meeting_type = st.selectbox("Meeting Type", MEETING_TYPES, index=MEETING_TYPES.index(state.selected_meeting_type), help=MEETING_TYPE_HELP.get(state.selected_meeting_type, ""))
@@ -1988,6 +2244,30 @@ def render_input_and_processing_tab(state: AppState):
     elif state.selected_meeting_type == "Custom":
         state.context_input = st.text_area("Custom Instructions", value=state.context_input, height=120, placeholder="Describe how you want the notes structured...")
 
+    if state.selected_meeting_type in ("Expert Meeting", "Management Meeting", "Internal Discussion"):
+        state.verify_speakers = st.checkbox(
+            "Refine transcript with speaker labels",
+            value=state.verify_speakers,
+            help="Recommended for audio. An optional layer that first refines the transcript and "
+                 "tags each speaker, lets you rename and correct them, then generates the notes "
+                 "using the names you confirm — in your selected note style. Turn off to generate "
+                 "notes directly (attribution then relies on whatever speaker labels the transcript "
+                 "already contains).",
+        )
+        if state.verify_speakers:
+            _aai_ready = _assemblyai_configured()
+            state.use_assemblyai_merge = st.checkbox(
+                "Diarize with AssemblyAI + merge",
+                value=state.use_assemblyai_merge and _aai_ready,
+                disabled=not _aai_ready,
+                help="For audio only: transcribe with Gemini for detail AND diarize with AssemblyAI "
+                     "for speaker turns, then merge into one speaker-attributed transcript. Improves "
+                     "'who said what' on multi-speaker recordings. Falls back to Gemini tagging if "
+                     "AssemblyAI fails.",
+            )
+            if not _aai_ready:
+                st.caption("Set `ASSEMBLYAI_API_KEY` to enable AssemblyAI diarization + merge.")
+
     # --- General Context (all non-Custom meeting types) ---
     if state.selected_meeting_type != "Custom":
         state.add_context_enabled = st.toggle("Add General Context", value=state.add_context_enabled)
@@ -2003,9 +2283,9 @@ def render_input_and_processing_tab(state: AppState):
                 with vc_upload_col:
                     state.context_audio_file = st.file_uploader(
                         "Upload voice note",
-                        type=['wav', 'mp3', 'm4a', 'ogg', 'flac'],
+                        type=AUDIO_UPLOAD_TYPES,
                         key="context_voice_upload",
-                        help="Any audio file (mp3, m4a, wav, ogg, flac).",
+                        help="Any audio file (mp3, m4a, wav, ogg, flac, mpeg/mpg, mp4, aac, opus, and more).",
                     )
                 with vc_record_col:
                     state.context_audio_recording = st.audio_input("Record voice note", key="context_voice_record")
@@ -2022,6 +2302,7 @@ def render_input_and_processing_tab(state: AppState):
     with col_settings:
         with st.popover("Settings & Models", use_container_width=True):
             state.refinement_enabled = st.toggle("Transcript Refinement", value=state.refinement_enabled)
+
             _chunk_options = CHUNK_SIZE_OPTIONS if state.chunk_word_size in CHUNK_SIZE_OPTIONS else sorted(set(CHUNK_SIZE_OPTIONS + [state.chunk_word_size]))
             state.chunk_word_size = st.select_slider(
                 "Section size (words)",
@@ -2033,6 +2314,22 @@ def render_input_and_processing_tab(state: AppState):
                      "favours detail capture: the model compresses more as sections grow, "
                      "merging similar questions and dropping specifics. Raise it for faster "
                      "runs with fewer API calls; lower it if notes still feel thin.",
+            )
+            _audio_chunk_options = (
+                AUDIO_CHUNK_MINUTES_OPTIONS
+                if state.audio_chunk_minutes in AUDIO_CHUNK_MINUTES_OPTIONS
+                else sorted(set(AUDIO_CHUNK_MINUTES_OPTIONS + [state.audio_chunk_minutes]))
+            )
+            state.audio_chunk_minutes = st.select_slider(
+                "Audio chunk size (minutes)",
+                options=_audio_chunk_options,
+                value=state.audio_chunk_minutes,
+                format_func=lambda v: f"{v} min",
+                help="Audio files are transcribed in fixed-length chunks. The 5-minute default "
+                     "is safest; larger chunks mean fewer API calls and fewer seams to stitch, "
+                     "but each call carries more audio — raising the risk the model stops early "
+                     "on long or noisy passages. Applies to both the main transcript and context "
+                     "voice notes.",
             )
 
             st.divider()
@@ -2068,7 +2365,7 @@ def render_input_and_processing_tab(state: AppState):
                     "Speaker ID Model",
                     list(AVAILABLE_MODELS.keys()),
                     index=list(AVAILABLE_MODELS.keys()).index(_sid_default),
-                    help="Used only for the Speaker ID Flow (Expert Meeting Option 4). A stronger model produces better speaker separation and tag continuity across long transcripts.",
+                    help="Used only for the speaker-label refinement layer. A stronger model produces better speaker separation and tag continuity across long transcripts.",
                 )
                 state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
                 state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
@@ -2108,10 +2405,12 @@ def render_input_and_processing_tab(state: AppState):
     st.divider()
     validation_error = validate_inputs(state)
 
-    # Detect Speaker ID Flow (Option 4 of Expert Meeting)
+    # Speaker-label refinement layer (state.verify_speakers) \u2014 an optional
+    # layer available for Expert, Management, and Internal meetings. Refines and
+    # tags speakers, then routes through the review panel before notes generate.
     is_speaker_flow = (
-        state.selected_meeting_type == "Expert Meeting"
-        and state.selected_note_style == SPEAKER_ID_FLOW_OPTION
+        state.selected_meeting_type in ("Expert Meeting", "Management Meeting", "Internal Discussion")
+        and state.verify_speakers
     )
 
     if is_speaker_flow:
@@ -2120,7 +2419,7 @@ def render_input_and_processing_tab(state: AppState):
             "You can rename speakers, reassign per-segment tags, add a new tag, and download the tagged transcript "
             "before generating the final notes.",
             icon="\U0001f399\ufe0f",
-            title="Speaker ID Flow",
+            title="Speaker Label Refinement",
         )
 
     if validation_error:
@@ -2147,7 +2446,7 @@ def render_input_and_processing_tab(state: AppState):
         if is_speaker_flow:
             preview = SPEAKER_ID_PROMPT_INITIAL.format(
                 speaker_info=f"Known participants: {sanitize_input(state.speakers)}." if state.speakers else "",
-                refinement_extra=REFINEMENT_INSTRUCTIONS.get("Expert Meeting", ""),
+                refinement_extra=REFINEMENT_INSTRUCTIONS.get(state.selected_meeting_type, REFINEMENT_INSTRUCTIONS.get("Expert Meeting", "")),
                 transcript="[...transcript content...]",
             )
         else:
@@ -2167,6 +2466,7 @@ def render_input_and_processing_tab(state: AppState):
                     state.selected_note_style == "Option 3: Less Verbose + Summary"
                     and state.selected_meeting_type == "Expert Meeting"
                 ),
+                with_learning_postprocess=state.selected_meeting_type == "Internal Discussion",
             ))
             try:
                 final_note = process_and_save_task(state, status, progress)
@@ -2198,7 +2498,10 @@ def render_input_and_processing_tab(state: AppState):
         # in the tree); the text persists on state for the later notes step.
         _transcribe_context_audio(state)
         with st.status("Identifying speakers...", expanded=True) as status:
-            progress = ProgressTracker(build_speaker_id_plan(is_audio=_input_is_audio(state)))
+            progress = ProgressTracker(build_speaker_id_plan(
+                is_audio=_input_is_audio(state),
+                with_merge=_use_assemblyai_merge(state),
+            ))
             try:
                 result = run_speaker_identification_task(state, status, progress)
                 st.session_state.sn_segments = result["segments"]
@@ -2274,7 +2577,7 @@ def _on_speaker_name_change(speaker_tag: str):
 
 
 def _render_speaker_review_panel(state: AppState):
-    """Render the speaker-tagged transcript editor used by the Speaker ID Flow.
+    """Render the speaker-tagged transcript editor used by the speaker-label refinement layer.
 
     Lets the user rename speakers, add a new (initially empty) speaker tag,
     reassign any segment's tag (including `Skip` for logistics), download the
@@ -2401,14 +2704,18 @@ def _render_speaker_review_panel(state: AppState):
                 if picked_tag != seg["speaker"]:
                     seg["speaker"] = picked_tag
             with text_col:
+                # Prefix each segment with the live display name so renaming a
+                # speaker above immediately replaces "Speaker N" in the
+                # transcript here (the name is read fresh from speaker_names).
+                display = _display_for_tag(seg["speaker"])
                 preview = seg["text"] if len(seg["text"]) <= 600 else seg["text"][:600] + "…"
                 if is_skip:
-                    st.markdown(f":gray[*(excluded from notes)*  \n{preview}]")
+                    st.markdown(f":gray[**{display}:** *(excluded from notes)*  \n{preview}]")
                 else:
-                    st.markdown(preview)
+                    st.markdown(f"**{display}:** {preview}")
                 if len(seg["text"]) > 600:
                     with st.expander("Full text", expanded=False):
-                        st.markdown(seg["text"])
+                        st.markdown(f"**{display}:** {seg['text']}")
 
     st.divider()
 
@@ -2444,30 +2751,36 @@ def _render_speaker_review_panel(state: AppState):
     st.divider()
 
     # --- Downstream notes step ---
+    # The note style is chosen up front in the sidebar (Note Style selectbox for
+    # Expert Meeting; fixed prompts for Management and Internal). Speaker
+    # tagging is orthogonal, so there is no separate style picker here — notes
+    # generate in the already-selected style using the confirmed speaker labels.
+    is_internal = state.selected_meeting_type == "Internal Discussion"
+    is_expert = state.selected_meeting_type == "Expert Meeting"
     st.markdown("**Generate Final Notes**")
-    ds_col1, ds_col2 = st.columns([2, 1])
-    with ds_col1:
-        downstream_style = st.selectbox(
-            "Final note style (uses the existing Expert Meeting prompts)",
-            SPEAKER_ID_DOWNSTREAM_OPTIONS,
-            index=1,  # default to Option 2: Less Verbose
-            key="sn_downstream_style",
+    if is_internal:
+        st.caption(
+            "Notes are grouped by topic and attributed to the speakers you confirmed above; "
+            "learnings are highlighted and action items consolidated automatically."
         )
-    with ds_col2:
-        st.write("")  # spacer for vertical alignment
-        st.write("")
-        if st.button("Generate Notes", type="primary", use_container_width=True, key="sn_generate_notes_btn"):
-            st.session_state.sn_processing_notes = True
-            st.session_state.sn_downstream_style_locked = downstream_style
-            st.rerun()
+    else:
+        st.caption(
+            "Notes use the speaker labels you confirmed above, in the note style selected above."
+        )
+    if st.button("Generate Notes", type="primary", use_container_width=True, key="sn_generate_notes_btn"):
+        st.session_state.sn_processing_notes = True
+        st.session_state.sn_downstream_style_locked = state.selected_note_style
+        st.rerun()
 
     # --- Run notes generation ---
     if st.session_state.get("sn_processing_notes"):
         with st.status("Generating notes from tagged transcript...", expanded=True) as status:
             progress = ProgressTracker(build_notes_only_plan(
                 with_summary=(
-                    st.session_state.sn_downstream_style_locked == "Option 3: Less Verbose + Summary"
+                    is_expert
+                    and st.session_state.sn_downstream_style_locked == "Option 3: Less Verbose + Summary"
                 ),
+                with_learning_postprocess=is_internal,
             ))
             try:
                 final_note = process_tagged_to_notes_task(
@@ -2851,7 +3164,9 @@ Your generated notes, transcripts, and chat history will appear here.
         else:
             edited_content = active_note['content']
             with st.container(height=600, border=True):
-                st.markdown(edited_content)
+                # unsafe_allow_html so the internal-discussion learnings render
+                # underlined (<u>…</u>); bold and other markdown still apply.
+                st.markdown(edited_content, unsafe_allow_html=True)
             note_wc = len(edited_content.split()) if edited_content else 0
             st.caption(f"{note_wc:,} words")
     with col_transcript:

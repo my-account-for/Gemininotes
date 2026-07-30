@@ -164,6 +164,7 @@ def build_processing_plan(
     is_audio: bool,
     refinement_enabled: bool,
     with_summary: bool,
+    with_learning_postprocess: bool = False,
 ) -> List[Tuple[str, str, float]]:
     """Plan for the standard generate-notes pipeline."""
     plan: List[Tuple[str, str, float]] = [("prepare", "Preparing source content", 0.5)]
@@ -174,24 +175,38 @@ def build_processing_plan(
     plan.append(("generate", "Generating notes", 8.0))
     if with_summary:
         plan.append(("summary", "Generating executive summary", 1.0))
+    if with_learning_postprocess:
+        plan.append(("postprocess", "Highlighting learnings/questions & consolidating actions", 2.0))
     plan.append(("save", "Finalizing & saving", 0.3))
     return plan
 
 
-def build_speaker_id_plan(*, is_audio: bool) -> List[Tuple[str, str, float]]:
-    """Plan for the speaker-identification step (Expert Meeting Option 4)."""
+def build_speaker_id_plan(*, is_audio: bool, with_merge: bool = False) -> List[Tuple[str, str, float]]:
+    """Plan for the speaker-identification step (the speaker-label refinement
+    layer for Expert, Management, and Internal meetings). With `with_merge`, the
+    Gemini tagging step is replaced by AssemblyAI diarization + an LLM merge."""
     plan: List[Tuple[str, str, float]] = [("prepare", "Preparing source content", 0.5)]
     if is_audio:
-        plan.append(("transcribe", "Transcribing audio", 6.0))
-    plan.append(("refine", "Refining & tagging speakers", 6.0))
+        plan.append(("transcribe", "Transcribing audio (Gemini)", 6.0))
+    if with_merge:
+        plan.append(("diarize", "Diarizing (AssemblyAI)", 5.0))
+        plan.append(("merge", "Merging transcripts", 5.0))
+    else:
+        plan.append(("refine", "Refining & tagging speakers", 6.0))
     return plan
 
 
-def build_notes_only_plan(*, with_summary: bool) -> List[Tuple[str, str, float]]:
+def build_notes_only_plan(
+    *,
+    with_summary: bool,
+    with_learning_postprocess: bool = False,
+) -> List[Tuple[str, str, float]]:
     """Plan for generating notes from an already-tagged transcript."""
     plan: List[Tuple[str, str, float]] = [("generate", "Generating notes", 8.0)]
     if with_summary:
         plan.append(("summary", "Generating executive summary", 1.0))
+    if with_learning_postprocess:
+        plan.append(("postprocess", "Highlighting learnings/questions & consolidating actions", 2.0))
     plan.append(("save", "Finalizing & saving", 0.3))
     return plan
 

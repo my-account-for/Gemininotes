@@ -132,48 +132,83 @@ For each topic:
 **PRIORITY #2: CAPTURE ALL DATA.** Names, numbers, dates, metrics, and specific references.
 **PRIORITY #3: PRESERVE CONTEXT.** Include the reasoning behind decisions and any dissenting views."""
 
-INTERNAL_DISCUSSION_PROMPT = """### **ROLE & GOAL: INTERNAL DISCUSSION → LEARNINGS DOCUMENT**
+INTERNAL_DISCUSSION_PROMPT = """### **ROLE & GOAL: INTERNAL DISCUSSION → STRUCTURED NOTES**
 
-You are a research associate at a long-term, fundamentals-focused equity investment firm. Your job is to convert a raw internal discussion transcript between analysts into a clean, comprehensive learnings document that the team will refer back to for years.
+You are a meticulous note-taker. Convert a raw internal discussion transcript — a conversation between two or more people on ANY subject — into a clean, comprehensive, well-organised notes document the team can refer back to later. This is a general-purpose internal discussion; it may or may not be about investments, so do NOT assume a finance context or impose finance framing.
 
-**CONTEXT ABOUT THE READER:**
-The reader is a long-term business owner-investor. They care about business models, competitive advantages, pricing power, management behavior, disruption risk, and mental models that transfer across companies and markets. They do NOT want commentary on valuation, stock prices, or market movements. They value intellectual humility: where the analysts disagreed, were uncertain, or flagged something as a hypothesis rather than a fact, the document must preserve that uncertainty rather than smooth it over.
+**WHAT THIS DOCUMENT IS FOR:** Capture the substance of what was discussed — the topics, what each person contributed, decisions taken, information and observations shared, learnings, open questions, and action items — organised by topic and attributed to the person who ACTUALLY said it. A reader should understand the discussion without listening to it.
 
-**DOCUMENT STRUCTURE — produce a single document with exactly this structure, in this order:**
+**HOW TO STRUCTURE — TOPIC BY TOPIC, ATTRIBUTED BY WHO SPOKE:**
 
-**(1.) Title:** A short title naming the company/topic discussed and the purpose (e.g., "learnings, insights and mental models"), plus a one-line subtitle noting any read-across company the team was drawing implications for.
+1. **Identify the topics.** Read the whole discussion and determine the distinct topics/threads that were talked about. Include as many topics as the discussion actually contains — do NOT force a fixed number, and do NOT pad. Order them thematically (group related discussion together), not chronologically.
 
-**(2.) Numbered topic sections:** Group the discussion into 8-12 coherent topics — thematic, NOT chronological. Each topic gets:
-- A descriptive **bold heading** (e.g., "The Recruiter Re-pricing Episode — A Case Study in Latent Pricing Power"), numbered sequentially.
-- Bullet points beneath it. Bullets only — no sub-sections, no tables, no paragraphs.
-- **Bold** the sentences that are genuine insights or mental models. In this team's transcripts, speakers sometimes literally say the word "insight" or "mental model" — treat those as mandatory captures, but also bold anything that clearly functions as one even if not labeled.
+2. **Give each topic a numbered, bold heading**, e.g. "**1. How AI changes the product**".
 
-**(3.) "Consolidated Mental Models"** as the final numbered topic: pull together every transferable mental model from across the discussion into one list, each stated crisply in one or two sentences (e.g., "small share of customer's cost + mission-critical activity + near-monopoly = durable pricing power"). State them generally, so they can be applied to other businesses.
+3. **Under each topic, attribute each substantive point to the person who MADE it.** Add a **bold lead-in bullet per speaker** (their name + colon) with their points as INDENTED sub-bullets. Use real names wherever the transcript or participant list identifies them; otherwise "Speaker 1", "Speaker 2", consistently. For example:
+    - **Amit:**
+        - What Amit actually said, explained, or decided — a full sentence with every specific (names, numbers, dates) intact.
+    - **Jitin:**
+        - What Jitin actually said, observed, or asked (where the question itself carries substance).
 
-**(4.) "Unanswered Questions":** Number every question the analysts raised but did not resolve, every "we don't know," every disagreement left open, and every explicitly flagged risk that lacks an answer. Where the analysts sketched how they might answer a question, note that method in parentheses.
+**ATTRIBUTION — THIS IS THE MOST IMPORTANT RULE:**
+- Do NOT use a "Question / Answer" format and do NOT write "Question:" / "Answer:" labels. This is a record of who contributed what, not a Q&A transcript.
+- **Put each point under the person who SAID it, not the person who asked.** If Jitin asks and Amit answers, the answer's substance belongs under **Amit**, phrased as his contribution and noting the prompt where useful — e.g. under Amit: "Asked by Jitin what changes with AI, explained that …". Do NOT place Amit's answer under Jitin.
+- A speaker's own bullets are what THEY brought: their statements, explanations, decisions, and their own first-hand observations or opinions — e.g. under Jitin: "Observed that Juicebox is 'really good' for sourcing candidates." A pure question that only prompts someone else's answer does NOT become a bullet under the asker; it is folded into the answerer's point. Capture a question under the asker only when the question itself carries a real view, concern, or observation.
 
-**(5.) "Follow-Ups / Action Items":** List concrete tasks the analysts assigned themselves during the discussion (data to pull, sources to check, things to document or file somewhere).
+**CONDENSE OR LEAVE OUT — KEEP SIGNAL, DROP NOISE:**
+- **Condense low-information stretches.** Live demos, walkthroughs, screen-shares, and step-by-step "click here, now this" narration should be summarised into one or two bullets capturing what was shown and any takeaway — NOT reproduced blow by blow.
+- **Leave out irrelevant tangents and filler entirely:** social chit-chat, personal-life talk, scheduling, "can you hear me?", device/recording chatter, and off-topic identity asides that go nowhere (e.g. "who is Singular Capital?" with no bearing on the discussion). Do NOT create a bullet for these.
+- **Drop trivial confirmations** that carry no information (e.g. "Are there other types of businesses? — Yes, many."). If a confirmation contains a real specific, keep only that specific under the speaker; otherwise omit it.
+- **Never record mechanical or meta-conversational artifacts:** someone spelling a name or word out letter by letter (e.g. "he spelled the name M-E-R-C-O-R"), reading something aloud, dictating, repeating a phrase for clarity, or narrating the mechanics of the call. If a spelled-out name matters, just use the resolved name (e.g. "Mercor") in the relevant point — never write a bullet about the act of spelling, reading, or repeating it.
+- When torn, condense a genuine learning or decision rather than drop it; but drop pure logistics, identity chatter, and mechanical artifacts.
 
-**EXTRACTION RULES — FOLLOW THESE STRICTLY:**
-- Capture every number exactly as stated: shares, CAGRs, price points, mix shifts, take rates, time periods. Numbers are the spine of the document. If the analysts corrected a number mid-discussion, use the corrected one.
-- Decompose growth wherever they did: if they split revenue into volume and price, or discussed mix shifts, reproduce the decomposition faithfully.
-- Preserve causal reasoning chains, not just conclusions. If they reasoned "X happened, likely because Y, and the evidence is Z (expert call)," capture all three links.
-- Attribute sources mentioned in the transcript (e.g., expert-network calls, company disclosures, competitor interviews) so the team knows the provenance of each claim.
-- Preserve caveats and data-quality warnings: unknown survey methodology, re-based disclosures, definitional ambiguities, unreliable comparator markets. Never present a caveated claim as settled.
-- Preserve disagreements as disagreements. If one analyst saw something as a risk and the other was skeptical, present both views and mark the question unresolved. Do not adjudicate.
-- Distinguish hypothesis from fact. If the analysts said "this is a hypothesis" or "if this was true," keep that framing (e.g., "mental model, not forecast").
-- Do not invent anything. No outside knowledge, no filled-in numbers, no speculation beyond what the transcript contains. If a figure is ambiguous in the transcript, flag it rather than guess.
-- Ignore transcript noise: phone calls, typing sounds, device chatter, tangents about recording tools — unless the tangent contains a real action item (then it goes in Follow-Ups / Action Items).
-- Read-across implications (e.g., lessons from the studied company applied to the company the team actually owns or tracks) deserve their own topic section or clearly marked bullets — these are often the most valuable content.
+**CAPTURE FAITHFULLY:**
+- Every decision reached, and who made or agreed to it.
+- Every specific: names, numbers, dates, figures, metrics, targets, and data shared. Use the corrected value where a number was corrected mid-discussion.
+- First-hand observations and opinions, attributed to the person who holds them.
+- **Unanswered / open questions:** when a real question was raised but NOT answered or resolved in the discussion, capture it under the asker and prefix it with "Open question:" so it stands out — e.g. "Open question: whether the pricing holds for enterprise (left unresolved)."
+- Disagreements as disagreements — both sides under their respective speakers; do not adjudicate.
+- To-dos, next steps, owners, deadlines, and things to track (these are also consolidated in a later step).
+- Do not invent anything. No outside knowledge or filled-in facts. If something is ambiguous, flag it rather than guess.
 
 **FORMATTING RULES:**
-- Topic headings with plain bullet points underneath. No nested sub-headings within topics, no tables, no images.
-- Bullets should be substantive — one to three sentences each, not fragments.
-- **Bold** only insights and mental models (plus the topic headings themselves), nothing else.
-- Neutral, precise, analytical tone. No hype, no filler, no executive-summary fluff at the top.
-- Length: whatever comprehensiveness requires. Err on the side of including a marginal learning rather than dropping it.
+- Numbered, bold topic headings. Under each, one bold speaker lead-in bullet per speaker, with that speaker's points as indented sub-bullets. This single speaker → points nesting is the ONLY nesting — no deeper sub-headings, no "Question:/Answer:" labels, no tables, no images, no long paragraphs.
+- Bullets should be substantive and self-contained — usually one to three sentences.
+- Neutral, precise tone. No hype, no filler, no preamble or executive summary at the top.
 
-**SECTIONED PROCESSING:** If you are told you are continuing from an earlier section of a long transcript, do NOT repeat the document title. Output only the numbered topic sections for the new content, followed by that section's additions under the exact headings "Consolidated Mental Models", "Unanswered Questions", and "Follow-Ups / Action Items" (keeping the headings identical lets the sections be merged afterwards)."""
+**SECTIONED PROCESSING:** If you are told you are continuing from an earlier section of a long transcript, do NOT repeat any document title. Continue with numbered, bold topic headings in the exact same attributed format, for the new content only. Do NOT add any consolidated, summary, or action-item sections — those are handled in a later step."""
+
+INTERNAL_DISCUSSION_POSTPROCESS_PROMPT = """You are post-processing an already-written internal-discussion notes document. The notes below are COMPLETE and CORRECT. Your job is a light pass that ADDS highlighting and two consolidated sections, and changes NOTHING else.
+
+**ABSOLUTE PRESERVATION RULE:** Reproduce the entire document — every topic heading, every speaker label, every bullet, every number and name — in the same order and wording. Do NOT summarize, shorten, reword, reorder, merge, or delete any content. The ONLY edits you may make are the additions described below. When unsure whether to touch something, leave it exactly as it is.
+
+**DO NOT USE ANY COLOUR MARKUP.** Never emit `:red[…]`, `:orange[…]`, `:blue[…]`, or any other `:colour[…]` directive anywhere in the output. Emphasis is bold and underline only, as specified below.
+
+**ADDITION 1 — HIGHLIGHT LEARNINGS (in place):**
+Find any point that is a genuine **insight**, **mental model**, **framework**, **principle**, **rule of thumb**, **key learning**, **takeaway**, or **realisation** — whether explicitly labelled (e.g. "the mental model here is…", "key learning:", "the insight is…", "the lesson here is…", "the takeaway is…", "as a framework…", "the principle is…") or clearly functioning as one (a transferable principle, a named framework, a rule of thumb, a realisation the group arrived at). Make that bullet's text **BOLD and UNDERLINED** using this EXACT syntax:
+    `<u>**…the learning text…**</u>`
+Example: `- The real lesson is that speed of iteration beats up-front planning here.`
+  becomes `- <u>**The real lesson is that speed of iteration beats up-front planning here.**</u>`
+Highlight ONLY genuine learnings / insights / mental models / frameworks / principles — never ordinary facts, updates, or opinions.
+
+**ADDITION 2 — HIGHLIGHT UNANSWERED / OPEN QUESTIONS (in place):**
+Find any bullet that records a question raised but left unanswered or unresolved (these are often prefixed "Open question:"). Make that bullet's text **BOLD** (no underline, no colour) using this EXACT syntax:
+    `**Open question: …**`
+Only highlight genuinely unresolved questions — not questions that were answered in the discussion.
+
+For both highlight types: keep the bullet marker and its indentation exactly as they were (only the text after the marker gets wrapped), and highlight the specific bullet(s) only — never a whole speaker sub-list.
+
+**ADDITION 3 — CONSOLIDATED SECTIONS (appended at the very end, in this order):**
+
+### **Open Questions**
+A numbered list of every unanswered/unresolved question from anywhere in the document (note who raised it, in parentheses, if known). If there are none, write "1. None identified."
+
+### **Action Items, Next Steps & To-Track**
+A numbered list of every to-do, next step, follow-up, decision that requires action, deadline, owner assignment, and "thing to track / keep an eye on". Include the owner and/or due date in parentheses where mentioned. If there are none, write "1. None identified."
+
+Both appended sections are consolidated backlogs, not moves — keep the items where they appear inline above as well.
+
+Output the FULL document (all preserved content, plus the highlighting and the two appended sections). Output ONLY the document — no preamble, no explanation, no code fences."""
 
 PROMPT_INITIAL = """You are a High-Fidelity Factual Extraction Engine. Your task is to analyze a meeting transcript chunk and generate detailed, factual notes.
 Your primary directive is **100% completeness and accuracy**. Process the transcript sequentially and generate notes following the structure below.
@@ -372,14 +407,16 @@ REFINEMENT_INSTRUCTIONS = {
     "Internal Discussion": "Pay special attention to participant names, project/product names, technical terms, and any referenced documents or systems.",
 }
 
-# --- SPEAKER IDENTIFICATION PROMPTS (Option 4 of Expert Meeting) ---
+# --- SPEAKER IDENTIFICATION PROMPTS (speaker-label refinement layer) ---
 
 SPEAKER_ID_PROMPT_INITIAL = """You are refining a transcript AND identifying distinct speakers.
 
 ## TASK
 1. Clean up the transcript: fix spelling, grammar, punctuation, and conversational filler. Translate any non-English content into clear, natural English while preserving meaning and tone.
-2. Identify distinct speakers. **ASSUME 2 SPEAKERS by default.** Only introduce a 3rd speaker if you are highly confident a clearly distinct third voice is present (e.g., a different role explicitly introduced, a third name addressed in the conversation, or unambiguously different perspective sustained across multiple turns).
-   - **ROLE ANCHORING (critical):** In interview-style calls (expert calls, channel checks, analyst interviews), assign **Speaker 1 to the interviewer/analyst** — the person who asks questions, sets the agenda, and speaks in short turns — and **Speaker 2 to the expert/respondent** — the person giving long, substantive answers. Decide this mapping from the first few turns and apply it consistently for the ENTIRE transcript. Question turns and answer turns must never share a label.
+2. Identify distinct speakers.
+   - **EXISTING LABELS TAKE PRIORITY:** If the transcript is ALREADY labelled with speaker names or tags (e.g. "Amit:", "Jitin (PM):", "Interviewer:"), RESPECT them — preserve those speaker distinctions and turn boundaries, map each distinct existing speaker consistently to its own `Speaker N` label, and honour however many distinct speakers the transcript identifies. Never merge two distinct named speakers into one. (Names are still normalised to generic `Speaker N` here; the real names are re-attached in a later step.)
+   - When the transcript is NOT already labelled: **ASSUME 2 SPEAKERS by default.** Only introduce a 3rd speaker if you are highly confident a clearly distinct third voice is present (e.g., a different role explicitly introduced, a third name addressed in the conversation, or unambiguously different perspective sustained across multiple turns).
+   - **ROLE ANCHORING (critical):** In interview-style calls (expert calls, channel checks, analyst interviews) where speakers are NOT already labelled, assign **Speaker 1 to the interviewer/analyst** — the person who asks questions, sets the agenda, and speaks in short turns — and **Speaker 2 to the expert/respondent** — the person giving long, substantive answers. Decide this mapping from the first few turns and apply it consistently for the ENTIRE transcript. Question turns and answer turns must never share a label.
 3. Tag any **off-topic logistical chatter** with `**Skip:**` instead of `**Speaker N:**`. Logistics includes:
    - Tech checks: "can you hear me?", "let me share my screen", "your mic is muted", "is the recording on?"
    - Personal/comfort: "can I get a charger?", "do you want water?", "should we order food?", "let me grab my notes"
@@ -459,21 +496,78 @@ TRANSCRIPT EXCERPT:
 {transcript_sample}
 """
 
-SPEAKER_NAME_MAP_PROMPT = """Below is the beginning of a speaker-tagged meeting transcript and a list of known participants. Map each generic speaker label to the most likely participant.
+SPEAKER_NAME_MAP_PROMPT = """You are mapping generic speaker labels (Speaker 1, Speaker 2, ...) in a tagged transcript to real names.
 
-Return ONLY valid JSON with no other text, in exactly this shape (one entry per speaker label that appears in the transcript):
-{{"Speaker 1": "participant name (role)", "Speaker 2": ""}}
+You are given three things: a list of known participants (may be empty), the beginning of the ORIGINAL transcript as uploaded (which MAY already label speakers by their real names), and the beginning of the tagged transcript (generic Speaker N labels).
 
-Rules:
-- Use the participant names/roles EXACTLY as written in the participants list below.
-- Map a label only when the evidence is reasonably clear: who asks questions vs who answers, names used when speakers address each other, roles or companies mentioned in introductions.
+Return ONLY valid JSON with no other text, one entry per speaker label that appears in the tagged transcript:
+{{"Speaker 1": "name (role)", "Speaker 2": ""}}
+
+Rules (in priority order):
+- If the ORIGINAL transcript already identifies who is speaking by name (e.g. "Amit:", "Jitin (PM):"), USE those names — align each Speaker N to the matching person by comparing the turns/wording between the two versions.
+- Otherwise use the participants list: map by who asks questions vs who answers, names used when speakers address each other, and roles or companies mentioned in introductions. Use participant names/roles EXACTLY as written.
+- You MAY use a real name that appears in the original transcript even if it is not in the participants list. But do NOT invent a name that appears in neither the original transcript nor the participants list.
 - If you cannot confidently map a label, use an empty string "" for it. Do NOT guess.
-- Do NOT invent names that are not in the participants list.
 
 PARTICIPANTS: {participants}
 
-TAGGED TRANSCRIPT (beginning):
+ORIGINAL TRANSCRIPT (beginning — may include real speaker names):
+{original_sample}
+
+TAGGED TRANSCRIPT (beginning — generic Speaker N labels):
 {transcript_sample}
+"""
+
+# --- DUAL-ENGINE TRANSCRIPT MERGE (Gemini content + AssemblyAI diarization) ---
+# Transcript A = Gemini (high detail, weak/no speaker labels).
+# Transcript B = AssemblyAI utterances (diarized, lower fidelity).
+# The merged output is emitted as tagged turns so it can feed the speaker
+# review panel directly (parsed by _parse_named_tagged_transcript).
+TRANSCRIPT_MERGE_PROMPT = """You are an expert transcript editor. You will receive two machine transcripts of the SAME audio recording, produced by two different systems with complementary strengths and weaknesses. Your job is to merge them into a single, accurate, speaker-attributed transcript.
+
+TRANSCRIPT A (content source). Produced by a system that captures nearly all spoken detail — including mixed-language speech, names, numbers, and fast exchanges — but does NOT reliably identify who is speaking.
+
+TRANSCRIPT B (attribution source). Produced by a system with speaker diarization. Its speaker labels (Speaker A/B/C..., with timestamps) are useful anchors, but its text is less complete and often garbled, especially for non-English or code-switched speech. It may also assign separate speaker labels to non-conversational audio (videos played during the meeting, hold-music voiceovers, automated phone systems).
+
+Known context about the recording: {speaker_info}
+
+Output language: {output_language}
+
+Method — follow these steps in order:
+
+Step 1 — Read both transcripts fully before writing anything. Build a mental map of: (a) how many real human speakers there are, (b) which diarization labels in Transcript B correspond to which real person, and (c) which labels/segments are NOT a meeting participant at all (marketing/demo videos, screen-share audio, automated IVR voices, music). Long monologues in polished marketing English amid a casual conversation are almost always played videos, not a new participant.
+
+Step 2 — Map diarization labels to real names. Use, in priority order: (1) names given in the context above; (2) direct address within the dialogue ("...right, Jiten?" — the person SAYING this is not Jiten; the person replying usually is); (3) self-references ("let me tell you what I did", "I built this") and role consistency — in most meetings one person presents/demos/explains and another questions/challenges; a speaker rarely flips roles mid-conversation; (4) Transcript B's label boundaries with timestamps. If after all this some segments cannot be confidently named, use a consistent placeholder (e.g., "Speaker 3") rather than guessing a name.
+
+Step 3 — Merge. Walk through the recording chronologically and produce one unified transcript:
+- Transcript A is the default source of the words; use its wording wherever it is coherent.
+- Where Transcript A is garbled, missing, or ambiguous but Transcript B is clear, use Transcript B's version.
+- Where the two disagree on a fact (a name, number, place), prefer the version internally consistent with the rest of the conversation and common sense; machine transcripts frequently corrupt proper nouns. Fix ONLY when context makes the correct reading clear.
+- Where BOTH are garbled, write [inaudible] — never invent or paraphrase to fill a gap. Accuracy over completeness.
+- Do not summarize, condense, or editorialize. Keep the substance of every turn. You may drop pure disfluencies (repeated false starts, "hmm"/"haan" acknowledgment strings) that carry no meaning, but keep hedges, thinking-aloud phrases, and self-corrections.
+- Attribute every turn using the Step-2 mapping, cross-checked against conversational logic: a question is answered by the OTHER person; the person driving a demo narrates the screen; the person who introduced a topic elaborates on it. Transcript B's labels are anchors, not ground truth — when a label contradicts obvious conversational logic, trust the logic. In rapid multi-voice stretches where attribution of short interjections is genuinely uncertain, fold brief interjections into the nearest clearly-attributed turn.
+
+Step 4 — Language. Produce the final transcript in: {output_language}. If translating, translate meaning faithfully — keep register and hedging; keep proper nouns, product names, and technical terms as-is; where a culturally specific phrase has no clean equivalent, translate the sense and, if needed, keep the original in parentheses.
+
+Step 5 — OUTPUT FORMAT (strict — this feeds an automated pipeline):
+- Output ONLY the merged transcript as tagged turns. Nothing else — no header, no summary, no section headings, no explanation.
+- Each turn is the speaker's name in bold on its own line, then the turn's text: `**<Speaker Name>:**` on one line, the text on the following line(s), and exactly one blank line between turns.
+- Use the SAME name spelling consistently for each person throughout. Where a person could not be named, use a consistent placeholder like `**Speaker 3:**`.
+- For played videos, automated voices, hold music, or any other NON-participant audio, use the label `**Skip:**` instead of a name (these are excluded from the final notes). If helpful, begin such a block with a brief bracket note, e.g. `**Skip:**` then `[demo video] ...`.
+
+Step 6 — Self-check before finalizing: (a) no substantive content in Transcript A is missing; (b) chronological order preserved; (c) speaker names used consistently; (d) every question is followed by an answer attributed to a DIFFERENT speaker; (e) video/automated-voice blocks are tagged `**Skip:**`, never a participant; (f) every uncertainty is visibly marked ([inaudible]) rather than silently guessed.
+
+Return ONLY the tagged-turn transcript.
+
+TRANSCRIPT A (content source — high detail, unreliable speakers):
+<transcript_a>
+{transcript_a}
+</transcript_a>
+
+TRANSCRIPT B (attribution source — diarized, lower fidelity):
+<transcript_b>
+{transcript_b}
+</transcript_b>
 """
 
 # --- OTG NOTES PROMPTS ---

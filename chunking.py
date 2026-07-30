@@ -347,6 +347,31 @@ def merge_learning_doc_sections(notes_text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines)).strip()
 
 
+def renumber_topic_sections(notes_text: str) -> str:
+    """Renumber top-level numbered topic headings sequentially across the
+    whole document.
+
+    Parallel-section generation of an Internal Discussion restarts topic
+    numbering at 1 in every section, so the joined document has repeated
+    "1." headings. This walks the document and renumbers each recognised
+    heading (``### **1. ...**`` or full-line ``**1. ...**``) 1, 2, 3, …
+    Speaker lead-in bullets (``- **Amit:**``) and nested numbered
+    sub-bullets are left untouched, since they are not headings.
+    """
+    if not notes_text or not notes_text.strip():
+        return notes_text
+    lines = notes_text.split("\n")
+    count = 0
+    for i, line in enumerate(lines):
+        if _heading_text(line) is None:
+            continue
+        m = re.match(r"^(\s*(?:#{1,6}\s+)?\**\s*)(\d+)([.)])(\s+)(.*)$", line)
+        if m:
+            count += 1
+            lines[i] = f"{m.group(1)}{count}{m.group(3)}{m.group(4)}{m.group(5)}"
+    return "\n".join(lines)
+
+
 # --- Q&A-block post-processing helpers (Output & History tab) ---
 # The LLM's role in post-processing is deliberately narrow: topic grouping
 # only ever returns a plan over block indices, and these helpers do the
