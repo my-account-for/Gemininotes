@@ -176,9 +176,64 @@ You are a meticulous note-taker. Convert a raw internal discussion transcript �
 - Bullets should be substantive and self-contained — usually one to three sentences.
 - Neutral, precise tone. No hype, no filler, no preamble or executive summary at the top.
 
-**SECTIONED PROCESSING:** If you are told you are continuing from an earlier section of a long transcript, do NOT repeat any document title. Continue with numbered, bold topic headings in the exact same attributed format, for the new content only. Do NOT add any consolidated, summary, or action-item sections — those are handled in a later step."""
+**SECTIONED PROCESSING:** If you are told you are continuing from an earlier section of a long transcript, do NOT repeat any document title. Continue with numbered, bold topic headings in the exact same attributed format, for the new content only. Do NOT add any consolidated, summary, or action-item sections — those are handled in a later step.
 
-INTERNAL_DISCUSSION_POSTPROCESS_PROMPT = """You are post-processing an already-written internal-discussion notes document. The notes below are COMPLETE and CORRECT. Your job is a light pass that ADDS highlighting and two consolidated sections, and changes NOTHING else.
+**FINAL CHECK BEFORE YOU FINISH:** Re-read what you have written, especially the last few topics. The source is a conversation, so the pull toward a "Question / Answer" shape is strongest near the end — resist it. If any bullet slipped into a Q&A form, was labelled "Question:" / "Answer:", or attributed an answer to the person who ASKED rather than the person who SAID it, rewrite it now into the speaker-attributed format. The format must hold to the very last bullet."""
+
+# --- Internal Discussion: decompose (segment → write per topic) ---
+# Splitting the job — first find the topics, then write each one in its own
+# short, focused call — stops the single long generation from drifting back
+# into the Q&A shape of the raw conversation near the end.
+
+INTERNAL_DISCUSSION_SEGMENT_PROMPT = """You are segmenting an internal discussion transcript into its distinct TOPICS so that each topic can be written up separately afterwards. Do NOT write any notes here — only identify the topics.
+
+Read the ENTIRE transcript and determine the distinct topics/threads that were actually discussed. Group all discussion of the same thing into ONE topic, even if the conversation dropped it and came back to it later. Include as many topics as the discussion genuinely contains — do NOT force a fixed number, do NOT pad, and do NOT split a single topic into several.
+
+Order the topics THEMATICALLY (related topics adjacent), the way a well-organised notes document would present them — not necessarily the order they came up in.
+
+Ignore pure filler when deciding topics: greetings, scheduling, "can you hear me?", device/recording chatter, social chit-chat, and off-topic tangents that go nowhere are NOT topics.
+
+### OUTPUT FORMAT:
+Return ONLY valid JSON with no other text, using this exact structure:
+{{
+  "topics": [
+    {{
+      "title": "Short, specific topic title (e.g. 'How AI changes the product')",
+      "scope": "One sentence describing exactly what this topic covers, so a writer knows which parts of the discussion belong under it."
+    }}
+  ]
+}}
+
+### GUIDELINES:
+1. Titles must be specific to THIS discussion — never generic templates.
+2. Every substantive part of the discussion should fall under exactly one topic; scopes should not overlap.
+3. If the whole discussion is really about one thing, it is fine to return a single topic.
+
+---
+**TRANSCRIPT:**
+
+{transcript}
+"""
+
+INTERNAL_DISCUSSION_TOPIC_FOCUS = """
+
+---
+### **YOUR ASSIGNMENT — WRITE ONE TOPIC ONLY**
+
+The discussion has already been segmented into topics. You are writing the notes for EXACTLY ONE of them:
+
+**Topic {index}: {title}**
+Scope: {scope}
+
+Apply ALL the attribution, condensing, capture and formatting rules above, but to THIS TOPIC ONLY:
+- Output a SINGLE numbered, bold topic heading — `**{index}. {title}**` — using this exact number and title, followed by the bold speaker lead-in bullets and their indented sub-bullets.
+- Cover everything in the transcript that belongs to this topic, wherever in the conversation it was said (a topic may be raised, dropped, and returned to — pull it all under this one heading).
+- Include NOTHING that belongs to a different topic. Do NOT write any other heading, no preamble, no summary, and no consolidated/open-questions/action-item section — those are handled separately.
+- NEVER use "Question:" / "Answer:" labels. Attribute every point to the person who SAID it, not the person who asked.
+- If this topic turns out to carry no substantive content, output only the heading line `**{index}. {title}**` followed by one sub-bullet `- (No substantive discussion recorded.)`.
+"""
+
+INTERNAL_DISCUSSION_POSTPROCESS_PROMPT ="""You are post-processing an already-written internal-discussion notes document. The notes below are COMPLETE and CORRECT. Your job is a light pass that ADDS highlighting and two consolidated sections, and changes NOTHING else.
 
 **ABSOLUTE PRESERVATION RULE:** Reproduce the entire document — every topic heading, every speaker label, every bullet, every number and name — in the same order and wording. Do NOT summarize, shorten, reword, reorder, merge, or delete any content. The ONLY edits you may make are the additions described below. When unsure whether to touch something, leave it exactly as it is.
 
