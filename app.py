@@ -20,6 +20,8 @@ from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
 import re
 import tempfile
+import shutil
+import subprocess
 import html as html_module
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import copy
@@ -284,8 +286,9 @@ MIN_DECOMPOSE_WORDS = 500
 AUDIO_CHUNK_MINUTES = 5  # default; user-adjustable per session
 AUDIO_CHUNK_MINUTES_OPTIONS = [5, 10, 15, 20, 30]
 
-# Audio formats accepted for upload. ffmpeg (installed via packages.txt) backs
-# pydub, so anything ffmpeg can decode works — every chunk is re-exported to
+# Audio formats accepted for upload. ffmpeg backs the decode (see _decode_audio;
+# the binary comes from the system if present, else the imageio-ffmpeg wheel),
+# so anything ffmpeg can decode works — every chunk is re-exported to
 # WAV before transcription regardless of the source container. Beyond the core
 # formats this includes the MPEG family (.mpeg/.mpg/.mpga, MPEG-4 audio) and
 # other common recorder outputs. Single source of truth — reused by the file
@@ -1332,6 +1335,70 @@ def _fmt_audio_ts(ms: int) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+_FFMPEG_EXE: Optional[str] = None
+
+
+def _ffmpeg_exe() -> str:
+    """Resolve the ffmpeg binary used to decode uploaded audio.
+
+    A system ffmpeg (Docker image, local dev) wins; otherwise fall back to the
+    static binary bundled in the imageio-ffmpeg wheel. That wheel is why the
+    app no longer ships a packages.txt: Streamlit Community Cloud installs apt
+    packages against a Debian sources list it controls, and whenever one of
+    those repos goes stale (expired Release file) every deploy that has a
+    packages.txt fails before our code even runs. A pip wheel has no such
+    dependency.
+    """
+    global _FFMPEG_EXE
+    if _FFMPEG_EXE is None:
+        exe = shutil.which("ffmpeg")
+        if not exe:
+            import imageio_ffmpeg  # lazy: ~30 MB wheel, only needed for audio
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+        # Point pydub at the same binary so any converter-backed call
+        # (non-WAV export, from_file without format) resolves it too.
+        AudioSegment.converter = exe
+        AudioSegment.ffmpeg = exe
+        _FFMPEG_EXE = exe
+    return _FFMPEG_EXE
+
+
+def _decode_audio(audio_bytes: bytes) -> AudioSegment:
+    """Decode any ffmpeg-readable upload into an in-memory AudioSegment.
+
+    Runs ffmpeg directly (input -> 16-bit PCM WAV on disk) and loads the
+    result through pydub's pure-Python WAV reader. This deliberately avoids
+    AudioSegment.from_file on the raw upload: that path shells out to
+    ffprobe, which the imageio-ffmpeg wheel does not ship. The input goes
+    through a real file rather than a pipe because MP4/M4A containers with a
+    trailing moov atom cannot be decoded from a non-seekable stream.
+    """
+    src_path = wav_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".audio") as src_f:
+            src_f.write(audio_bytes)
+            src_path = src_f.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav_f:
+            wav_path = wav_f.name
+        cmd = [
+            _ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-i", src_path, "-vn", "-acodec", "pcm_s16le", "-f", "wav", wav_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            lines = (result.stderr or "").strip().splitlines()
+            raise RuntimeError(lines[-1] if lines else f"ffmpeg exited with code {result.returncode}")
+        with open(wav_path, "rb") as wav_fh:
+            return AudioSegment.from_file(wav_fh, format="wav")
+    finally:
+        for path in (src_path, wav_path):
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
 def _transcribe_audio_bytes(
     audio_bytes: bytes,
     transcription_model,
@@ -1372,7 +1439,7 @@ def _transcribe_audio_bytes(
         transcribe_instruction += f" Participants and entities likely mentioned: {speakers_hint}."
 
     try:
-        audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        audio = _decode_audio(audio_bytes)
     except Exception as audio_err:
         raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
 
