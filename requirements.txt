@@ -1,6 +1,9 @@
 google-generativeai
-# >=1.57 required: st.bottom, alert titles, :shimmer[], container autoscroll
-streamlit>=1.57.0
+# >=1.57 required: st.bottom, alert titles, :shimmer[], container autoscroll.
+# Floor raised to 1.60.0 to guarantee its security hardening ships in
+# deployments: host-message origin spoofing rejection (CWE-346), query-string
+# size/field caps (CWE-770), and the server.maxWidgetStateSize payload cap.
+streamlit>=1.60.0
 python-dotenv
 pypdf2
 pydub>=0.25.0
