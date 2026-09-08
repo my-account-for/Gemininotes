@@ -4,6 +4,11 @@ streamlit>=1.57.0
 python-dotenv
 pypdf2
 pydub>=0.25.0
+# Static ffmpeg binary shipped as a pip wheel — backs audio decoding (see
+# _decode_audio in app.py). Replaces the apt `ffmpeg` that used to come from
+# packages.txt, which broke deploys on Streamlit Community Cloud whenever the
+# platform's Debian apt sources went stale (expired Release file).
+imageio-ffmpeg>=0.5
 # Optional: enables the AssemblyAI diarization + merge speaker path
 # (only used when ASSEMBLYAI_API_KEY is set and the toggle is on).
 assemblyai
