@@ -429,7 +429,7 @@ class AppState:
     transcription_model: str = "Gemini 3.6 Flash"
     # Options for the dedicated transcribe models (TRANSCRIBE_ONLY_MODELS);
     # ignored by the generative transcription models.
-    transcribe_mode: str = "Verbatim"
+    transcribe_mode: str = "Smart"
     transcribe_diarization: bool = False
     transcribe_word_timestamps: bool = False
     transcribe_language_codes: List[str] = field(default_factory=list)
@@ -1338,7 +1338,7 @@ class TranscribeOnlyModel:
     which is called through the Interactions API rather than generate_content.
     Carries the user's transcription options for the run."""
     model_id: str
-    mode: str = "Verbatim"
+    mode: str = "Smart"
     diarization: bool = False
     word_timestamps: bool = False
     language_codes: Tuple[str, ...] = ()
@@ -1368,7 +1368,7 @@ def _get_transcription_model(state: "AppState"):
     if name in TRANSCRIBE_ONLY_MODELS:
         return TranscribeOnlyModel(
             model_id=TRANSCRIBE_ONLY_MODELS[name],
-            mode=getattr(state, "transcribe_mode", "Verbatim"),
+            mode=getattr(state, "transcribe_mode", "Smart"),
             diarization=bool(getattr(state, "transcribe_diarization", False)),
             word_timestamps=bool(getattr(state, "transcribe_word_timestamps", False)),
             language_codes=tuple(getattr(state, "transcribe_language_codes", None) or ()),
