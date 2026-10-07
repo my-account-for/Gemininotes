@@ -338,6 +338,16 @@ AVAILABLE_MODELS = {
     "Gemini 3.5 Flash": "gemini-3.5-flash",
     "Gemini 3.6 Flash": "gemini-3.6-flash",
 }
+# Dedicated speech-to-text models. They're served through the Interactions
+# API (not generateContent) and can't write notes, so they're offered only as
+# a Transcription Model. See _transcribe_chunk_interactions.
+TRANSCRIBE_ONLY_MODELS = {
+    "Gemini 3.5 Transcribe": "gemini-3.5-transcribe",
+}
+TRANSCRIPTION_MODEL_OPTIONS = list(AVAILABLE_MODELS.keys()) + list(TRANSCRIBE_ONLY_MODELS.keys())
+INTERACTIONS_API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+# custom_vocabulary accepts up to 1,000 terms but works best under ~100.
+TRANSCRIBE_MAX_VOCABULARY = 100
 # Model applied to every pipeline stage when the "use Flash for everything"
 # toggle in Settings & Models is on.
 FLASH_ALL_MODEL = "Gemini 3.5 Flash"
@@ -1284,6 +1294,81 @@ def _get_cached_model(model_display_name: str) -> genai.GenerativeModel:
         st.session_state[cache_key][model_id] = genai.GenerativeModel(model_id)
     return st.session_state[cache_key][model_id]
 
+
+@dataclass(frozen=True)
+class TranscribeOnlyModel:
+    """Handle for a dedicated speech-to-text model (e.g. Gemini 3.5 Transcribe),
+    which is called through the Interactions API rather than generate_content."""
+    model_id: str
+
+
+def _get_transcription_model(model_display_name: str):
+    """Model handle for the transcription stage: a TranscribeOnlyModel for the
+    dedicated speech-to-text models, otherwise a regular GenerativeModel."""
+    if model_display_name in TRANSCRIBE_ONLY_MODELS:
+        return TranscribeOnlyModel(TRANSCRIBE_ONLY_MODELS[model_display_name])
+    return _get_cached_model(model_display_name)
+
+
+def _custom_vocabulary_from_hint(speakers_hint: str) -> List[str]:
+    """Split the free-form participants/entities hint into custom_vocabulary
+    terms (comma, semicolon, or newline separated), de-duplicated and capped."""
+    terms, seen = [], set()
+    for raw in re.split(r"[,;\n]+", speakers_hint or ""):
+        term = raw.strip(" .:-\t")
+        if term and len(term) <= 100 and term.lower() not in seen:
+            seen.add(term.lower())
+            terms.append(term)
+    return terms[:TRANSCRIBE_MAX_VOCABULARY]
+
+
+def _interaction_output_text(payload: Dict[str, Any]) -> str:
+    """Transcript text from an Interactions API response body: the text
+    content of its model-output steps (the REST form of `output_text`)."""
+    if isinstance(payload.get("output_text"), str):
+        return payload["output_text"]
+    parts = []
+    for step in payload.get("steps") or []:
+        for content in step.get("content") or []:
+            if content.get("type") == "text" and content.get("text"):
+                parts.append(content["text"])
+    return "".join(parts)
+
+
+def _transcribe_chunk_interactions(model: TranscribeOnlyModel, cloud_ref, vocabulary: List[str], max_retries: int = 3) -> Tuple[str, bool]:
+    """Transcribe one uploaded audio file with a dedicated speech-to-text model
+    via the Interactions API. Returns (text, completed).
+
+    Verbatim mode (the default) keeps the downstream refinement and speaker-ID
+    stages working on the full spoken text; language is auto-detected so
+    code-switched calls work. Transient errors are retried with backoff."""
+    import requests  # streamlit dependency
+
+    body: Dict[str, Any] = {
+        "model": model.model_id,
+        "input": [{"type": "audio", "uri": cloud_ref.uri, "mime_type": cloud_ref.mime_type}],
+    }
+    if vocabulary:
+        body["generation_config"] = {"transcription_config": {"custom_vocabulary": vocabulary}}
+    headers = {"x-goog-api-key": os.environ.get("GEMINI_API_KEY", ""), "Content-Type": "application/json"}
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(INTERACTIONS_API_URL, headers=headers, json=body, timeout=900)
+        except requests.RequestException:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** (attempt + 1))
+                continue
+            raise
+        if resp.status_code in (429, 500, 503, 504) and attempt < max_retries - 1:
+            time.sleep(2 ** (attempt + 1))
+            continue
+        if resp.status_code != 200:
+            raise Exception(f"{model.model_id} returned HTTP {resp.status_code}: {resp.text[:500]}")
+        payload = resp.json()
+        status = str(payload.get("status") or "completed").lower()
+        return _interaction_output_text(payload), status == "completed"
+    return "", False
+
 def is_mobile_device() -> bool:
     """Check if likely a mobile device based on viewport. Returns False on server-side."""
     # Note: This is a heuristic. Streamlit doesn't expose device info directly.
@@ -1437,6 +1522,10 @@ def _transcribe_audio_bytes(
     )
     if speakers_hint:
         transcribe_instruction += f" Participants and entities likely mentioned: {speakers_hint}."
+    # Dedicated speech-to-text models take no prompt; the hint becomes
+    # custom vocabulary instead.
+    dedicated_asr = isinstance(transcription_model, TranscribeOnlyModel)
+    vocabulary = _custom_vocabulary_from_hint(speakers_hint) if dedicated_asr else []
 
     try:
         audio = _decode_audio(audio_bytes)
@@ -1485,15 +1574,21 @@ def _transcribe_audio_bytes(
                     min_words = 0 if near_silent or duration_min < 0.5 else int(duration_min * TRANSCRIBE_MIN_WORDS_PER_MINUTE)
                     text = ""
                     for attempt in range(TRANSCRIBE_CHUNK_ATTEMPTS):
-                        response = generate_with_retry(
-                            transcription_model,
-                            [transcribe_instruction, cloud_ref],
-                            generation_config=GENERATION_CONFIG,
-                        )
-                        attempt_text = _extract_response_text(response)
+                        if dedicated_asr:
+                            attempt_text, completed = _transcribe_chunk_interactions(
+                                transcription_model, cloud_ref, vocabulary
+                            )
+                        else:
+                            response = generate_with_retry(
+                                transcription_model,
+                                [transcribe_instruction, cloud_ref],
+                                generation_config=GENERATION_CONFIG,
+                            )
+                            attempt_text = _extract_response_text(response)
+                            completed = _finish_reason_name(response) in _OK_FINISH_REASONS
                         if len(attempt_text.split()) > len(text.split()):
                             text = attempt_text  # keep the best attempt
-                        if len(text.split()) >= min_words and _finish_reason_name(response) in _OK_FINISH_REASONS:
+                        if len(text.split()) >= min_words and completed:
                             break
                         time.sleep(2)
 
@@ -1565,7 +1660,7 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
     process_and_save_task so the speaker-ID flow can reuse it without
     duplicating subtle behaviour (whitespace normalisation, cloud cleanup, etc.).
     """
-    transcription_model = _get_cached_model(state.transcription_model)
+    transcription_model = _get_transcription_model(state.transcription_model)
     progress.update("prepare", 0, "Loading input...")
 
     raw_transcript, file_name = "", "Pasted Text"
@@ -2307,7 +2402,7 @@ def _transcribe_context_audio(state: AppState) -> None:
     if not audio_bytes:
         return
 
-    transcription_model = _get_cached_model(state.transcription_model)
+    transcription_model = _get_transcription_model(state.transcription_model)
     with st.status("Transcribing context voice note...", expanded=True) as status:
         bar = st.progress(0.0)
 
@@ -2568,7 +2663,10 @@ def render_input_and_processing_tab(state: AppState):
                 st.session_state["_model_picks_backup"] = {f: getattr(state, f) for f in MODEL_STAGE_FIELDS}
             elif _was_flash_all and not state.use_flash_for_all:
                 for field_name, value in st.session_state.get("_model_picks_backup", {}).items():
-                    if field_name in MODEL_STAGE_FIELDS and value in AVAILABLE_MODELS:
+                    if field_name in MODEL_STAGE_FIELDS and (
+                        value in AVAILABLE_MODELS
+                        or (field_name == "transcription_model" and value in TRANSCRIBE_ONLY_MODELS)
+                    ):
                         setattr(state, field_name, value)
 
             if state.use_flash_for_all:
@@ -2590,7 +2688,15 @@ def render_input_and_processing_tab(state: AppState):
                     index=list(AVAILABLE_MODELS.keys()).index(_sid_default),
                     help="Used only for the speaker-label refinement layer. A stronger model produces better speaker separation and tag continuity across long transcripts.",
                 )
-                state.transcription_model = st.selectbox("Transcription Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.transcription_model), help="Used for audio files.")
+                _tx_default = state.transcription_model if state.transcription_model in TRANSCRIPTION_MODEL_OPTIONS else TRANSCRIPTION_MODEL_OPTIONS[0]
+                state.transcription_model = st.selectbox(
+                    "Transcription Model",
+                    TRANSCRIPTION_MODEL_OPTIONS,
+                    index=TRANSCRIPTION_MODEL_OPTIONS.index(_tx_default),
+                    help="Used for audio files. Gemini 3.5 Transcribe is Google's dedicated "
+                         "speech-to-text model (85+ languages, code-switching); the Speakers field "
+                         "is passed to it as custom vocabulary for names and terms.",
+                )
                 state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
 
             st.divider()
