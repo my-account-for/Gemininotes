@@ -345,7 +345,6 @@ TRANSCRIBE_ONLY_MODELS = {
     "Gemini 3.5 Transcribe": "gemini-3.5-transcribe",
 }
 TRANSCRIPTION_MODEL_OPTIONS = list(AVAILABLE_MODELS.keys()) + list(TRANSCRIBE_ONLY_MODELS.keys())
-INTERACTIONS_API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 # custom_vocabulary accepts up to 1,000 terms but works best under ~100.
 TRANSCRIBE_MAX_VOCABULARY = 100
 # Per-request audio limits for the dedicated transcribe models: 1 hour
@@ -1495,6 +1494,20 @@ def _format_word_annotations(payload: Dict[str, Any], model: TranscribeOnlyModel
     return "\n\n".join(lines)
 
 
+def _get_genai_client():
+    """Cached google-genai Client for the Interactions API (the rest of the
+    app still uses the legacy google.generativeai SDK, which lacks it)."""
+    from google import genai as google_genai
+
+    if "_genai_client" not in st.session_state:
+        st.session_state["_genai_client"] = google_genai.Client(
+            api_key=os.environ.get("GEMINI_API_KEY", ""),
+            # Long chunks can take minutes to transcribe; timeout is in ms.
+            http_options={"timeout": 15 * 60 * 1000},
+        )
+    return st.session_state["_genai_client"]
+
+
 def _transcribe_chunk_interactions(
     model: TranscribeOnlyModel,
     cloud_ref,
@@ -1505,37 +1518,38 @@ def _transcribe_chunk_interactions(
     """Transcribe one uploaded audio file with a dedicated speech-to-text model
     via the Interactions API. Returns (text, completed).
 
+    Goes through the official google-genai SDK rather than raw REST: the SDK
+    wraps the audio in the user_input step the API expects (a bare content
+    list was rejected with "Thinking is not enabled for this model").
     With diarization or word timestamps on, the transcript is rebuilt from
     the per-word annotations (speaker turns / [MM:SS] markers); otherwise
     the plain output text is used. Transient errors are retried with backoff."""
-    import requests  # streamlit dependency
-
-    body: Dict[str, Any] = {
-        "model": model.model_id,
-        "input": [{"type": "audio", "uri": cloud_ref.uri, "mime_type": cloud_ref.mime_type}],
-    }
-    body["generation_config"] = {"transcription_config": _build_transcription_config(model, vocabulary)}
-    headers = {"x-goog-api-key": os.environ.get("GEMINI_API_KEY", ""), "Content-Type": "application/json"}
+    client = _get_genai_client()
+    audio = {"type": "audio", "uri": cloud_ref.uri, "mime_type": cloud_ref.mime_type}
+    config = {"transcription_config": _build_transcription_config(model, vocabulary)}
     for attempt in range(max_retries):
         try:
-            resp = requests.post(INTERACTIONS_API_URL, headers=headers, json=body, timeout=900)
-        except requests.RequestException:
-            if attempt < max_retries - 1:
+            interaction = client.interactions.create(
+                model=model.model_id,
+                input=[{"type": "user_input", "content": [audio]}],
+                generation_config=config,
+            )
+            break
+        except Exception as e:
+            transient = getattr(e, "status_code", None) in (429, 500, 503, 504) or any(
+                kw in str(e).lower() for kw in ("timeout", "timed out", "connection")
+            )
+            if transient and attempt < max_retries - 1:
                 time.sleep(2 ** (attempt + 1))
                 continue
-            raise
-        if resp.status_code in (429, 500, 503, 504) and attempt < max_retries - 1:
-            time.sleep(2 ** (attempt + 1))
-            continue
-        if resp.status_code != 200:
-            raise Exception(f"{model.model_id} returned HTTP {resp.status_code}: {resp.text[:500]}")
-        payload = resp.json()
-        status = str(payload.get("status") or "completed").lower()
-        text = ""
-        if model.uses_word_features:
-            text = _format_word_annotations(payload, model, chunk_offset_ms)
-        return text or _interaction_output_text(payload), status == "completed"
-    return "", False
+            raise Exception(f"{model.model_id}: {e}")
+    payload = interaction.model_dump(mode="json", exclude_none=True)
+    status = str(payload.get("status") or "completed").lower()
+    text = ""
+    if model.uses_word_features:
+        text = _format_word_annotations(payload, model, chunk_offset_ms)
+    return text or _interaction_output_text(payload), status == "completed"
+
 
 def _render_transcribe_options(state: "AppState") -> None:
     """Settings for the dedicated transcribe models. Mirrors the API rules in

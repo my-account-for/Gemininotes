@@ -1,4 +1,7 @@
 google-generativeai
+# Interactions API client, used for the dedicated Gemini 3.5 Transcribe model
+# (the legacy SDK above lacks it). Imports as google.genai; coexists with it.
+google-genai>=2.3.0
 # >=1.57 required: st.bottom, alert titles, :shimmer[], container autoscroll
 streamlit>=1.57.0
 python-dotenv
