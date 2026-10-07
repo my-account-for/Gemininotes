@@ -347,6 +347,9 @@ TRANSCRIBE_ONLY_MODELS = {
 TRANSCRIPTION_MODEL_OPTIONS = list(AVAILABLE_MODELS.keys()) + list(TRANSCRIBE_ONLY_MODELS.keys())
 # custom_vocabulary accepts up to 1,000 terms but works best under ~100.
 TRANSCRIBE_MAX_VOCABULARY = 100
+# Generative model used for the rest of a run if a dedicated transcribe
+# model fails outright (it's a preview model).
+TRANSCRIBE_FALLBACK_MODEL = "Gemini 3.6 Flash"
 # Per-request audio limits for the dedicated transcribe models: 1 hour
 # normally, 30 minutes with diarization or word timestamps enabled.
 TRANSCRIBE_MAX_REQUEST_MINUTES = 60
@@ -1831,10 +1834,23 @@ def _transcribe_audio_bytes(
                     text = ""
                     for attempt in range(TRANSCRIBE_CHUNK_ATTEMPTS):
                         if dedicated_asr:
-                            attempt_text, completed = _transcribe_chunk_interactions(
-                                transcription_model, cloud_ref, vocabulary, chunk_offset_ms=chunk_start
-                            )
-                        else:
+                            try:
+                                attempt_text, completed = _transcribe_chunk_interactions(
+                                    transcription_model, cloud_ref, vocabulary, chunk_offset_ms=chunk_start
+                                )
+                            except Exception as asr_err:
+                                # Preview model: when it fails outright (e.g. the
+                                # Oct 2026 "Thinking is not enabled" API regression),
+                                # finish the run on a generative model instead of
+                                # aborting. Transient errors were already retried.
+                                warnings.append(
+                                    f"⚠️ {transcription_model.model_id} failed ({asr_err}). "
+                                    f"Transcribed with {TRANSCRIBE_FALLBACK_MODEL} instead"
+                                    + (f" from chunk {i+1} onward." if i else ".")
+                                )
+                                dedicated_asr = False
+                                transcription_model = _get_cached_model(TRANSCRIBE_FALLBACK_MODEL)
+                        if not dedicated_asr:
                             response = generate_with_retry(
                                 transcription_model,
                                 [transcribe_instruction, cloud_ref],
