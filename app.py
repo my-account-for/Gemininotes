@@ -348,6 +348,37 @@ TRANSCRIPTION_MODEL_OPTIONS = list(AVAILABLE_MODELS.keys()) + list(TRANSCRIBE_ON
 INTERACTIONS_API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 # custom_vocabulary accepts up to 1,000 terms but works best under ~100.
 TRANSCRIBE_MAX_VOCABULARY = 100
+# Per-request audio limits for the dedicated transcribe models: 1 hour
+# normally, 30 minutes with diarization or word timestamps enabled.
+TRANSCRIBE_MAX_REQUEST_MINUTES = 60
+TRANSCRIBE_MAX_REQUEST_MINUTES_WITH_FEATURES = 30
+# "Verbatim" keeps every word (fillers, false starts) and is the only mode
+# that supports diarization/timestamps; "Smart" cleans up disfluencies and
+# applies structured formatting.
+TRANSCRIBE_MODES = ["Verbatim", "Smart"]
+# Common BCP-47 hints offered in the UI; any other supported code can be typed.
+TRANSCRIBE_LANGUAGE_OPTIONS = {
+    "en-IN": "English (India)",
+    "en-US": "English (US)",
+    "en-GB": "English (UK)",
+    "hi-IN": "Hindi",
+    "mr-IN": "Marathi",
+    "gu-IN": "Gujarati",
+    "ta-IN": "Tamil",
+    "te-IN": "Telugu",
+    "kn-IN": "Kannada",
+    "ml-IN": "Malayalam",
+    "bn-IN": "Bengali (India)",
+    "pa-IN": "Punjabi",
+    "cmn-Hans-CN": "Mandarin (Simplified)",
+    "ja-JP": "Japanese",
+    "ko-KR": "Korean",
+    "de-DE": "German",
+    "fr-FR": "French",
+    "es-419": "Spanish (Latin America)",
+    "pt-BR": "Portuguese (Brazil)",
+    "ar-EG": "Arabic (Egypt)",
+}
 # Model applied to every pipeline stage when the "use Flash for everything"
 # toggle in Settings & Models is on.
 FLASH_ALL_MODEL = "Gemini 3.5 Flash"
@@ -397,6 +428,13 @@ class AppState:
     refinement_model: str = "Gemini 3.6 Flash"
     speaker_id_model: str = "Gemini 3.6 Flash"
     transcription_model: str = "Gemini 3.6 Flash"
+    # Options for the dedicated transcribe models (TRANSCRIBE_ONLY_MODELS);
+    # ignored by the generative transcription models.
+    transcribe_mode: str = "Verbatim"
+    transcribe_diarization: bool = False
+    transcribe_word_timestamps: bool = False
+    transcribe_language_codes: List[str] = field(default_factory=list)
+    transcribe_custom_vocabulary: bool = True
     chat_model: str = "Gemini 2.5 Pro"
     use_flash_for_all: bool = False
     refinement_enabled: bool = True
@@ -1298,16 +1336,46 @@ def _get_cached_model(model_display_name: str) -> genai.GenerativeModel:
 @dataclass(frozen=True)
 class TranscribeOnlyModel:
     """Handle for a dedicated speech-to-text model (e.g. Gemini 3.5 Transcribe),
-    which is called through the Interactions API rather than generate_content."""
+    which is called through the Interactions API rather than generate_content.
+    Carries the user's transcription options for the run."""
     model_id: str
+    mode: str = "Verbatim"
+    diarization: bool = False
+    word_timestamps: bool = False
+    language_codes: Tuple[str, ...] = ()
+    custom_vocabulary: bool = True
+
+    @property
+    def smart(self) -> bool:
+        return self.mode == "Smart"
+
+    @property
+    def uses_word_features(self) -> bool:
+        """Diarization / word timestamps: verbatim-only, incompatible with
+        custom vocabulary, and capped at 30 minutes of audio per request."""
+        return not self.smart and (self.diarization or self.word_timestamps)
+
+    @property
+    def max_request_ms(self) -> int:
+        minutes = TRANSCRIBE_MAX_REQUEST_MINUTES_WITH_FEATURES if self.uses_word_features else TRANSCRIBE_MAX_REQUEST_MINUTES
+        return minutes * 60 * 1000
 
 
-def _get_transcription_model(model_display_name: str):
-    """Model handle for the transcription stage: a TranscribeOnlyModel for the
-    dedicated speech-to-text models, otherwise a regular GenerativeModel."""
-    if model_display_name in TRANSCRIBE_ONLY_MODELS:
-        return TranscribeOnlyModel(TRANSCRIBE_ONLY_MODELS[model_display_name])
-    return _get_cached_model(model_display_name)
+def _get_transcription_model(state: "AppState"):
+    """Model handle for the transcription stage: a TranscribeOnlyModel (with
+    the state's transcribe options) for the dedicated speech-to-text models,
+    otherwise a regular GenerativeModel."""
+    name = state.transcription_model
+    if name in TRANSCRIBE_ONLY_MODELS:
+        return TranscribeOnlyModel(
+            model_id=TRANSCRIBE_ONLY_MODELS[name],
+            mode=getattr(state, "transcribe_mode", "Verbatim"),
+            diarization=bool(getattr(state, "transcribe_diarization", False)),
+            word_timestamps=bool(getattr(state, "transcribe_word_timestamps", False)),
+            language_codes=tuple(getattr(state, "transcribe_language_codes", None) or ()),
+            custom_vocabulary=bool(getattr(state, "transcribe_custom_vocabulary", True)),
+        )
+    return _get_cached_model(name)
 
 
 def _custom_vocabulary_from_hint(speakers_hint: str) -> List[str]:
@@ -1320,6 +1388,30 @@ def _custom_vocabulary_from_hint(speakers_hint: str) -> List[str]:
             seen.add(term.lower())
             terms.append(term)
     return terms[:TRANSCRIBE_MAX_VOCABULARY]
+
+
+def _build_transcription_config(model: TranscribeOnlyModel, vocabulary: List[str]) -> Dict[str, Any]:
+    """transcription_config for the Interactions API, enforcing the API's
+    compatibility rules (smart excludes diarization/timestamps; custom
+    vocabulary excludes both) so an invalid combination is never sent.
+
+    Always non-empty: the config's presence is what switches the request to
+    speech recognition. Without it the API treats the call as ordinary
+    generation and rejects it ("Thinking is not enabled for this model")."""
+    # Empty language_codes = automatic detection (incl. code-switching).
+    cfg: Dict[str, Any] = {"language_codes": list(model.language_codes)}
+    if model.smart:
+        cfg["mode"] = "smart"
+    else:
+        mode: Dict[str, Any] = {"type": "verbatim"}
+        if model.diarization:
+            mode["diarization_mode"] = "speaker"
+        if model.word_timestamps:
+            mode["timestamp_granularities"] = ["word"]
+        cfg["mode"] = mode
+    if vocabulary and model.custom_vocabulary and not model.uses_word_features:
+        cfg["custom_vocabulary"] = vocabulary
+    return cfg
 
 
 def _interaction_output_text(payload: Dict[str, Any]) -> str:
@@ -1335,21 +1427,94 @@ def _interaction_output_text(payload: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _transcribe_chunk_interactions(model: TranscribeOnlyModel, cloud_ref, vocabulary: List[str], max_retries: int = 3) -> Tuple[str, bool]:
+def _parse_offset_ms(value) -> Optional[int]:
+    """'12.345s' (protobuf Duration JSON) -> 12345 ms; None if unparseable."""
+    try:
+        return int(round(float(str(value).rstrip("s")) * 1000))
+    except (TypeError, ValueError):
+        return None
+
+
+def _speaker_display_label(raw: str) -> str:
+    """'spk_2' -> 'Speaker 2' (the label format the speaker-ID stage expects)."""
+    m = re.search(r"(\d+)$", raw or "")
+    return f"Speaker {m.group(1)}" if m else (raw or "Speaker ?")
+
+
+# Without diarization, timestamped output is split into paragraphs at pauses
+# this long, or once a paragraph reaches TIMESTAMP_PARAGRAPH_MAX_WORDS.
+TIMESTAMP_PARAGRAPH_PAUSE_MS = 1500
+TIMESTAMP_PARAGRAPH_MAX_WORDS = 120
+
+
+def _format_word_annotations(payload: Dict[str, Any], model: TranscribeOnlyModel, chunk_offset_ms: int) -> str:
+    """Build a turn-structured transcript from word_info annotations.
+
+    Diarization -> one paragraph per speaker turn, "Speaker N [MM:SS]: ..."
+    (timestamp only when word timestamps are on). Timestamps alone ->
+    paragraphs split at pauses, each prefixed "[MM:SS]". Offsets are shifted
+    by chunk_offset_ms so they're relative to the whole recording.
+    Returns "" when the response carries no word annotations."""
+    words = [
+        a
+        for step in payload.get("steps") or []
+        for content in step.get("content") or []
+        for a in content.get("annotations") or []
+        if a.get("type") == "word_info" and (a.get("text") or "").strip()
+    ]
+    if not words:
+        return ""
+
+    turns: List[Tuple[Optional[str], Optional[int], List[str]]] = []
+    prev_end = None
+    for w in words:
+        speaker = w.get("speaker") if model.diarization else None
+        start = _parse_offset_ms(w.get("start_offset"))
+        end = _parse_offset_ms(w.get("end_offset"))
+        if not turns:
+            new_turn = True
+        elif model.diarization:
+            new_turn = speaker != turns[-1][0]
+        else:
+            paused = start is not None and prev_end is not None and start - prev_end >= TIMESTAMP_PARAGRAPH_PAUSE_MS
+            new_turn = paused or len(turns[-1][2]) >= TIMESTAMP_PARAGRAPH_MAX_WORDS
+        if new_turn:
+            turns.append((speaker, start, []))
+        turns[-1][2].append(w["text"].strip())
+        prev_end = end if end is not None else prev_end
+
+    lines = []
+    for speaker, start, toks in turns:
+        text = re.sub(r"\s+([,.!?;:%])", r"\1", " ".join(toks))
+        ts = f"[{_fmt_audio_ts(chunk_offset_ms + start)}]" if model.word_timestamps and start is not None else ""
+        if model.diarization:
+            label = _speaker_display_label(speaker)
+            lines.append(f"{label} {ts}: {text}" if ts else f"{label}: {text}")
+        else:
+            lines.append(f"{ts} {text}" if ts else text)
+    return "\n\n".join(lines)
+
+
+def _transcribe_chunk_interactions(
+    model: TranscribeOnlyModel,
+    cloud_ref,
+    vocabulary: List[str],
+    chunk_offset_ms: int = 0,
+    max_retries: int = 3,
+) -> Tuple[str, bool]:
     """Transcribe one uploaded audio file with a dedicated speech-to-text model
     via the Interactions API. Returns (text, completed).
 
-    Verbatim mode (the default) keeps the downstream refinement and speaker-ID
-    stages working on the full spoken text; language is auto-detected so
-    code-switched calls work. Transient errors are retried with backoff."""
+    With diarization or word timestamps on, the transcript is rebuilt from
+    the per-word annotations (speaker turns / [MM:SS] markers); otherwise
+    the plain output text is used. Transient errors are retried with backoff."""
     import requests  # streamlit dependency
 
     body: Dict[str, Any] = {
         "model": model.model_id,
         "input": [{"type": "audio", "uri": cloud_ref.uri, "mime_type": cloud_ref.mime_type}],
     }
-    if vocabulary:
-        body["generation_config"] = {"transcription_config": {"custom_vocabulary": vocabulary}}
+    body["generation_config"] = {"transcription_config": _build_transcription_config(model, vocabulary)}
     headers = {"x-goog-api-key": os.environ.get("GEMINI_API_KEY", ""), "Content-Type": "application/json"}
     for attempt in range(max_retries):
         try:
@@ -1366,8 +1531,81 @@ def _transcribe_chunk_interactions(model: TranscribeOnlyModel, cloud_ref, vocabu
             raise Exception(f"{model.model_id} returned HTTP {resp.status_code}: {resp.text[:500]}")
         payload = resp.json()
         status = str(payload.get("status") or "completed").lower()
-        return _interaction_output_text(payload), status == "completed"
+        text = ""
+        if model.uses_word_features:
+            text = _format_word_annotations(payload, model, chunk_offset_ms)
+        return text or _interaction_output_text(payload), status == "completed"
     return "", False
+
+def _render_transcribe_options(state: "AppState") -> None:
+    """Settings for the dedicated transcribe models. Mirrors the API rules in
+    _build_transcription_config: smart mode excludes diarization/timestamps,
+    and those two exclude custom vocabulary."""
+    with st.container(border=True):
+        st.caption("**Gemini 3.5 Transcribe options**")
+        state.transcribe_mode = st.radio(
+            "Transcription mode",
+            TRANSCRIBE_MODES,
+            key="tx_mode",
+            index=TRANSCRIBE_MODES.index(state.transcribe_mode) if state.transcribe_mode in TRANSCRIBE_MODES else 0,
+            horizontal=True,
+            help="**Verbatim**: every word as spoken, including fillers and false starts — "
+                 "required for diarization and timestamps.  \n**Smart**: removes fillers and "
+                 "stutters, resolves spoken self-corrections, and formats numbers, dates, and lists.",
+        )
+        smart = state.transcribe_mode == "Smart"
+        # Incompatible options are hidden rather than shown disabled (a
+        # disabled toggle keeps displaying its old value). Their stored
+        # values are left alone and ignored by _build_transcription_config.
+        if smart:
+            st.caption("Speaker diarization and word timestamps need Verbatim mode.")
+        else:
+            state.transcribe_diarization = st.toggle(
+                "Speaker diarization",
+                key="tx_diarization",
+                value=state.transcribe_diarization,
+                help="Labels who is speaking (Speaker 1, Speaker 2, …; up to 8 speakers, 3+ is "
+                     "experimental). It's on/off only — the API takes no speaker count or names. "
+                     "Put participant names in the Speakers field: the speaker-label refinement step "
+                     "maps the labels to those names and lets you confirm them. Limits each audio "
+                     "request to 30 minutes.",
+            )
+            state.transcribe_word_timestamps = st.toggle(
+                "Word-level timestamps",
+                key="tx_word_timestamps",
+                value=state.transcribe_word_timestamps,
+                help="Adds [MM:SS] markers at the start of each speaker turn (or paragraph). Google "
+                     "notes timestamps may slightly reduce accuracy. Limits each audio request to 30 minutes.",
+            )
+        word_features = not smart and (state.transcribe_diarization or state.transcribe_word_timestamps)
+        if word_features:
+            st.caption("Custom vocabulary is unavailable with diarization or timestamps (API restriction).")
+        else:
+            state.transcribe_custom_vocabulary = st.toggle(
+                "Custom vocabulary from Speakers field",
+                key="tx_custom_vocabulary",
+                value=state.transcribe_custom_vocabulary,
+                help="Biases recognition toward the names, companies, and terms you list in the "
+                     "Speakers field (comma-separated).",
+            )
+        lang_options = list(TRANSCRIBE_LANGUAGE_OPTIONS) + [
+            c for c in state.transcribe_language_codes if c not in TRANSCRIBE_LANGUAGE_OPTIONS
+        ]
+        state.transcribe_language_codes = st.multiselect(
+            "Languages (optional)",
+            lang_options,
+            key="tx_language_codes",
+            default=state.transcribe_language_codes,
+            format_func=lambda c: f"{TRANSCRIBE_LANGUAGE_OPTIONS[c]} ({c})" if c in TRANSCRIBE_LANGUAGE_OPTIONS else c,
+            accept_new_options=True,
+            placeholder="Auto-detect",
+            help="Leave empty to auto-detect (handles code-switching, e.g. Hindi-English). "
+                 "If you know the language(s), selecting them improves accuracy. Any supported "
+                 "BCP-47 code can be typed in.",
+        )
+        if word_features:
+            st.caption("Audio is sent in chunks of at most 30 minutes while diarization or timestamps are on.")
+
 
 def is_mobile_device() -> bool:
     """Check if likely a mobile device based on viewport. Returns False on server-side."""
@@ -1533,6 +1771,10 @@ def _transcribe_audio_bytes(
         raise ValueError(f"Failed to process audio file. It may be corrupted or in an unsupported format. Details: {audio_err}")
 
     chunk_length_ms = max(1, chunk_minutes) * 60 * 1000
+    if dedicated_asr:
+        # Each request (chunk + leading overlap) must fit the model's audio
+        # limit: 30 minutes with diarization/timestamps, 1 hour otherwise.
+        chunk_length_ms = min(chunk_length_ms, transcription_model.max_request_ms - TRANSCRIBE_OVERLAP_MS)
     # Chunks after the first start TRANSCRIBE_OVERLAP_MS early so the sentences
     # at each boundary appear in two chunks; strip_overlap() removes the
     # duplicated words at join time.
@@ -1576,7 +1818,7 @@ def _transcribe_audio_bytes(
                     for attempt in range(TRANSCRIBE_CHUNK_ATTEMPTS):
                         if dedicated_asr:
                             attempt_text, completed = _transcribe_chunk_interactions(
-                                transcription_model, cloud_ref, vocabulary
+                                transcription_model, cloud_ref, vocabulary, chunk_offset_ms=chunk_start
                             )
                         else:
                             response = generate_with_retry(
@@ -1628,6 +1870,13 @@ def _transcribe_audio_bytes(
                 merged_transcripts.append(t.strip())
         raw_transcript = "\n\n".join(merged_transcripts).strip()
 
+        if dedicated_asr and transcription_model.diarization and not transcription_model.smart and len(audio_chunks) > 1:
+            warnings.append(
+                f"ℹ️ Speaker diarization ran separately on each of {len(audio_chunks)} audio chunks, so "
+                "'Speaker 1' in one chunk may be a different person from 'Speaker 1' in another. "
+                "Use the speaker-label refinement step to confirm names, or raise the audio chunk "
+                "length (up to 30 min) to reduce chunk boundaries."
+            )
         if suspect_ranges:
             warnings.append(
                 f"⚠️ Transcription may be incomplete for audio range(s): {', '.join(suspect_ranges)}. "
@@ -1660,7 +1909,7 @@ def _load_source_text(state: AppState, status_ui, progress: ProgressTracker) -> 
     process_and_save_task so the speaker-ID flow can reuse it without
     duplicating subtle behaviour (whitespace normalisation, cloud cleanup, etc.).
     """
-    transcription_model = _get_transcription_model(state.transcription_model)
+    transcription_model = _get_transcription_model(state)
     progress.update("prepare", 0, "Loading input...")
 
     raw_transcript, file_name = "", "Pasted Text"
@@ -2402,7 +2651,7 @@ def _transcribe_context_audio(state: AppState) -> None:
     if not audio_bytes:
         return
 
-    transcription_model = _get_transcription_model(state.transcription_model)
+    transcription_model = _get_transcription_model(state)
     with st.status("Transcribing context voice note...", expanded=True) as status:
         bar = st.progress(0.0)
 
@@ -2694,9 +2943,11 @@ def render_input_and_processing_tab(state: AppState):
                     TRANSCRIPTION_MODEL_OPTIONS,
                     index=TRANSCRIPTION_MODEL_OPTIONS.index(_tx_default),
                     help="Used for audio files. Gemini 3.5 Transcribe is Google's dedicated "
-                         "speech-to-text model (85+ languages, code-switching); the Speakers field "
-                         "is passed to it as custom vocabulary for names and terms.",
+                         "speech-to-text model (85+ languages, code-switching), with optional "
+                         "speaker diarization, word timestamps, and custom vocabulary.",
                 )
+                if state.transcription_model in TRANSCRIBE_ONLY_MODELS:
+                    _render_transcribe_options(state)
                 state.chat_model = st.selectbox("Chat Model", list(AVAILABLE_MODELS.keys()), index=list(AVAILABLE_MODELS.keys()).index(state.chat_model), help="Used for chatting with the final output.")
 
             st.divider()
