@@ -1529,27 +1529,45 @@ def _transcribe_chunk_interactions(
     the plain output text is used. Transient errors are retried with backoff."""
     client = _get_genai_client()
     audio = {"type": "audio", "uri": cloud_ref.uri, "mime_type": cloud_ref.mime_type}
-    config = {"transcription_config": _build_transcription_config(model, vocabulary)}
-    for attempt in range(max_retries):
+    request: Dict[str, Any] = {
+        "model": model.model_id,
+        "input": [{"type": "user_input", "content": [audio]}],
+        "generation_config": {"transcription_config": _build_transcription_config(model, vocabulary)},
+    }
+    # Once a bare request has worked this session, skip the doomed full one.
+    bare_retried = bool(st.session_state.get("_transcribe_bare_ok"))
+    if bare_retried:
+        request.pop("generation_config", None)
+    attempt = 0
+    while True:
         try:
-            interaction = client.interactions.create(
-                model=model.model_id,
-                input=[{"type": "user_input", "content": [audio]}],
-                generation_config=config,
-            )
+            interaction = client.interactions.create(**request)
             break
         except Exception as e:
+            # Since 2026-10-07 the API rejects transcribe requests with
+            # "Thinking is not enabled for this model" (server regression).
+            # Retry once with the minimal documented request — no
+            # generation_config at all — in case the config triggers it.
+            # Options (mode, diarization, vocabulary) are lost on that path.
+            if not bare_retried and "thinking is not enabled" in str(e).lower():
+                bare_retried = True
+                request.pop("generation_config", None)
+                continue
+            attempt += 1
+            if attempt >= max_retries:
+                raise Exception(f"{model.model_id}: {e}")
             transient = getattr(e, "status_code", None) in (429, 500, 503, 504) or any(
                 kw in str(e).lower() for kw in ("timeout", "timed out", "connection")
             )
-            if transient and attempt < max_retries - 1:
-                time.sleep(2 ** (attempt + 1))
-                continue
-            raise Exception(f"{model.model_id}: {e}")
+            if not transient:
+                raise Exception(f"{model.model_id}: {e}")
+            time.sleep(2 ** attempt)
+    if "generation_config" not in request:
+        st.session_state["_transcribe_bare_ok"] = True
     payload = interaction.model_dump(mode="json", exclude_none=True)
     status = str(payload.get("status") or "completed").lower()
     text = ""
-    if model.uses_word_features:
+    if model.uses_word_features and "generation_config" in request:
         text = _format_word_annotations(payload, model, chunk_offset_ms)
     return text or _interaction_output_text(payload), status == "completed"
 
@@ -1900,7 +1918,14 @@ def _transcribe_audio_bytes(
                 merged_transcripts.append(t.strip())
         raw_transcript = "\n\n".join(merged_transcripts).strip()
 
-        if dedicated_asr and transcription_model.diarization and not transcription_model.smart and len(audio_chunks) > 1:
+        if dedicated_asr and st.session_state.get("_transcribe_bare_ok"):
+            warnings.append(
+                f"⚠️ {transcription_model.model_id} rejected requests carrying transcription options "
+                "(\"Thinking is not enabled for this model\"), so it ran with default settings — "
+                "Verbatim mode, auto-detected language; your mode, diarization, timestamp, language, "
+                "and vocabulary options were not applied."
+            )
+        elif dedicated_asr and transcription_model.diarization and not transcription_model.smart and len(audio_chunks) > 1:
             warnings.append(
                 f"ℹ️ Speaker diarization ran separately on each of {len(audio_chunks)} audio chunks, so "
                 "'Speaker 1' in one chunk may be a different person from 'Speaker 1' in another. "
